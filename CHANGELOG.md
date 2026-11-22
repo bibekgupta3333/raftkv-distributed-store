@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- 2026-11-21: **Re-scoped as a learning project.** Speed is no longer a goal. Milestones are now M0–M7: the old M7
+  (performance) is gone and the old M8 is now M7. Most decisions are now Decided; only D-22 (license) is open.
+  All docs are shorter. `WBS.md` went from 391 to 201 tasks and the estimate is about 25 weeks.
+- 2026-11-21: Renamed `docs/testing-benchmarks.md` to `docs/testing.md`.
+- 2026-11-21: Simplified the design: snapshots restart instead of resuming (no `SnapshotProgress`), disk-full
+  crashes the node like any other write error, sessions use an explicit `RegisterSession`, and the leader fsyncs
+  before replicating.
+
+### Removed
+- 2026-11-21: Performance targets, benchmark methodology, the `bench.yml` and `release.yml` workflows, and the
+  40M-op / 1,500-fault campaign rules.
+- 2026-11-21: Production-only scope: mTLS, release signing, rolling upgrades, multi-zone placement, CI budget.
+  Decisions D-13, D-15, D-20, D-37, D-39–D-42, D-44, D-45 removed; their IDs are not reused.
+
 ### Added
 - 2026-11-21: Initial design-phase documentation: `README.md`, `docs/design-decisions.md` (decisions D-01–D-24,
   performance targets, open questions), `docs/architecture.md`, `docs/system-design.md`, `docs/api-design.md`,
