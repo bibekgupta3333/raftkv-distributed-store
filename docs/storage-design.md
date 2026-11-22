@@ -1,19 +1,16 @@
 # RaftKV Storage Design
 
-Status: Draft v0.1. This doc depends on [design-decisions.md](design-decisions.md), which is binding. Decision IDs (`D-xx`) are cited where this doc relies on them.
-Related docs: [architecture.md](architecture.md), [system-design.md](system-design.md), [api-design.md](api-design.md), [testing-benchmarks.md](testing-benchmarks.md), [implementation-roadmap.md](implementation-roadmap.md), [WBS.md](WBS.md).
+Builds on [design-decisions.md](design-decisions.md) (`D-xx`). Related: [architecture.md](architecture.md), [system-design.md](system-design.md), [api-design.md](api-design.md), [testing.md](testing.md).
 
-Each RaftKV member has three durable artifacts:
+Each member keeps three things on disk:
 
-| Artifact | Role | Owner package | Decision |
-|----------|------|---------------|----------|
-| **WAL** (segmented files) | Source of truth for the Raft log and Raft hard state | `internal/wal` | D-03 |
-| **State machine** (Pebble, WAL disabled) | Materialized KV state + `appliedIndex` + membership + sessions | `internal/storage` | D-02, D-04 |
-| **Snapshots** (Pebble checkpoints + metadata) | Log compaction, follower catch-up | `internal/snapshot` | D-14 |
+| Artifact | Role | Package | Decision |
+|----------|------|---------|----------|
+| **WAL** (segment files) | Source of truth for the Raft log and hard state | `internal/wal` | D-03 |
+| **State machine** (Pebble, WAL off) | KV data + `appliedIndex` + membership + sessions | `internal/storage` | D-02, D-04 |
+| **Snapshots** (Pebble checkpoints + metadata) | Log trimming, follower catch-up | `internal/snapshot` | D-14 |
 
-**Durability contract, in one sentence.** Everything Raft promises (votes, accepted entries, installed snapshots) is made durable by an **fsync of the WAL or the snapshot files before the corresponding RPC reply leaves the node**. Pebble never needs its own WAL, because any Pebble state lost in a crash can be rebuilt by re-applying WAL entries above the durable `appliedIndex` (D-03, D-04).
-
-No performance numbers appear in this document. Every tunable value is a starting point to be benchmarked in M7 on the reference hardware (D-20, still Open). See [testing-benchmarks.md](testing-benchmarks.md).
+**Durability rule in one sentence.** Everything Raft promises (votes, accepted entries, installed snapshots) is **fsynced to the WAL or snapshot files before the reply leaves the node**. Pebble needs no WAL of its own, because any Pebble state lost in a crash is rebuilt by re-applying WAL entries above the durable `appliedIndex` (D-03, D-04).
 
 ---
 
@@ -21,393 +18,285 @@ No performance numbers appear in this document. Every tunable value is a startin
 
 ### 1.1 Segments
 
-* The WAL is a sequence of **segment files**, each **preallocated to 64 MiB** with `fallocate(2)` (D-03). The logical size grows inside the preallocated extent, and the end of valid data is found by scanning (§1.6).
-* Segments are append-only. A sealed segment is never modified. A segment's records may logically override records in earlier segments, for example when a conflicting suffix is replaced (§1.7).
-* **Naming:** `wal-<seq:016x>-<firstIndex:016x>.seg`
-  * `seq` is a monotonically increasing segment sequence number that starts at 1 and has no gaps.
-  * `firstIndex` is the Raft index of the first `ENTRY` record the segment may contain, which is the WAL's `lastIndex + 1` at creation time.
-  * Example: `wal-000000000000002a-00000000004c4b41.seg`.
-  * Lexicographic order equals `seq` order. Recovery checks that `seq` values are contiguous, and a gap is fatal (§4).
-* **Pre-creation.** A background goroutine always keeps the *next* segment ready as `wal-next.tmp`: preallocated, header written, and fsynced. That keeps `fallocate` and file creation off the commit path, and if the disk is full the failure shows up early (§6.1).
-* **Rotation.** Rotation is triggered when the next record batch would push the active segment past 64 MiB. A single record batch is never split across segments. Steps:
-  1. fsync the active segment. It is now sealed.
-  2. `rename(wal-next.tmp → wal-<seq+1>-<firstIndex>.seg)`, after patching `firstIndex` and the header CRC in the header with `pwrite` and fsyncing.
-  3. fsync the `wal/` directory, so the rename is durable.
-  4. Write the **segment preamble** (§1.4) into the new segment.
-  5. Ask the background goroutine to create the next `wal-next.tmp`.
+- The WAL is a sequence of append-only **segment files** of up to 64 MiB (D-03). A full segment is sealed and never changed.
+- **Naming:** `wal-<seq:016x>-<firstIndex:016x>.seg`. `seq` starts at 1 with no gaps. `firstIndex` is the first entry index the segment may hold. Sorting by name sorts by `seq`; a gap is fatal (§5).
+- **Rotation**, when the next write would pass 64 MiB (a write is never split across segments):
+  1. fsync the active segment (now sealed).
+  2. Create the next segment, write its header and preamble (§1.4), fsync it.
+  3. fsync the `wal/` directory so the new file is durable.
 
-  A crash at any point leaves either the old segment as last, with a stray `wal-next.tmp` that recovery deletes, or the new segment with a possibly empty or torn preamble, which tail-truncation handles.
+  A crash during rotation leaves either the old segment last, or a new segment with a torn preamble that the tail rule handles.
 
-### 1.2 Segment header (64 bytes, at offset 0)
+### 1.2 Segment header (64 bytes)
 
-All integers are little-endian.
+Little-endian.
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | 0 | 8 | `magic` | ASCII `RKVWAL01` |
-| 8 | 4 | `format_version` | `1` |
-| 12 | 4 | `flags` | reserved, `0` |
-| 16 | 8 | `seq` | segment sequence number (must match file name) |
-| 24 | 8 | `first_index` | must match file name |
-| 32 | 8 | `cluster_id` | must match `META` |
-| 40 | 8 | `member_id` | must match `META` |
-| 48 | 12 | `reserved` | zero |
+| 8 | 8 | `seq` | must match the file name |
+| 16 | 8 | `first_index` | must match the file name |
+| 24 | 8 | `cluster_id` | must match `META` |
+| 32 | 8 | `member_id` | must match `META` |
+| 40 | 20 | `reserved` | zero |
 | 60 | 4 | `header_crc` | CRC32C over bytes `[0, 60)` |
 
-Any header mismatch is treated as corruption (§1.6). A header mismatch in a stray `wal-next.tmp` just means the file is deleted.
+A header mismatch is corruption (§1.5).
 
 ### 1.3 Record format
 
 Records start at offset 64 and are **8-byte aligned**.
 
-| Offset (rel.) | Size | Field | Description |
-|---------------|------|-------|-------------|
-| 0 | 4 | `length` | `uint32` payload length in bytes (`L`). Must be ≤ `MaxRecordPayload` = 8 MiB (sanity cap > the 4 MiB batch limit in D-11). A larger value is corruption. |
-| 4 | 4 | `crc` | CRC32C (Castagnoli, hardware-accelerated) over `length ‖ type ‖ flags ‖ reserved ‖ term ‖ index ‖ payload`, i.e. every record byte except this field and padding |
-| 8 | 1 | `type` | Record type (§1.4). `0` is **invalid**, so a zero-filled preallocated region can never parse as a record. |
-| 9 | 1 | `flags` | bit0 = `PAYLOAD_COMPRESSED` (reserved for future; must be 0 in format v1); others 0 |
-| 10 | 2 | `reserved` | zero |
-| 12 | 8 | `term` | Raft term (semantics per type) |
-| 20 | 8 | `index` | Raft index (semantics per type) |
-| 28 | `L` | `payload` | type-specific protobuf encoding |
-| 28+`L` | 0–7 | `padding` | zero bytes up to the next 8-byte boundary |
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 4 | `length` | payload length `L`. Must be ≤ 8 MiB; larger is corruption |
+| 4 | 4 | `crc` | CRC32C over `length ‖ type ‖ reserved ‖ term ‖ index ‖ payload` |
+| 8 | 1 | `type` | record type (§1.4). `0` is invalid |
+| 9 | 3 | `reserved` | zero |
+| 12 | 8 | `term` | Raft term (meaning depends on type) |
+| 20 | 8 | `index` | Raft index (meaning depends on type) |
+| 28 | `L` | `payload` | protobuf |
+| 28+`L` | 0–7 | padding | zeros to the next 8-byte boundary |
 
-The header is 28 bytes. Total record size is `align8(28 + L)`.
-
-The `crc` covers `length`, so a bit flip in `length` is detected when the CRC check fails over the misread span. `term` and `index` live in the fixed header, which lets recovery and the conflict-truncation logic scan without decoding protobuf.
+The CRC covers `length`, so a flipped length bit is caught. `term` and `index` are in the fixed header, so recovery can scan without decoding protobuf.
 
 ### 1.4 Record types
 
-| `type` | Name | `term` / `index` header fields | Payload | Written when |
-|--------|------|-------------------------------|---------|--------------|
-| 1 | `ENTRY` | entry term / entry index | `raftkv.v1.Entry` ([api-design.md](api-design.md) §8.1) | Each log entry appended by the Raft `Ready` loop |
-| 2 | `HARD_STATE` | `currentTerm` / `commitIndex` | `HardState{term, voted_for, commit}` | Whenever `term` or `voted_for` changes, and piggybacked whenever `commit` advanced in the same `Ready` (§2) |
-| 3 | `SNAPSHOT_MARKER` | snapshot `last_included_term` / `last_included_index` | `SnapshotMarker{index, term, snapshot_id, config}` | After a snapshot is installed (§4.5), and after a local snapshot is taken and the log is compacted (§1.8) |
-| 4 | `MEMBERSHIP` | `config_index`'s term / `config_index` | `raftkv.v1.ClusterConfig` | In every segment preamble. Membership is *also* carried by `ENTRY_CONF_CHANGE` entries. This record exists so that deleting old segments never loses the effective configuration (Raft uses the latest config in the log, committed or not, D-06). |
-| 5 | `CRC_SEAL` | 0 / 0 | `{segment_seq, records, bytes}` | Last record of a sealed segment, optional. If present, it proves the segment ended cleanly. |
-| 6–255 | reserved | | | An unknown type is fatal corruption, never skipped. |
+| `type` | Name | `term` / `index` | Payload | Written when |
+|--------|------|------------------|---------|--------------|
+| 1 | `ENTRY` | entry term / index | `raftkv.v1.Entry` ([api-design.md](api-design.md) §8.1) | Each appended log entry |
+| 2 | `HARD_STATE` | term / commit | `HardState{term, voted_for, commit}` | When term or vote changes, and with any Ready that advanced commit |
+| 3 | `SNAPSHOT_MARKER` | snapshot term / index | `{index, term, config}` | After a snapshot is installed or the log is trimmed |
+| 4 | `MEMBERSHIP` | config entry's term / index | `ClusterConfig` | In every segment preamble, so deleting old segments never loses the config |
+| 5–255 | reserved | | | Unknown type is corruption, never skipped |
 
-**Segment preamble.** These are the first records of every new segment, written in one batch and fsynced with it: `SNAPSHOT_MARKER` (current log start), then `MEMBERSHIP` (latest config in the log), then `HARD_STATE` (current). Each segment is therefore **self-describing**, and all earlier segments can be deleted without losing state (§1.8).
+**Segment preamble.** Every new segment starts with `SNAPSHOT_MARKER` (current log start), `MEMBERSHIP` (latest config), and `HARD_STATE`, written and fsynced together. Each segment describes itself, so older ones can be deleted.
 
-### 1.5 Group commit and fsync policy (D-03, D-13)
+### 1.5 Writing a Ready
 
-The Raft core is a pure state machine (D-01). The node's **storage goroutine** handles each `Ready` as follows:
+For each `Ready` the driver:
 
-1. Encode all new `ENTRY` records, plus a `HARD_STATE` record if `term`, `vote` or `commit` changed, into one contiguous buffer.
-2. Write it with one `write(2)` (or `pwritev`) to the active segment.
-3. Call **one `fdatasync(2)`** for the whole buffer. fdatasync is sufficient because the file size and extent allocation do not change (preallocated). Writing into an unwritten extent still forces the extent-state metadata that fdatasync covers. On macOS dev boxes, `F_FULLFSYNC` is used, and macOS is not a production target.
-4. Only after fdatasync returns: hand the persisted entries back to the Raft core (`Advance`). Responses that required durability (§2) are released.
+1. Encodes all new `ENTRY` records, plus a `HARD_STATE` record if term, vote, or commit changed, into one buffer.
+2. Writes it to the active segment.
+3. Calls **one fsync** for the whole buffer.
+4. Only then sends replies that depend on it, and calls `Advance` (see [architecture.md §4.2](architecture.md#42-the-ready-loop)).
 
-**Natural batching.** While one fdatasync is in flight, new proposals and incoming `AppendEntries` keep accumulating in the next `Ready`. Under load, each fsync covers many entries automatically. Batch bounds:
+While one fsync runs, new work collects in the next Ready, so one fsync can cover many entries. There is no "fsync off" mode outside the simulator.
 
-| Knob | Starting value | Notes |
-|------|----------------|-------|
-| `wal.max_batch_bytes` | 4 MiB | Same as the Raft entry batch limit (D-11) |
-| `wal.max_batch_entries` | 4,096 | Bound on per-batch work |
-| `wal.group_commit_delay` | 0 (off) | Optional artificial wait (0–500 µs to be evaluated in M7) to grow batches at low concurrency. Off by default, because it adds latency at low load. |
-| `wal.write_mode` | buffered + fdatasync | `O_DIRECT`/`O_DSYNC` variants to be evaluated in M7 as separate changes (D-13 rule: one optimization per change). |
+### 1.6 Torn writes and corruption
 
-**Leader parallel write (D-13, dissertation §10.2.1).** The leader may send `AppendEntries` for entries *before* its own fdatasync finishes. It counts **itself** toward the commit quorum only after its fdatasync completes. Followers always fsync before acking. Commit therefore always means "durable on a majority".
+Each segment is read from offset 64. A record is bad if: fewer than 28 bytes remain or `28+L` runs past the file end; `length > 8 MiB` or an unknown `type`; the CRC does not match; or entry indexes/terms go backwards in an impossible way.
 
-**Never ack before fsync.** There is no "fsync off" mode in production builds. A test-only `wal.unsafe_no_sync` flag exists for simulation (D-18). It is compiled out of release builds with a build tag.
+**Torn tail (recoverable)** only if **both** hold:
 
-### 1.6 Torn-write and corruption detection, tail truncation
+1. The bad record is in the **last** segment.
+2. No valid record follows it in that segment.
 
-Every segment is read sequentially from offset 64. For each position:
+Then the WAL truncates the file at the last good record, fsyncs, and logs how many bytes were dropped. This is safe: a torn record was never fsynced, so no ack, vote, or commit was based on it. The leader re-sends lost entries.
 
-| Observation | Classification |
-|-------------|----------------|
-| `length == 0 && type == 0` and the rest of the segment (or at least the next 4 KiB page) is all zeros | **Clean end of data** |
-| Fewer than 28 bytes remain, or `28+L` exceeds the remaining file | Truncated record |
-| `length > MaxRecordPayload` or `type ∉ {1..5}` | Garbage header |
-| CRC mismatch | Corrupt record |
-| `ENTRY` index not equal to `prev_index + 1` and not ≤ `prev_index` (conflict rewrite, §1.7) | Logical corruption |
-| `ENTRY` term lower than the previous `ENTRY` term at a higher index | Logical corruption |
-
-**Tail-truncation rule (torn write).** An anomaly is a **recoverable torn tail** only if *all* of the following hold:
-
-1. It is in the **last** segment (the highest `seq`).
-2. No valid record exists after it in that segment. The scanner looks ahead at every 8-byte-aligned offset to the end of the preallocated extent or to a bounded lookahead of 4 MiB + 28 bytes (larger than any single batch), and finds no CRC-valid record.
-3. It lies within the last unsynced write batch. Since we cannot know that exactly, condition 2 stands in for it: a torn write only affects the trailing batch.
-
-When the rule applies, the WAL **zero-fills from the anomaly offset to the end of the segment**, fsyncs, and continues. Zero-filling, unlike `ftruncate`, keeps the preallocation. `raftkv_wal_tail_truncations_total` is incremented and the lost byte count is logged.
-
-Losing these records is **safe**. A record in a torn tail was never fsynced, so no ack, vote or commit was ever based on it (§2). The leader will re-send any lost entries.
-
-**Anything else is fatal corruption.** That covers a CRC failure in a sealed segment, a CRC failure followed by valid records, a header mismatch, a `seq` gap, and logical corruption. The node **refuses to start**: it exits with code `78` (EX_CONFIG-like "data corrupt") and logs the segment, offset, and reason. It must never truncate silently, because doing so could drop entries this node acknowledged and break the quorum durability guarantee. Recovery is an operator action. See the storage failure table (§7): remove the member, wipe its data, and re-add it as a learner (D-06).
+**Anything else is fatal corruption** (D-33): a bad record followed by valid ones, a bad sealed segment, a header mismatch, a `seq` gap. The node **refuses to start** (exit code 78) and logs the segment, offset, and reason. It never truncates silently, because that could drop entries it already acknowledged. Fix: remove the member, wipe its data, re-add it as a learner (D-06, D-32).
 
 ### 1.7 Log conflict truncation
 
-When a follower receives `AppendEntries` whose entries conflict with its own suffix (same index, different term), it **does not rewrite old segments**. It appends the new entries with their (lower) indexes to the active segment. On replay, an `ENTRY` with index `i` **discards all previously replayed entries with index ≥ i**. The in-memory log and the replay logic both apply this rule. Committed entries can never be conflict-truncated, by Raft's Log Matching property. Replay asserts `i > commitIndex` from the latest `HARD_STATE` seen so far, and a violation is fatal.
+When a follower gets entries that conflict with its suffix (same index, different term), it **does not rewrite old segments**. It appends the new entries to the active segment. On replay, an `ENTRY` with index `i` discards all earlier replayed entries with index ≥ `i`. Committed entries can never conflict (Log Matching), so replay asserts `i > commitIndex` and treats a violation as fatal.
 
-### 1.8 WAL truncation after snapshot
+### 1.8 Trimming the WAL after a snapshot (D-30)
 
-Segments are deleted whole, never partially. A segment `s` may be deleted when **all** of these hold:
+Segments are deleted whole. Segment `s` may be deleted only when:
 
-* `s.lastIndex ≤ truncateIndex`, where
-  `truncateIndex = min(snapshotIndex, durableAppliedIndex) − retain_entries`, and
-  * `snapshotIndex` is the index of the newest **complete, fsynced** local snapshot (§4).
-  * `durableAppliedIndex` is the `appliedIndex` that is durable in Pebble, i.e. as of the last completed Pebble flush (§2.3). Because Pebble runs without a WAL, unflushed applies are lost on crash and must be replayable from the WAL.
-  * `retain_entries` is a catch-up buffer (starting value 50,000 entries) that lets briefly lagging followers catch up with `AppendEntries` instead of a full snapshot.
-* `s` is not the active segment. Later segments carry a preamble, so state is never lost.
-* The leader is not currently streaming entries from `s` to a follower. A reference count is held by the replication reader, and deletion is deferred until it drops.
-
-The `durableAppliedIndex` term is the **critical invariant INV-TRUNC**. §2.4 specifies how it is tracked and enforced: a synchronous Pebble `Flush()` is made immediately before every truncation, and a bound assertion inside the WAL API fail-stops on violation.
+- `s.lastIndex ≤ min(snapshotIndex, durableAppliedIndex) − retain_entries`, where
+  - `snapshotIndex` is the newest **complete, fsynced** local snapshot,
+  - `durableAppliedIndex` is the `appliedIndex` that Pebble has **flushed to disk** (§2.4),
+  - `retain_entries` (10,000) lets briefly lagging followers catch up from the log;
+- `s` is not the active segment;
+- the leader is not currently reading `s` to send entries.
 
 Procedure:
 
-0. `db.Flush()`, credit `durableAppliedIndex`, and compute `truncateIndex` (§2.4).
-1. Write a `SNAPSHOT_MARKER{index = snapshotIndex}` to the active segment and fsync.
-2. `unlink` the eligible segments in ascending `seq` order.
-3. fsync `wal/`.
+1. `db.Flush()`, update `durableAppliedIndex`, compute the bound.
+2. Write a `SNAPSHOT_MARKER` to the active segment and fsync.
+3. Delete eligible segments in `seq` order.
+4. fsync `wal/`.
 
-A crash midway leaves a prefix of segments deleted. Recovery tolerates a missing *prefix* and treats it as a `seq` gap only if it is not at the start.
-
-The snapshot trigger is every 100k entries or 512 MiB of WAL, whichever comes first (D-14).
+A crash midway leaves a prefix deleted, which recovery accepts.
 
 ---
 
-## 2. Raft hard state persistence
+## 2. Hard state and apply durability
 
-`HardState = {currentTerm, votedFor, commitIndex}` is stored as `HARD_STATE` records in the WAL, and the **last valid one wins**. It is written in the same fdatasync batch as the entries of the same `Ready`. Since there is no separate file, there is no ordering problem between files.
+`HardState = {currentTerm, votedFor, commitIndex}` is stored as `HARD_STATE` records in the WAL; **the last valid one wins**. It goes in the same fsync as the entries of the same Ready, so there is no ordering problem between files.
 
 ### 2.1 What must be durable before which reply
 
-| Event / RPC | Must be fsynced **before** the reply or action | Why |
-|-------------|------------------------------------------------|-----|
-| Granting `RequestVote` (real vote) | `HARD_STATE{term, votedFor=candidate}` | If a voter crashed and forgot its vote, it could vote twice in one term, which allows two leaders. |
-| Any reply or message carrying a **higher term** than previously persisted (vote reject, AppendEntries reject, heartbeat response) | `HARD_STATE{term, votedFor=0}` | The term must never go backwards after restart, or stale leaders could be accepted. |
-| Becoming candidate (incrementing term, voting for self) | `HARD_STATE{term+1, votedFor=self}` before sending `RequestVote` | Same as above |
-| `AppendEntries` `success=true` | All appended `ENTRY` records (and any term change) | The leader counts this ack toward commit. Commit requires a durable majority. |
-| Leader counting itself in the commit quorum | Its own `ENTRY` records | Same as above (D-13 parallel write) |
-| `InstallSnapshot` `installed=true` | Snapshot files + `sm/CURRENT` swap + WAL `SNAPSHOT_MARKER` + `HARD_STATE{commit ≥ snapshot index}` (§4.5) | The leader advances `matchIndex` to the snapshot index |
-| `SnapshotProgress` offset | The staging file data up to that offset | The resume point must not be ahead of durable data |
-| **Pre-vote** (grant or reject) | **Nothing.** PreVote must not change term or vote (D-08). | |
-| `TimeoutNow` | Nothing. The resulting candidacy follows the "becoming candidate" row. | |
-| Heartbeat with no entries and no term change | Nothing | |
-| Client write `OK` | Nothing additional. The entry is already quorum-durable at commit. The leader's Pebble apply is `NoSync` (§2.3). | |
-| Advancing `commitIndex` | **Not required** before anything. It is written lazily in the next batch. | After a restart commit is re-learned from the leader. Locally it is recovered as `max(persisted commit, durableAppliedIndex)`. |
+| Event | Must be fsynced **before** | Why |
+|-------|---------------------------|-----|
+| Granting a vote | `HARD_STATE{term, votedFor=candidate}` | A voter that forgot its vote could vote twice, allowing two leaders |
+| Any message carrying a **higher term** than persisted | `HARD_STATE{term, votedFor=0}` | The term must never go backwards after a restart |
+| Becoming candidate | `HARD_STATE{term+1, votedFor=self}` before sending votes | Same |
+| Append ack (`success=true`) | The appended `ENTRY` records and any term change | The leader counts this ack toward commit |
+| Leader counting itself toward commit | Its own `ENTRY` records | Commit means durable on a majority |
+| `InstallSnapshot` `installed=true` | Snapshot files + `sm/CURRENT` swap + `SNAPSHOT_MARKER` + `HARD_STATE` (§4.4) | The leader advances `match` to the snapshot index |
+| PreVote grant or reject | **Nothing.** PreVote changes no state (D-08) | |
+| Heartbeat with no entries or term change | Nothing | |
+| Client write `OK` | Nothing extra. Already quorum-durable at commit | |
+| Advancing `commitIndex` | Not required. Written lazily | Re-learned from the leader after restart |
 
-### 2.2 Invariants checked on recovery
+### 2.2 Recovery checks
 
-* `commitIndex ≤ lastLogIndex`, or `commitIndex ≤ snapshotIndex` when the log is empty. A violation means entries were lost, which is fatal.
-* `durableAppliedIndex ≤ commitIndex` after recovery. If it is greater, recovery raises commit to it, since an index can only have been applied if it was committed.
-* `votedFor` refers to a member in some known config, or is 0.
+- `commitIndex ≤ lastLogIndex` (or `≤ snapshotIndex` if the log is empty). Otherwise entries were lost: fatal.
+- If `durableAppliedIndex > commitIndex`, raise commit to it (only committed entries are ever applied).
 
-### 2.3 Apply durability: Pebble with WAL disabled (D-03, D-04)
+### 2.3 Pebble with its WAL off (D-03, D-04)
 
-* Pebble is opened with `DisableWAL = true`. Every apply batch is committed with `pebble.NoSync`.
-* Pebble state becomes durable **only when a memtable flush completes**. Pebble fsyncs the sstables and the MANIFEST during flush and compaction.
-* After a crash, Pebble reopens at the state of the last completed flush. That state is internally consistent, because every batch carried its own `appliedIndex` and was atomic (D-04). The node re-applies WAL entries `(durableAppliedIndex, commitIndex]`.
-* Recovery time grows with the amount of unflushed state, so it is bounded by memtable size and an explicit **periodic flush** (`storage.flush_every_entries`, starting value 100,000, aligned with the D-14 snapshot cadence).
+- Pebble is opened with `DisableWAL = true`. Apply batches are committed without sync.
+- Pebble state is durable **only after a memtable flush** (Pebble fsyncs SSTs and the MANIFEST then).
+- After a crash Pebble reopens at the last flush. That state is consistent, because each batch carried its own `appliedIndex` (D-04). The node re-applies WAL entries `(durableAppliedIndex, commitIndex]`.
 
-### 2.4 Critical invariant: WAL truncation never passes the durable appliedIndex
+### 2.4 Critical rule: never trim past the durable appliedIndex (D-30)
 
 > **INV-TRUNC:** `WAL.firstIndex − 1 ≤ min(snapshotIndex, durableAppliedIndex)` at all times, **on disk**.
 
-If this is violated, a crash loses applied-but-unflushed memtable state, and the entries needed to rebuild it are already gone from the WAL. Recovery would find `A < S`, a gap in the log, and the node could only be recovered by a full re-sync. Because Pebble's WAL is disabled (D-03), this invariant replaces the guarantee Pebble's WAL would otherwise give.
+If this breaks, a crash loses unflushed applies and the WAL entries needed to redo them are already gone. Recovery would find a gap (`A < S`). With Pebble's WAL off, this rule is what keeps applied state safe.
 
 How it is enforced:
 
-1. **`durableAppliedIndex` is tracked conservatively.** It is a monotonic in-memory value, credited **only** by two things:
-   * **Startup:** the value is set to `m/appliedIndex` read right after Pebble opens. Whatever Pebble opened with is durable by definition.
-   * **An explicit synchronous `db.Flush()` made by RaftKV itself:** before the call, read `a = lastCommittedApplyBatch.appliedIndex` in memory. Pebble's `Flush()` returns only after every memtable that existed at call time, which includes every batch committed before the call, has been written to sstables and the MANIFEST synced. After it returns, set `durableAppliedIndex = max(durableAppliedIndex, a)`.
+1. **`durableAppliedIndex` is only raised by things we control:**
+   - at startup, to the `appliedIndex` Pebble opened with;
+   - after our own synchronous `db.Flush()`: read the last applied batch's index `a` first, flush, then set `durableAppliedIndex = max(durableAppliedIndex, a)`.
 
-   A snapshot creation (§4.1 step 2) is one such flush. Pebble's own background flushes are **not** credited. Mapping a background `FlushEnd` event to an exact `appliedIndex` would mean intercepting memtable rotation. That is possible, but it is an optimization deferred to M7, and it must be proven in the simulator first.
-2. **The truncation routine computes its bound itself.** Truncation runs on the snapshot/compaction goroutine and always does `Flush()` → credit → compute `truncateIndex = min(snapshotIndex, durableAppliedIndex) − retain_entries` → delete segments (§1.8). The WAL's `Truncate(upTo)` API takes the durable bound as a required argument. It asserts `upTo ≤ durableAppliedIndex` and `upTo ≤ snapshotIndex`, and **panics (fail-stop) if either is violated**. That way a caller bug cannot silently delete needed entries.
-3. **Snapshot install** sets both `snapshotIndex` and `durableAppliedIndex` to the installed index. The installed Pebble directory is fully on disk (fsynced sstables, no memtable), so this credit is exact.
-4. **Detection as a backstop.** Recovery step 6 (§5) checks `A ≥ S`. A violation is fatal and points directly at an INV-TRUNC bug.
-5. **Testing.** The deterministic simulator and the fault-injection suite (D-18) kill the process at random points around flush and truncation and assert that recovery never reaches the `A < S` branch. See [testing-benchmarks.md](testing-benchmarks.md).
+   Pebble's background flushes are not counted. That is conservative and simple.
+2. **Trimming computes its own bound.** It always does flush → update → compute → delete. `wal.Truncate(upTo)` asserts `upTo ≤ durableAppliedIndex` and `upTo ≤ snapshotIndex` and **panics** otherwise, so a caller bug cannot delete needed entries.
+3. **Snapshot install** sets both values to the installed index. The installed Pebble dir is fully on disk.
+4. **Backstop.** Recovery checks `A ≥ S` (§5 step 6). A violation is fatal and points straight at an INV-TRUNC bug.
+5. **Tests.** The simulator and fault tests kill the process around flush and trim and assert recovery never hits `A < S` ([testing.md](testing.md)).
 
 ---
 
 ## 3. Pebble state machine
 
-### 3.1 Key encoding
+### 3.1 Key layout
 
-The keyspace uses a single-byte prefix namespace. Client keys can never collide with internal keys, and `Range` only ever iterates within `0x75` (`'u'`).
+A one-byte prefix separates namespaces. Client keys can never collide with internal keys, and `Range` only iterates inside `u`.
 
-| Prefix | Namespace | Key layout | Value layout |
-|--------|-----------|------------|--------------|
-| `0x00` | reserved | none | Never written. It sorts first, which keeps a sentinel slot free. |
-| `0x6D` `'m'` | Internal metadata | `m` ‖ name (ASCII) | see below |
-| `0x73` `'s'` | Sessions table (D-09) | `s` ‖ client_id (16 bytes) | `Session` proto: `last_sequence`, `last_active_unix_ms`, cached responses for `(acked, last]` |
-| `0x74` `'t'` | Session expiry index | `t` ‖ last_active_unix_ms (8 B big-endian) ‖ client_id | empty. Lets apply evict expired sessions by scanning a prefix in order (deterministic, see [api-design.md](api-design.md) Q-A2). |
-| `0x75` `'u'` | **User keyspace** | `u` ‖ user key (1–4096 bytes, raw) | `ValueHeader` + value bytes (below) |
-| `0x76–0xFF` | reserved | none | For future namespaces such as MVCC or leases. Never used in v1. |
+| Prefix | Namespace | Key | Value |
+|--------|-----------|-----|-------|
+| `0x6D` `'m'` | Internal metadata | `m` ‖ name | see below |
+| `0x73` `'s'` | Sessions (D-09) | `s` ‖ client_id (8 B big-endian) | `Session`: `last_sequence`, `last_active_unix_ms`, cached replies |
+| `0x74` `'t'` | Session expiry index | `t` ‖ last_active_unix_ms (8 B BE) ‖ client_id | empty. Lets apply expire old sessions by scanning in order |
+| `0x75` `'u'` | **User keys** | `u` ‖ user key (1–4096 bytes) | value header + value |
+| others | reserved | | never written |
 
-**User value layout** (fixed header, then raw bytes, so a `Get` does not unmarshal protobuf):
+**User value** (fixed header, so a `Get` needs no protobuf decode):
 
 | Offset | Size | Field |
 |--------|------|-------|
-| 0 | 1 | `value_format` = 1 |
-| 1 | 8 | `create_revision` (uint64 LE) |
-| 9 | 8 | `mod_revision` (uint64 LE) |
-| 17 | 8 | `version` (uint64 LE) |
-| 25 | n | user value (0–1 MiB, D-11) |
+| 0 | 8 | `create_revision` (uint64 LE) |
+| 8 | 8 | `mod_revision` (uint64 LE) |
+| 16 | 8 | `version` (uint64 LE) |
+| 24 | n | user value (0–1 MiB, D-11) |
 
-**Metadata keys** (`m` namespace):
+**Metadata keys:**
 
 | Key | Value | Updated |
 |-----|-------|---------|
 | `m/appliedIndex` | uint64 LE | **Every apply batch** (D-04) |
-| `m/appliedTerm` | uint64 LE | Every apply batch (needed for snapshot metadata) |
-| `m/membership` | `ClusterConfig` proto | In the apply batch of an `ENTRY_CONF_CHANGE` |
+| `m/appliedTerm` | uint64 LE | Every apply batch |
+| `m/membership` | `ClusterConfig` | In the batch of a conf-change entry |
+| `m/removedMembers` | list of IDs | In the batch of a `REMOVE_MEMBER` (D-31, D-38) |
 | `m/clusterID` | uint64 LE | Once, at bootstrap |
-| `m/formatVersion` | uint32 LE | At bootstrap. Migrations bump it in the same batch as the migration. |
-| `m/clusterVersion` | string | Reserved for feature gating ([api-design.md](api-design.md) Q-A5) |
 
-**Revision.** `mod_revision` is the Raft index of the entry being applied, which is how [api-design.md](api-design.md) defines a revision. A CAS that fails is still an applied entry. It advances `appliedIndex` but modifies no user key.
+`mod_revision` is the index of the entry being applied. A failed CAS still advances `appliedIndex` but changes no user key.
 
-### 3.2 The atomic apply-batch invariant (D-04)
+### 3.2 The atomic apply batch (D-04)
 
-> **For every committed entry range `(a, b]` handed to the apply loop, exactly one Pebble batch is committed. It contains all user-key mutations, session-table updates, expiry-index updates, any membership update for entries `a+1..b`, and `m/appliedIndex = b`, `m/appliedTerm = term(b)`.**
+> **For each committed range `(a, b]` handed to the applier, one Pebble batch holds all user-key changes, session and
+> expiry-index updates, any membership change for entries `a+1..b`, plus `m/appliedIndex = b` and `m/appliedTerm`.**
 
-Consequences:
+- Pebble never contains an entry's effects without the matching `appliedIndex`, or the reverse. Replay starts at `appliedIndex + 1`: no double apply, no gap. This is what keeps sessions exactly-once across crashes.
+- Apply is **deterministic**: no local clock (session expiry uses the leader-stamped time, D-27), no map-order iteration, no randomness. An indexed batch gives read-your-writes inside the batch, which CAS and session lookups need.
+- Any error building or committing the batch crashes the node (§6). A partial batch is never acknowledged.
+- The applier may split a large range into several batches; each is complete with its own `appliedIndex`.
 
-* Pebble can never contain the effects of an entry without the matching `appliedIndex`, or the reverse. Replay starts exactly at `appliedIndex + 1`, with no double-apply and no gap. This is what makes the session table exactly-once across crashes.
-* Apply must be **deterministic**: no local clock (session TTL uses the entry timestamp, see [api-design.md](api-design.md) Q-A2), no map-iteration order, no randomness, no dependence on Pebble iterator snapshots other than the batch's own reads. `pebble.Batch` with indexed reads (`NewIndexedBatch`) gives read-your-writes within a batch. CAS evaluation and session lookup depend on it.
-* Any error building or committing the batch is **fail-stop** (§6.2). A partially applied batch is never acknowledged.
-* Batch size is bounded by the committed range handed over. The apply loop splits at 4 MiB of mutations (D-11) or 1,024 entries, whichever comes first. Each split is still a complete batch with its own `appliedIndex`.
-
-**Why Pebble's WAL is disabled (D-03).** Keeping it would fsync every apply a second time, doubling write amplification and fsync count on the hot path. It would buy nothing, because the Raft WAL already makes every committed entry durable, and the atomic batch plus `appliedIndex` (D-04) makes re-application exact. The cost is that Pebble's durable point lags, so WAL truncation must be bounded by `durableAppliedIndex` (§1.8). Recovery also replays the unflushed tail (§4).
-
-### 3.3 Pebble tuning knobs to evaluate (M7)
-
-None of these values are decided. Each is benchmarked as an isolated change ([testing-benchmarks.md](testing-benchmarks.md)).
-
-| Knob | Starting point | What to measure |
-|------|----------------|-----------------|
-| `DisableWAL` | `true` (fixed, D-03) | none |
-| `MemTableSize` | 64 MiB | Write stall frequency vs. recovery replay length |
-| `MemTableStopWritesThreshold` | 4 | Stall behaviour under write bursts |
-| `L0CompactionThreshold` / `L0StopWritesThreshold` | 4 / 12 | Write stalls, read amplification |
-| `LBaseMaxBytes` | 64 MiB | Compaction churn |
-| `MaxConcurrentCompactions` | `min(4, NumCPU/2)` | CPU contention with the Raft loop |
-| `Levels[*].BlockSize` | 32 KiB | Point vs. range read cost |
-| `Levels[*].FilterPolicy` | Bloom 10 bits/key | `Get` of absent keys (CAS `expect_absent`, health probe) |
-| `Levels[*].Compression` | Snappy (L0–L2), Zstd (L3+) | CPU vs. disk footprint |
-| `Cache` (block cache) | 25% of container memory limit | Read hit ratio |
-| `TargetFileSize` | 64 MiB base | Snapshot file count (affects chunk manifest size) |
-| `BytesPerSync` | 1 MiB | Smoothing of flush and compaction I/O vs. WAL fsync latency interference |
-| `MaxOpenFiles` | 16,384 | FD limits in the container |
-| `FormatMajorVersion` | Newest supported by the pinned Pebble release | Pinned per release. Never auto-ratcheted on a rolling upgrade (relates to [api-design.md](api-design.md) §9). |
-| Rate limit on compaction | off | Tail latency of WAL fsync when WAL and Pebble share one PVC |
-
-**WAL and Pebble placement.** Both live on the single PVC by default (D-16). An option to put `wal/` on a separate volume is kept, so that compaction I/O does not inflate WAL fsync latency. That option needs a decision on the K8s manifest (see New open questions Q-S4).
+**Why Pebble's WAL is off (D-03).** The Raft WAL already makes every committed entry durable, and the atomic batch makes re-apply exact, so a second WAL adds nothing. The price is that Pebble's durable point lags, hence INV-TRUNC (§2.4) and replay of the unflushed tail (§5).
 
 ---
 
 ## 4. Snapshots (D-14)
 
-### 4.1 Creation (local)
+### 4.1 Creation
 
-The trigger is every 100k applied entries since the last snapshot, or WAL > 512 MiB, whichever comes first (D-14). Snapshots also run on demand when a follower needs one and no sufficiently recent snapshot exists.
+Trigger: every 100k applied entries, or on demand when a follower needs one and none is recent enough.
 
-1. The apply loop finishes its current batch. Snapshotting never interleaves with a half-built batch.
-2. `db.Flush()`: force the memtable to sstables. This is **required**, because with WAL disabled a Pebble checkpoint does not contain unflushed memtable data.
-3. `db.Checkpoint(snap/tmp-<id>/, WithFlushedWAL)`. This hard-links immutable sstables and copies the MANIFEST and OPTIONS, so it is O(number of files) rather than O(data). It requires `snap/` and `sm/` to be on the **same filesystem**.
-4. Open the checkpoint **read-only** and read `m/appliedIndex`, `m/appliedTerm` and `m/membership` *from the checkpoint itself*. Those values are authoritative and avoid any race with the live apply loop.
-5. Compute the CRC32C of every file and write `snapshot.meta` (a `SnapshotMetadata` proto, [api-design.md](api-design.md) §8.1, plus `format_version=1`, creation time, and creator member ID).
-6. fsync every file, the checkpoint directory, and `snap/`.
-7. `rename(snap/tmp-<id> → snap/<index:016x>-<term:016x>)` and fsync `snap/`. The snapshot now exists.
-8. Advance `snapshotIndex`. WAL truncation (§1.8) may now run. `durableAppliedIndex` is at least the snapshot index, because of the flush in step 2.
+1. The applier finishes its current batch.
+2. `db.Flush()`. **Required**: with the WAL off, a checkpoint would not include unflushed memtable data.
+3. `db.Checkpoint(snap/tmp-<index>-<term>/)`: hard-links SSTs and copies the MANIFEST. `snap/` and `sm/` must be on the same filesystem.
+4. Open the checkpoint read-only and read `m/appliedIndex`, `m/appliedTerm`, `m/membership` **from it**. That avoids racing the live applier.
+5. Compute each file's CRC32C and write `snapshot.meta` (`SnapshotMetadata`, [api-design.md](api-design.md) §8.1).
+6. fsync every file, the directory, and `snap/`.
+7. Rename to `snap/<index:016x>-<term:016x>`, fsync `snap/`. The snapshot now exists.
+8. Update `snapshotIndex`. WAL trimming (§1.8) may run.
 
-### 4.2 Snapshot metadata
+### 4.2 Streaming
 
-| Field | Source |
-|-------|--------|
-| `last_included_index` / `last_included_term` | `m/appliedIndex` / `m/appliedTerm` in the checkpoint |
-| `config` | `m/membership` in the checkpoint |
-| `files[]` (name, size, crc32c) | Computed in step 5 |
-| `total_bytes` | Sum of file sizes |
-| `snapshot_id` | `<index>-<term>-<random64>` (unique per attempt; enables resume) |
-| `format_version` | `1` = Pebble checkpoint layout + this key encoding |
-| `cluster_id` | `META` |
+- `Raft.InstallSnapshot` is a client stream: first the `SnapshotMetadata` with the file list, then `SnapshotChunk{file_index, offset, data ≤ 1 MiB, crc32c, last}` (D-14). Files go in list order, each from offset 0. A chunk never spans two files.
+- The receiver checks each chunk's position (else `INVALID_ARGUMENT`) and CRC (else `DATA_LOSS`), aborts the stream on error, and writes into `snap/incoming/<index>-<term>/`. When a file completes, it checks the whole-file CRC.
+- **No resume.** If the stream breaks, the receiver deletes the staging dir and the leader starts again from chunk 0 (D-14).
+- The sender holds a reference on the snapshot during the transfer so GC skips it.
 
-### 4.3 Streaming chunk format
-
-* The transport is `Raft.InstallSnapshot`, a client-streaming RPC ([api-design.md](api-design.md) §8.1).
-* The first message is the full `SnapshotMetadata`, including the file manifest. Then come `SnapshotChunk{file_index, offset, data ≤ 1 MiB, crc32c, last}` messages (D-14). The order is `snapshot.meta` excluded, then files in manifest order, each from offset 0 sequentially. Every file is chunked independently, and a chunk never spans two files.
-* For each chunk, the receiver checks that `file_index`/`offset` equal the expected next position (otherwise `INVALID_ARGUMENT` and the stream aborts) and that the chunk CRC matches (otherwise `DATA_LOSS` and the stream aborts). It then writes with `pwrite` at the offset.
-* When a file completes, the receiver verifies its whole-file CRC32C against the manifest, fsyncs it, and records progress in `snap/incoming/<snapshot_id>/PROGRESS`, which holds `(next_file_index, next_offset)` and is written with tmp + rename + fsync. Inside a large file, progress is also checkpointed every 64 MiB after an fsync of the partial file.
-* **Resume.** After a broken stream the sender calls `SnapshotProgress(snapshot_id)`, reopens the stream with an identical metadata message, and resumes at the reported `(file, offset)`. If `snapshot_id` is unknown to the receiver, or the metadata differs, the receiver wipes the staging dir and starts from zero.
-* The sender holds a reference on `snap/<index>-<term>` for the whole transfer, including resumes. GC skips referenced snapshots (§4.6).
-
-### 4.4 On-disk snapshot layout
+### 4.3 Layout
 
 ```
 snap/
-  0000000000186a00-0000000000000007/      # complete local snapshot (index 0x186a00, term 7)
-    snapshot.meta                          # SnapshotMetadata proto (with file CRCs)
-    MANIFEST-000412                        # Pebble checkpoint contents
-    OPTIONS-000414
-    000398.sst
-    000405.sst
-    ...
-  tmp-5f2c.../                             # in-progress local creation (deleted on recovery)
-  incoming/
-    0000000000249f00-0000000000000009-a1b2c3d4e5f60718/   # in-progress inbound transfer
-      PROGRESS
-      snapshot.meta
-      MANIFEST-000107
-      000101.sst ...
+  0000000000186a00-0000000000000007/      # complete snapshot (index 0x186a00, term 7)
+    snapshot.meta                          # SnapshotMetadata with file CRCs
+    MANIFEST-000412                        # Pebble checkpoint
+    000398.sst  000405.sst  ...
+  tmp-.../                                 # in-progress creation (deleted on startup)
+  incoming/<index>-<term>/                 # in-progress inbound transfer (deleted on startup)
 ```
 
-### 4.5 Install procedure (follower / learner)
+### 4.4 Install (follower / learner)
 
-On receiving the `last=true` chunk with every file verified:
+After the `last=true` chunk with every file verified:
 
-1. **Stale check.** If `last_included_index ≤ commitIndex`, reply `installed=true` without installing (Raft §7) and delete the staging dir.
-2. Pause the apply loop and stop serving local reads. Reads return `UNAVAILABLE / NOT_LEADER` or `LEADER_NOT_READY` with a hint ([api-design.md](api-design.md) §6).
-3. Write `snapshot.meta` into the staging dir, fsync all files and the directory, then `rename(snap/incoming/<id> → sm/db-<index:016x>-<rand>)` and fsync `sm/`.
-4. **Atomic swap.** Write `sm/CURRENT.tmp` with the new db directory name, fsync it, `rename(sm/CURRENT.tmp → sm/CURRENT)`, and fsync `sm/`. **This rename is the commit point of the install.**
-5. Close the old Pebble instance and open the new one. Verify that `m/appliedIndex == last_included_index` and that `m/clusterID` matches. Any mismatch is fail-stop.
-6. Append `SNAPSHOT_MARKER{index, term, config}` and `HARD_STATE{term, votedFor, commit = max(commit, index)}` to the WAL, then fsync.
-7. Reset the in-memory log. If the WAL has an entry at `index` with term `== last_included_term`, keep the entries after it (Raft §7). Otherwise discard the whole log. Discarded entries become unreachable by replay because of the marker (§4.7 step 5).
-8. Reply `installed=true`. Resume apply and reads.
-9. Asynchronously delete the old `sm/db-*` directory.
+1. **Stale check.** If `last_included_index ≤ commitIndex`, reply `installed=true` without installing and delete staging.
+2. Pause the applier and local reads (reads return `UNAVAILABLE`).
+3. fsync the staging files and dir, `rename(snap/incoming/<id> → sm/db-<index:016x>)`, fsync `sm/`.
+4. **Atomic swap.** Write `sm/CURRENT.tmp` with the new dir name, fsync, rename to `sm/CURRENT`, fsync `sm/`. **This rename is the commit point.**
+5. Close the old Pebble, open the new one. Check `m/appliedIndex == last_included_index` and the cluster ID; mismatch is fatal.
+6. Append `SNAPSHOT_MARKER{index, term, config}` and `HARD_STATE{commit = max(commit, index)}` to the WAL, fsync.
+7. Reset the in-memory log: if the WAL has an entry at `index` with the snapshot's term, keep what follows (Raft §7); otherwise discard it all.
+8. Reply `installed=true`. Resume apply and reads. Delete the old `sm/db-*` in the background.
 
-**Crash windows:**
-* Before step 4: the old db is still current. The staging data is left in `incoming/` (resumable) or GC'd.
-* Between step 4 and step 6: on restart the state machine's `appliedIndex` is ahead of the WAL's log start. Recovery (§5 step 6) detects this and writes the missing marker by applying the same rule as step 7.
-* After step 6: the install is complete.
+**Crash windows:** before step 4 the old db is still live. Between steps 4 and 6, recovery sees `appliedIndex` ahead of the WAL's log start and writes the missing marker (§5 step 6). After step 6, done.
 
-### 4.6 Retention and GC
+### 4.5 Retention
 
-* Keep the **2 newest** complete local snapshots (`snapshot.retain_count = 2`). Delete older ones unless an outgoing transfer holds a reference on them.
-* `snap/tmp-*` is always deleted on startup.
-* `snap/incoming/*` is kept across restarts for at most `snapshot.incoming_ttl` (starting value 1 h) to allow resume, and deleted after that. A newer `snapshot_id` from the leader replaces any older incoming one.
-* `sm/db-*` directories other than the one named by `sm/CURRENT` are deleted on startup.
-* Because snapshot sstables are hard links, the real disk cost of a snapshot is only the files that have since been compacted away in the live db. `raftkv_snapshot_bytes_exclusive` must be monitored.
+- Keep the **2 newest** snapshots, unless an outgoing transfer holds a reference.
+- On startup delete `snap/tmp-*`, `snap/incoming/*`, and any `sm/db-*` not named in `sm/CURRENT`.
 
 ---
 
-## 5. Crash recovery algorithm
+## 5. Crash recovery
 
-1. **Lock and identity.** Take `flock(LOCK)`, so two processes can never share a data dir. Read and validate `META` (`cluster_id`, `member_id`, `data_format_version`).
-   * If `META` is missing: run bootstrap (initial cluster) or join (learner) according to config.
-   * An empty data dir **must never** reuse a member ID that has already voted (§7, Q-S2).
-2. **Clean up temp files.** Delete `wal/wal-next.tmp`, `snap/tmp-*`, `sm/CURRENT.tmp`, expired `snap/incoming/*`, and every `sm/db-*` not named in `sm/CURRENT`.
-3. **Open the state machine.** Open Pebble at `sm/<CURRENT>` with WAL disabled. Read `A = m/appliedIndex`, `At = m/appliedTerm`, and `Cfg_sm = m/membership`. Pebble may fail to open because of MANIFEST or sstable corruption. That is fatal (exit 78).
-4. **Scan the WAL.** Open the segments in `seq` order and validate headers, contiguous `seq`, and `first_index` continuity. Replay the records:
-   * `ENTRY` applies the conflict rule (§1.7).
-   * `HARD_STATE` sets the latest hard state.
-   * `SNAPSHOT_MARKER` sets the log start (`S`, `St`) and drops entries ≤ S.
-   * `MEMBERSHIP` sets the base config.
+1. **Lock and identity.** `flock(LOCK)` so two processes never share a data dir. Read and check `META` (`cluster_id`, `member_id`). If `META` is missing: bootstrap or join as configured, but an empty data dir **never** reuses a member ID that may have voted (D-32).
+2. **Clean up** temp files (§4.5, `sm/CURRENT.tmp`).
+3. **Open Pebble** at `sm/<CURRENT>`. Read `A = m/appliedIndex`, `At = m/appliedTerm`, `Cfg_sm = m/membership`. If Pebble cannot open, exit 78.
+4. **Scan the WAL** in `seq` order, checking headers and CRCs:
+   - `ENTRY`: apply the conflict rule (§1.7).
+   - `HARD_STATE`: keep the latest.
+   - `SNAPSHOT_MARKER`: set log start `(S, St)`, drop entries ≤ S.
+   - `MEMBERSHIP`: set the base config.
 
-   The torn-tail rule (§1.6) applies to the last segment only. Any other anomaly is fatal.
-5. **Derive the log.**
-   * `firstIndex = S + 1` and `lastIndex` is the last surviving `ENTRY`.
-   * The effective config is the last `ENTRY_CONF_CHANGE` in the log if one exists, otherwise the latest `MEMBERSHIP`/`SNAPSHOT_MARKER` config.
-   * `HS` is the latest `HARD_STATE`.
-6. **Reconcile the state machine and the WAL.**
-   * If `A > S` and `A > lastIndex`, or the entry at `A` has a term other than `At`: a snapshot was installed but its marker is missing (§4.5 window). Apply the Raft §7 rule with `(A, At)`, then append and fsync `SNAPSHOT_MARKER{A, At, Cfg_sm}` plus `HARD_STATE{commit = max(HS.commit, A)}`.
-   * If `A < S`: the entries `(A, S]` are no longer in the WAL. This **should be impossible**, because truncation is bounded by `durableAppliedIndex` (§1.8). Fail-stop with a "state machine behind log start" error. The operator recovers by re-adding the member as a learner (Q-S2).
-7. **Fix up commit.** Set `commit = max(HS.commit, A)`. If `commit > max(lastIndex, S)`, committed entries were lost, which is fatal.
-8. **Initialise the Raft core** with `HardState{HS.term, HS.vote, commit}`, the log entries `[firstIndex, lastIndex]`, the snapshot `(S, St)`, and the effective config. The node starts as a follower (D-01).
-9. **Catch up the apply loop.** Re-apply `(A, commit]` in atomic batches (§3.2). The session table makes this exact, with no double effects.
-10. **Start serving.** Start the peer listener, then the client listener. The readiness probe passes once the node knows a leader and `appliedIndex ≥` the leader's commit as of the first heartbeat, or immediately for STALE-only endpoints (see [system-design.md](system-design.md)).
+   The torn-tail rule (§1.6) applies only to the last segment. Anything else is fatal.
+5. **Derive the log.** `firstIndex = S + 1`; `lastIndex` = last surviving `ENTRY`; the config is the last conf-change entry in the log, otherwise the latest `MEMBERSHIP`; `HS` = latest `HARD_STATE`.
+6. **Reconcile Pebble and the WAL.**
+   - `A > lastIndex`, or the entry at `A` has a term other than `At`: a snapshot was installed but its marker is missing. Apply the Raft §7 rule with `(A, At)`, then append and fsync `SNAPSHOT_MARKER` + `HARD_STATE`.
+   - `A < S`: entries `(A, S]` are gone. **Should be impossible** (INV-TRUNC). Fail-stop; re-add as a learner.
+7. **Commit.** `commit = max(HS.commit, A)`. If `commit > max(lastIndex, S)`, committed entries were lost: fatal.
+8. **Start the Raft core** as a follower with `HardState`, the log, the snapshot `(S, St)`, and the config.
+9. **Re-apply** `(A, commit]` in atomic batches. Sessions make this exact.
+10. **Serve.** Start the peer listener, then the client listener. Ready once the node knows a leader and has caught up (D-46).
 
 ```mermaid
 flowchart TD
@@ -415,62 +304,39 @@ flowchart TD
     A1 -->|META missing| B0{Bootstrap or join?}
     B0 -->|initial cluster| B1[Create META, empty Pebble,<br/>WAL seg 1 with preamble] --> A8
     B0 -->|join| B2[Create META with new member id<br/>start as learner, await snapshot] --> A8
-    A1 -->|META ok| A2[Delete temp files:<br/>wal-next.tmp, snap/tmp-*, CURRENT.tmp,<br/>orphan sm/db-*, expired incoming/*]
-    A2 --> A3[Open Pebble at sm/CURRENT<br/>WAL disabled<br/>read appliedIndex A, appliedTerm At]
+    A1 -->|META ok| A2[Delete temp files:<br/>snap/tmp-*, snap/incoming/*,<br/>CURRENT.tmp, orphan sm/db-*]
+    A2 --> A3[Open Pebble at sm/CURRENT<br/>read appliedIndex A, appliedTerm At]
     A3 -->|open fails| F1[[FATAL exit 78:<br/>state machine corrupt]]
-    A3 --> A4[Scan WAL segments in seq order<br/>verify header + CRC32C per record]
-    A4 -->|anomaly in last segment<br/>with no valid record after| A4b[Zero-fill torn tail, fsync,<br/>count metric] --> A5
-    A4 -->|anomaly elsewhere / seq gap /<br/>logical corruption| F2[[FATAL exit 78:<br/>WAL corrupt]]
-    A4 -->|clean| A5[Rebuild: log start S from last SNAPSHOT_MARKER,<br/>entries with conflict-override rule,<br/>latest HARD_STATE, effective config]
+    A3 --> A4[Scan WAL segments in seq order<br/>check header + CRC32C per record]
+    A4 -->|bad record at end of last segment,<br/>nothing valid after| A4b[Truncate torn tail, fsync] --> A5
+    A4 -->|bad record elsewhere / seq gap| F2[[FATAL exit 78:<br/>WAL corrupt]]
+    A4 -->|clean| A5[Rebuild: log start S, entries with<br/>conflict rule, latest HARD_STATE, config]
     A5 --> A6{Compare A with log}
-    A6 -->|A > lastIndex or term mismatch at A<br/>snapshot installed, marker missing| A6b[Apply Raft §7 rule with A, At<br/>append SNAPSHOT_MARKER + HARD_STATE, fsync] --> A7
+    A6 -->|A > lastIndex or term mismatch at A| A6b[Apply Raft §7 rule with A, At<br/>append SNAPSHOT_MARKER + HARD_STATE, fsync] --> A7
     A6 -->|A < S| F3[[FATAL: state machine behind<br/>log start - re-add as learner]]
     A6 -->|S <= A <= lastIndex| A7[commit = max HS.commit, A]
     A7 -->|commit > lastIndex and > S| F4[[FATAL: committed entries lost]]
-    A7 --> A8[Init Raft core as follower<br/>HardState, log, snapshot, config]
-    A8 --> A9[Re-apply A+1..commit<br/>atomic batches incl. appliedIndex]
+    A7 --> A8[Start Raft core as follower]
+    A8 --> A9[Re-apply A+1..commit<br/>in atomic batches]
     A9 --> A10[Start peer listener, then client listener]
     A10 --> A11([Ready when leader known and caught up])
 ```
 
 ---
 
-## 6. Disk-full and fsync-failure handling
+## 6. Disk errors: fail-stop (D-33)
 
-### 6.1 Disk full (`ENOSPC`)
+**Rule:** any error from fsync, a WAL write, a directory fsync, a Pebble batch commit, or a Pebble flush or compaction makes the process **log it and exit at once with code 75**. It never retries the fsync and sends no further replies. A full disk (`ENOSPC`) is handled the same way.
 
-Space is reserved and failures are pushed off the commit path wherever possible:
+**Why: fsyncgate (2018).** PostgreSQL developers found that on Linux, after a failed writeback the kernel may report the error to one `fsync` caller and then mark the pages clean. A retried `fsync` then "succeeds" even though the data never reached disk. For RaftKV that would mean acknowledging votes or entries that are not durable, which breaks election safety (double votes) and durability (a "committed" entry on fewer than a quorum of disks). The only state we can trust after an I/O error is what a fresh process reads back from disk, so we exit and let recovery (§5) rebuild.
 
-| Mechanism | Detail |
-|-----------|--------|
-| Segment preallocation | The *next* segment is preallocated in the background (§1.1). If its `fallocate` fails, the condition is detected while the current segment still has room. |
-| Ballast file | `reserved.space` (starting value 1 GiB, fallocated at bootstrap). Deleting it frees room for a flush, snapshot, and WAL truncation, so the node can recover space without an operator. |
-| Disk-pressure thresholds | Free-space checks run every 5 s. **Soft** (< 15% free or < 2× segment size + ballast): raise alarm `DISK_PRESSURE`, force a snapshot + WAL truncation, and alert. **Hard** (next-segment `fallocate` failed or < 5% free): stop accepting new proposals. |
-| Leader under hard pressure | Rejects proposals with `UNAVAILABLE / DISK_PRESSURE` ([api-design.md](api-design.md) §6), attempts `TransferLeadership` to the healthiest voter, and keeps serving reads. |
-| Follower under hard pressure | Rejects `AppendEntries` that would need a new segment. It falls behind and is caught up later by snapshot once space is freed. Quorum is preserved while ≤ 2 of 5 nodes are affected. |
-| `ENOSPC` from `fallocate`, segment creation, snapshot creation/staging, or the free-space monitor | **Degraded mode, not a crash.** Enter hard `DISK_PRESSURE` as above: refuse new proposals / appends that need space, keep the process up, keep serving reads and heartbeats, release the ballast, and run snapshot + WAL truncation to reclaim space. When free space returns above the soft threshold, the node leaves degraded mode automatically. This matches [system-design.md](system-design.md). |
-| `ENOSPC` returned by `write`/`pwrite` **into the preallocated active segment** | Should be impossible, since the extent is already allocated. It can still happen on thin-provisioned or CoW volumes. The partial-write state of the page cache is then unknown, which makes it an I/O error, so the node takes the **fail-stop** path (§6.2). It restarts in degraded mode if space is still short, because startup checks free space before accepting appends. |
-| Pebble flush or compaction `ENOSPC` | Pebble surfaces it as a background error. Because unflushed applies are covered by the WAL (INV-TRUNC, §2.4), the safe response is the same as the row above: fail-stop, release the ballast on restart, replay from the WAL, and come up in degraded mode. |
+After exit, Kubernetes restarts the pod and recovery cuts any torn tail. If the disk keeps failing, the pod crash-loops; replace the volume and re-add the member as a learner. The cluster keeps working with 4 of 5 nodes.
 
-**Summary of the error policy** (consistent with [system-design.md](system-design.md)):
+Summary:
 
-* An **fsync or write I/O error** crashes the node (fail-stop, §6.2).
-* **Running out of space** (`ENOSPC` detected ahead of the commit path) moves the node into **degraded mode**. It keeps running, refuses writes that need space, and recovers on its own when space is freed.
-* A **torn final record** is truncated during recovery.
-* **Corruption anywhere else** in the log stops the node from starting (§1.6, §5).
-
-Whether `DISK_PRESSURE` should be a cluster-wide replicated alarm (etcd `NOSPACE`-style, which blocks writes everywhere) or stay node-local is open (Q-S3).
-
-### 6.2 fsync / write I/O errors: fail-stop
-
-**Rule:** any error from `fdatasync`/`fsync`, `write`/`pwrite` to the WAL, a directory fsync, a Pebble batch commit, or a Pebble background flush or compaction makes the process **log the error, increment `raftkv_storage_fatal_errors_total`, and exit immediately with code 75**. It never retries the fsync. It never sends any further RPC replies.
-
-**Why (fsyncgate, 2018).** PostgreSQL developers found that on Linux, when writeback of dirty pages fails, the kernel may report the error to **one** `fsync` caller and then **mark the pages clean** or drop them. A retried `fsync` then returns success even though the data never reached the disk. Depending on kernel version and filesystem, the error can also be consumed by another file descriptor, or lost if the file was closed. PostgreSQL's response was to PANIC on fsync failure and recover from its WAL, and other databases took the same approach. For RaftKV, a "successful" retry would mean acknowledging Raft votes or entries that are not durable. That silently breaks election safety (double votes) and commit durability (a committed entry could exist on fewer than a quorum of disks). The only state we can trust after an I/O error is what a **fresh process re-reads from disk**, so we exit and let recovery (§5) rebuild from durable data.
-
-**After exit:**
-* Kubernetes restarts the pod. Recovery truncates any torn tail.
-* If the disk is persistently failing, the pod crash-loops. `raftkv_storage_fatal_errors_total` and the CrashLoopBackOff alert page an operator, who replaces the PVC and re-adds the member as a learner (§7).
-* The cluster keeps working with 4 of 5 nodes (quorum 3).
+- fsync or write error, including disk full → crash.
+- Torn last record → cut off during recovery.
+- Corruption anywhere else → refuse to start.
 
 ---
 
@@ -478,102 +344,74 @@ Whether `DISK_PRESSURE` should be a cluster-wide replicated alarm (etcd `NOSPACE
 
 ```
 /var/lib/raftkv/                         # PVC mount (one per pod, D-16)
-├── LOCK                                 # flock; prevents two raftkvd on one dir
-├── META                                 # {cluster_id, member_id, data_format_version}; written once, CRC'd, fsynced
-├── reserved.space                       # ballast file (§6.1)
+├── LOCK                                 # flock; one raftkvd per dir
+├── META                                 # {cluster_id, member_id}; written once, CRC'd, fsynced
 ├── wal/
-│   ├── wal-0000000000000027-00000000004a1c21.seg   # sealed (64 MiB, preallocated)
+│   ├── wal-0000000000000027-00000000004a1c21.seg   # sealed
 │   ├── wal-0000000000000028-00000000004b9e7f.seg   # sealed
-│   ├── wal-0000000000000029-00000000004c4b41.seg   # active
-│   └── wal-next.tmp                                 # pre-created next segment
+│   └── wal-0000000000000029-00000000004c4b41.seg   # active
 ├── sm/
 │   ├── CURRENT                          # name of the live Pebble dir (atomic-swap pointer)
-│   └── db-0000000000186a00-9f3e/        # live Pebble instance (DisableWAL=true)
+│   └── db-0000000000186a00/             # live Pebble (DisableWAL=true, so no *.log files)
 │       ├── MANIFEST-000412
-│       ├── OPTIONS-000414
-│       ├── 000398.sst  000405.sst  ...
-│       └── (no *.log WAL files)
+│       └── 000398.sst  000405.sst  ...
 └── snap/
-    ├── 0000000000186a00-0000000000000007/   # newest complete snapshot
-    ├── 0000000000124f80-0000000000000006/   # previous (retain_count = 2)
-    ├── tmp-*/                               # in-progress creation (startup GC)
-    └── incoming/<snapshot_id>/              # resumable inbound transfer
+    ├── 0000000000186a00-0000000000000007/   # newest snapshot
+    ├── 0000000000124f80-0000000000000006/   # previous (keep 2)
+    ├── tmp-*/                               # in-progress creation
+    └── incoming/<index>-<term>/             # in-progress inbound transfer
 ```
 
-`sm/` and `snap/` **must** share a filesystem, because checkpoints and installs use hard links and rename. `wal/` may be moved to a separate volume (Q-S4).
+`sm/` and `snap/` **must** be on the same filesystem (hard links and rename).
 
 ---
 
 ## 8. Storage failure scenarios
 
-| # | Scenario | Detection | Automatic handling | Data-safety outcome | Operator action |
-|---|----------|-----------|--------------------|---------------------|-----------------|
-| 1 | Power loss / kill -9 mid-WAL-write | Recovery scan finds a CRC or length anomaly at the tail of the last segment | Zero-fill the torn tail (§1.6) | Safe: unsynced records were never acknowledged | None |
-| 2 | Crash during segment rotation | Stray `wal-next.tmp`, or new segment with torn preamble | Delete tmp / torn-tail rule | Safe | None |
-| 3 | Crash between Pebble apply and flush | `appliedIndex` in Pebble < commit | Re-apply `(A, commit]` from the WAL (§5 step 9) | Safe and exact (D-04) | None |
-| 4 | Crash mid-snapshot creation | `snap/tmp-*` present | Deleted on startup | Safe. The previous snapshot is still valid. | None |
-| 5 | Crash mid-snapshot install, before the `CURRENT` swap | Staging dir in `incoming/` | Old db stays live, and the transfer resumes or restarts | Safe | None |
-| 6 | Crash after the `CURRENT` swap, before the WAL marker | `A > lastIndex` or term mismatch at `A` | Reconcile (§5 step 6) | Safe | None |
-| 7 | Bit rot / corruption in a sealed WAL segment | CRC mismatch not at the tail | **Refuse to start** (exit 78) | Node data untrusted. The cluster is unaffected (quorum 3/5). | Remove member, wipe PVC, `member add-learner`, promote |
-| 8 | Pebble sstable corruption | Pebble block checksum error on read or compaction | Read returns `DATA_LOSS`, then fail-stop | Same as #7 | Same as #7 |
-| 9 | fsync / write `EIO` | Syscall error | **Fail-stop** (exit 75), restart, recovery | Safe: nothing was acknowledged after the error | If it repeats: replace the disk or PVC (as #7) |
-| 10 | Disk full | Free-space monitor, preallocation `ENOSPC` | `DISK_PRESSURE`, forced snapshot + truncation, ballast release, leader transfer, proposals refused (§6.1) | Safe (writes rejected, not lost) | Expand the PVC or investigate snapshot retention |
-| 11 | Slow disk (high fsync latency) | `raftkv_wal_fsync_duration_seconds` p99 alert | None in v1. A slow leader keeps leading but with high commit latency. | Safe, but degraded | Transfer leadership away and investigate the node |
-| 12 | PVC lost; pod restarts with an empty dir under the same StatefulSet identity | `META` missing while config says "existing member" | **Refuse to auto-bootstrap.** Exit with a clear message. | Prevents vote amnesia: a member that forgot its vote could vote twice | Remove the old member ID, then re-add as a learner (Q-S2) |
-| 13 | Data dir from another cluster or member mounted | `META` or segment header `cluster_id`/`member_id` mismatch | Refuse to start | Prevents cross-cluster log mixing | Fix the volume binding |
-| 14 | Lying disk (fsync returns success without persisting) | Undetectable locally. Shows up as lost acknowledged entries after a power loss. | None | Raft safety is violated only if a **majority** lies at once | Hardware qualification. Use the disk-flush tests in [testing-benchmarks.md](testing-benchmarks.md) (D-18 disk faults). |
-| 15 | Two raftkvd processes on one dir | `flock(LOCK)` fails | Second process exits | Safe | Fix the deployment |
+| # | Scenario | Detection | Handling | Outcome | Operator action |
+|---|----------|-----------|----------|---------|-----------------|
+| 1 | Power loss / `kill -9` mid-write | Bad record at the end of the last segment | Truncate torn tail (§1.6) | Safe: never acked | None |
+| 2 | Crash during rotation | New segment with torn preamble | Torn-tail rule | Safe | None |
+| 3 | Crash before Pebble flush | `appliedIndex` < commit | Re-apply `(A, commit]` from the WAL | Safe and exact (D-04) | None |
+| 4 | Crash mid-snapshot creation | `snap/tmp-*` present | Deleted on startup | Safe; previous snapshot still valid | None |
+| 5 | Crash mid-install, before `CURRENT` swap | Staging dir in `incoming/` | Deleted; old db stays live; leader resends | Safe | None |
+| 6 | Crash after swap, before WAL marker | `A > lastIndex` or term mismatch at `A` | Reconcile (§5 step 6) | Safe | None |
+| 7 | Corruption in a sealed segment | CRC mismatch not at the tail | **Refuse to start** (exit 78) | Node untrusted; cluster fine (3/5) | Remove member, wipe PVC, add as learner, promote |
+| 8 | Pebble SST corruption | Pebble checksum error | Read returns `DATA_LOSS`, then fail-stop | Same as #7 | Same as #7 |
+| 9 | fsync / write error, or disk full | Syscall error | **Crash** (exit 75), restart, recover | Safe: nothing acked after the error | If it repeats, replace the volume |
+| 10 | PVC lost; pod restarts empty under the same name | `META` missing for an existing member | **Refuse to bootstrap** | Prevents vote amnesia | Remove old ID, re-add as learner (D-32) |
+| 11 | Data dir from another cluster or member | `cluster_id`/`member_id` mismatch | Refuse to start | Prevents mixing logs | Fix the volume binding |
+| 12 | Disk that lies about fsync | Undetectable locally | None | Raft safety breaks only if a **majority** lie | Out of scope |
+| 13 | Two processes on one dir | `flock(LOCK)` fails | Second process exits | Safe | Fix the deployment |
 
 ---
 
 ## 9. Tradeoffs
 
-### 9.1 Separate WAL vs. Raft log stored in Pebble
+### 9.1 Own WAL vs. Raft log in Pebble
 
-| Aspect | Dedicated segmented WAL (chosen, D-03) | Raft log as Pebble keys (e.g. `l/<index>`) |
-|--------|----------------------------------------|--------------------------------------------|
-| fsync path | One sequential append + one fdatasync per batch. Predictable latency. | Goes through Pebble's WAL, so every log write is in the Pebble WAL, then a memtable, then flushed and compacted again. |
-| Write amplification | ~1× for log data. Segments are deleted whole after a snapshot. | Log entries are written ≥ 2× (WAL + L0 flush), more with compaction, and become tombstones after truncation. |
-| Truncation | `unlink` whole segments, O(1) per segment | `DeleteRange`: tombstones and compaction debt, which can hurt read latency |
-| Interference | Isolated from compaction stalls, and can live on a separate volume (Q-S4) | Log appends stall when Pebble stalls on L0 |
-| Pebble WAL | Can be disabled (D-03), so the state machine skips the double fsync | Must stay enabled for the log, so state-machine writes share its fsync cost (or need a second Pebble instance) |
-| Atomic "log + hard state" | Same file, same fdatasync | Same Pebble batch (simple) |
-| Implementation cost | We own the format, CRC, recovery, torn-write rules, and fuzzing (this doc) | Little custom code |
-| Risk | Bugs in our own durability code. Mitigated by D-18 fault injection and WAL fuzz tests. | Fewer custom bugs, but performance is coupled to compaction |
+| Aspect | Own segmented WAL (chosen, D-03) | Raft log as Pebble keys |
+|--------|----------------------------------|-------------------------|
+| Write path | One append + one fsync per Ready | Through Pebble's WAL, memtable, then flushed and compacted |
+| Trimming | Delete whole segment files | `DeleteRange` tombstones and compaction work |
+| Pebble WAL | Can be off (D-03) | Must stay on for the log |
+| Log + hard state atomic | Same file, same fsync | Same Pebble batch |
+| What you learn | Record framing, CRCs, torn writes, recovery | Little: Pebble does it |
+| Risk | Bugs in our durability code, covered by D-18 fault tests and WAL fuzzing | Fewer custom bugs |
 
-### 9.2 Pebble vs. RocksDB (D-02, Decided)
+### 9.2 Pebble vs. RocksDB (D-02)
 
-| Aspect | Pebble (chosen) | RocksDB (via cgo, e.g. grocksdb) |
-|--------|-----------------|----------------------------------|
-| Build / deploy | Pure Go. Static binary, simple cross-compilation, `-race` works across the whole stack. | cgo plus a C++ toolchain. Larger images, slower builds, and `-race` / pprof are blind inside C++. |
-| Runtime | No cgo call overhead. Go scheduler-friendly. | Each cgo call adds overhead, and blocking calls pin OS threads |
-| Features | The subset CockroachDB needs: batches, indexed batches, checkpoints, `DisableWAL`, range deletes, bloom filters | A superset (column families, transactions, BlobDB, many compaction styles) |
-| Observability | Go-native metrics and `EventListener` hooks map directly to Prometheus (D-17) | Statistics via C API. More plumbing. |
-| Maturity | Production at CockroachDB scale | The most widely deployed LSM |
-| Fit | Everything RaftKV needs, including checkpoints for D-14 | Features we would not use, at a high operational cost |
+| Aspect | Pebble (chosen) | RocksDB (cgo) |
+|--------|-----------------|---------------|
+| Build | Pure Go, `-race` works everywhere | cgo plus a C++ toolchain; `-race` and pprof cannot see inside |
+| Features | Batches, indexed batches, checkpoints, `DisableWAL` | Many more we would not use |
+| Fit | Everything RaftKV needs | More moving parts |
 
-### 9.3 Physical checkpoint vs. logical snapshot
+### 9.3 Checkpoint vs. logical snapshot
 
-| Aspect | Pebble checkpoint (chosen, D-14) | Logical snapshot (iterate KVs → serialized stream) |
-|--------|----------------------------------|-----------------------------------------------------|
-| Creation cost | O(files): hard links plus a memtable flush. Near-instant, no full read of the data. | O(data): full scan, so CPU and read I/O on the serving node |
-| Consistency | Point-in-time by construction. `appliedIndex` read from the checkpoint itself. | Needs a Pebble iterator snapshot held for the duration, which pins sstables |
-| Transfer size | Physical files: includes LSM overhead (obsolete versions not yet compacted, tombstones) | Exactly the live data, compresses well |
-| Install cost | Move files and swap the `CURRENT` pointer. No re-ingest. | Re-ingest: write all KVs or build SSTs and ingest them. Slow for large datasets. |
-| Version coupling | Receiver must understand the sender's Pebble `FormatMajorVersion`. This constrains mixed-version rolling upgrades ([api-design.md](api-design.md) §9). | Format-independent of the storage engine |
-| Disk cost on sender | Hard links keep compacted-away files alive while the snapshot exists (§4.6) | Temporary file or stream only |
-| Resume | Natural: per-file offsets (§4.3) | Needs a key-based cursor |
-
----
-
-## New open questions
-
-| ID | Question | Proposed default | Affects |
-|----|----------|------------------|---------|
-| Q-S1 | **`retain_entries` after snapshot** (catch-up buffer before WAL truncation). Not covered by D-14. | 50,000 entries, tuned in M7 | D-03, D-14 |
-| Q-S2 | **Empty-volume rejoin automation.** When a StatefulSet pod comes back with an empty PVC, should an operator/controller automatically `RemoveMember(old id)` + `AddLearner` + promote, or is it always a manual runbook step? Reusing the old member ID with an empty log is unsafe (vote amnesia). | Manual runbook in v1. A refusal to start is mandatory. | D-06, D-16 |
-| Q-S3 | **Disk-pressure scope.** Node-local `DISK_PRESSURE` (as specified) or a replicated cluster-wide `NOSPACE` alarm that blocks writes on every node (etcd-style)? | Node-local in v1 | D-11, D-16 |
-| Q-S4 | **Separate volume for `wal/`.** A second PVC per pod isolates WAL fsync latency from Pebble compaction I/O, at extra cost and manifest complexity. | Single PVC by default, measured in M7 | D-16, D-20 |
-| Q-S5 | **Pebble `FormatMajorVersion` ratcheting vs. checkpoint snapshots in mixed-version clusters.** A node on a newer Pebble may produce checkpoints an older node cannot open. | Pin `FormatMajorVersion` per release. Ratchet only after the whole cluster is upgraded (ties to [api-design.md](api-design.md) Q-A5). | D-02, D-14 |
-| Q-S6 | **Exit codes and restart policy.** Exit 75 (I/O fail-stop) and 78 (corruption) both crash-loop under K8s. Should 78 instead keep the pod running in a non-ready "quarantine" state for debugging, so it does not restart repeatedly? | Exit, with distinct codes and alerts, in v1 | D-16, D-17 |
-| Q-S7 | **Session-TTL time source** (shared with [api-design.md](api-design.md) Q-A2). The `t/` expiry index assumes a leader-stamped timestamp in each `Command`. | See Q-A2 | D-09, D-24 |
+| Aspect | Pebble checkpoint (chosen, D-14) | Logical dump (iterate all keys) |
+|--------|----------------------------------|---------------------------------|
+| Creation | Flush + hard links | Full scan of the data |
+| Consistency | Point-in-time; `appliedIndex` read from the checkpoint | Needs an iterator snapshot held open |
+| Install | Move files, swap `CURRENT` | Re-write every key |
+| Coupling | Tied to Pebble's file format (all nodes run the same binary) | Independent of the engine |
