@@ -33,7 +33,7 @@ Two can be broken at the same time and nothing is lost.
 | 5 of 5 | Everything normal |
 | 4 of 5 | Still works, nobody notices |
 | 3 of 5 | Still works |
-| 2 of 5 | Pauses (refuses writes) rather than risk giving wrong answers. Resumes once a third computer comes back. |
+| 2 of 5 | Pauses rather than risk wrong answers. Resumes once a third computer comes back. |
 
 **Rule of thumb:** it would rather pause than lie.
 
@@ -92,34 +92,21 @@ The rules make sure the new leader always has every saved value. Apps just retry
 
 ## How will we know it actually works?
 
-Saying it works is easy. Proving it is the real project.
+Saying it works is easy. Proving it is the real project, and the best part to learn from.
 
-We will **break it on purpose**, over and over:
+We **break it on purpose**, over and over:
 
 - Kill the leader in the middle of a write
 - Freeze a computer, then unfreeze it
 - Cut the network so the computers split into groups
 - Make the network slow and lossy
-- Fill up a disk
-- Mess with the clocks
+- Restart a computer and watch it catch up
 
 While that happens, we record every operation and run a **checker program** that looks for even one wrong answer.
+**Pass = zero wrong answers.**
 
-**Goal:** 40 million operations, 1,500+ deliberate failures, **zero wrong answers.**
-
-All of this runs automatically on GitHub every time code changes (quick version) and every night (long version).
-
----
-
-## How fast should it be?
-
-These are **goals**. Nothing has been measured yet:
-
-| | Goal |
-|---|---|
-| Saves per second | 38,000 |
-| Reads per second | 92,000 |
-| Speed-up from tuning | Slowest saves (the worst 1%) at least 30% faster than the first, untuned version |
+A quick version runs on GitHub for every code change, and a longer one runs every night.
+You can also watch it live in the **observer page** in your browser.
 
 ---
 
@@ -131,39 +118,25 @@ These are **goals**. Nothing has been measured yet:
 | **Raft** | The voting and copying rules (written ourselves) |
 | **Pebble** | Stores the data on each computer's disk |
 | **gRPC** | How apps and computers talk to each other |
-| **Kubernetes** | Runs the 5 computers in the cloud |
-| **Prometheus + OpenTelemetry** | Dashboards and tracing, to see what's happening inside |
+| **Docker / Kubernetes (kind)** | Runs the 5 "computers" on your laptop |
+| **Prometheus + OpenTelemetry** | Metrics and tracing, to see inside |
 | **GitHub Actions** | Runs all the tests automatically |
 
 ---
 
 ## The plan
 
-| Step | What gets built | Rough time |
-|---|---|---|
-| M0 | Project setup | 1.5 weeks |
-| M1 | Voting and copying rules, plus a simulator to test them | 5 weeks |
-| M2 | Real disk log and real networking | 4 weeks |
-| M3 | Storing the actual data | 3 weeks |
-| M4 | Safe reads and no double writes | 4 weeks |
-| M5 | Snapshots and catching up | 3.5 weeks |
-| M6 | Adding and removing computers | 3 weeks |
-| M7 | Making it fast, plus benchmarks | 3.5 weeks |
-| M8 | Cloud deployment, security, big break-it campaign | 5 weeks |
-
-**About 8–9 months for one person**, including a safety buffer.
+| Step | What gets built |
+|---|---|
+| M0 | Project setup |
+| M1 | Voting and copying rules, plus a simulator to test them |
+| M2 | Real disk log and real networking (first time it runs on your laptop) |
+| M3 | Storing the actual data |
+| M4 | Safe reads and no double writes |
+| M5 | Snapshots and catching up |
+| M6 | Adding and removing computers |
+| M7 | Kubernetes, the observer page, and break-it tests |
 
 ---
 
-## What still needs deciding
-
-1. Write the voting rules ourselves, or use an existing library?
-2. Which machines to run speed tests on?
-3. Encrypted connections in the first version, or later?
-4. Project name on GitHub, and license?
-5. Add or remove computers one at a time (simpler), or several at once?
-6. One cluster for all data (simpler), or split data across many clusters?
-
----
-
-*Status: planning. No code written yet.*
+*Status: planning. No code written yet. Speed is not a goal; this is a learning project.*

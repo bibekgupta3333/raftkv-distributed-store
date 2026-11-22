@@ -1,7 +1,7 @@
 # RaftKV in 5 Minutes
 
-A key-value database that runs on **5 machines**, keeps working when **any 2 fail**, and never loses an acknowledged write or returns a stale read.
-Status: **design phase, no code yet.** All numbers here are targets, not results. Details live in the other files in [docs/](.).
+A learning project: a key-value database with Raft built from scratch. It runs on **5 nodes** (all on your laptop), keeps working when **any 2 fail**, and never loses an acknowledged write or returns a stale read.
+Status: **design phase, no code yet.** Speed is not a goal. Details live in the other files in [docs/](.).
 
 **Contents:** [Features](#1-features) · [Architecture](#2-architecture) · [System Design](#3-system-design) · [Database](#4-database-design) · [Sequences](#5-sequence-design) · [Observer UI](#6-observer-frontend) · [E2E Testing](#7-simple-e2e-testing) · [WBS](#8-wbs-checklist)
 
@@ -14,11 +14,11 @@ Status: **design phase, no code yet.** All numbers here are targets, not results
 - Exactly-once retries via a `(client_id, seq)` session table.
 - Automatic leader election (PreVote + CheckQuorum).
 - Survives any 2 of 5 nodes failing, no acked writes lost.
-- Snapshots for fast restarts and catching up slow nodes.
+- Snapshots so restarted or lagging nodes catch up.
 - Online membership changes: add learner, promote, remove, transfer leader.
 - Prometheus metrics, OpenTelemetry traces, structured logs.
-- Kubernetes StatefulSet, one disk per pod, spread across zones.
-- Later (not v1): sharding, transactions, `Watch`, auth.
+- Runs on a laptop: docker-compose or Kubernetes (kind), one disk per node.
+- Out of scope: sharding, transactions, `Watch`, auth, performance tuning.
 
 ## 2. Architecture
 
@@ -39,7 +39,7 @@ flowchart TB
 
 Requests enter through the gRPC API and reach the node driver. The Raft core only decides what should happen; the driver does the work: fsync to the WAL, send to peers, apply committed entries to Pebble. The snapshotter checkpoints Pebble so the old log can be trimmed.
 
-**Topology:** 5 pods across 3 zones (2/2/1), so losing a whole zone still leaves a quorum of 3.
+**Topology:** 5 nodes as docker-compose containers or a 5-pod StatefulSet on kind. Any 2 can fail and 3 still form a quorum.
 
 ## 3. System Design
 
@@ -49,7 +49,7 @@ Requests enter through the gRPC API and reach the node driver. The Raft core onl
 | Replication / commit | Committed once 3 of 5 nodes fsync it |
 | Reads | Leader confirms it still leads, waits for apply, reads locally |
 | Writes to followers | Forwarded to leader, or redirect hint |
-| Snapshots | Pebble checkpoint every 100k entries or 512 MiB of WAL, streamed in chunks with resume |
+| Snapshots | Pebble checkpoint every 100k entries, streamed in 1 MiB chunks |
 | Crash recovery | Load snapshot, replay WAL after Pebble's `appliedIndex` |
 | Membership | Join as learner, catch up, promote; one change at a time |
 | Failure tolerance | 2 of 5 down: still serving. 3 down: stops, loses nothing |
@@ -86,8 +86,7 @@ Pebble keys start with a one-byte prefix, so user keys can never clash with inte
 data/
 ├── META               # cluster_id, member_id
 ├── wal/
-│   ├── wal-<seq>-<firstIndex>.seg
-│   └── wal-next.tmp   # pre-created next segment
+│   └── wal-<seq>-<firstIndex>.seg
 ├── sm/
 │   ├── CURRENT        # points at the live Pebble dir
 │   └── db-<index>-<rand>/
@@ -108,13 +107,10 @@ sequenceDiagram
     participant F as Followers
     participant P as Pebble
     C->>L: Put(key, value)
-    par Leader disk
-        L->>L: Append to WAL and fsync
-    and Replicate
-        L->>F: AppendEntries
-        F->>F: Append to WAL and fsync
-        F-->>L: Ack
-    end
+    L->>L: Append to WAL and fsync
+    L->>F: AppendEntries
+    F->>F: Append to WAL and fsync
+    F-->>L: Ack
     L->>L: Quorum of 3 reached, entry committed
     L->>P: Apply batch with appliedIndex
     L-->>C: OK with revision
@@ -203,7 +199,7 @@ Events
 
 - **Read-only, polling only.** The observer calls nothing except `Cluster.Status`, polling at a fixed 500 ms (flag-configurable), and needs no server changes. Events are inferred by diffing polls, so very short blips (< 500 ms) can be missed. Grafana keeps metrics history and alerting; the observer gives a live, per-node picture of Raft state that dashboards built on scraped metrics show poorly.
 - **One Go binary, no build step.** It embeds the page with `embed` and pushes snapshots over SSE. It runs as a 1-replica k8s Deployment and as a docker-compose service in the e2e stack.
-- **No auth in v1.** It binds to localhost; reach it in k8s with `kubectl port-forward`. It uses the cluster's client mTLS cert (D-15) to call `Status`.
+- **No auth in v1.** It binds to localhost; reach it in k8s with `kubectl port-forward`.
 
 
 ---
@@ -227,11 +223,11 @@ It runs in GitHub Actions on every PR. The observer UI (section 6) runs in the s
 - `make sim SEED=…`: replay one deterministic simulation.
 - `make chaos-up && make chaos`: Chaos Mesh fault campaign on kind.
 
-Nightly CI runs a longer kind + Chaos Mesh campaign toward the target of 40M ops, 1,500 faults, 0 violations (targets, not results).
+Nightly CI runs a longer kind + Chaos Mesh run. Pass = 0 linearizability violations; failing histories and seeds are saved for replay.
 
 ## 8. WBS (Checklist)
 
-- **M0 — Repo, tooling, proto skeleton (1.5 wk)**
+- **M0 — Repo, tooling, proto skeleton (1 wk)**
   - [ ] Repo, Makefile, lint, CI
   - [ ] gRPC protos
 - **M1 — Raft core + simulator (5 wk)**
@@ -241,26 +237,23 @@ Nightly CI runs a longer kind + Chaos Mesh campaign toward the target of 40M ops
   - [ ] Durable WAL
   - [ ] gRPC transport between nodes
   - [ ] docker-compose cluster + e2e harness
-- **M3 — Pebble state machine + basic KV (3 wk)**
+- **M3 — Pebble state machine + basic KV (2.5 wk)**
   - [ ] Apply committed entries to Pebble
-  - [ ] Put/Get/Delete + baseline benchmark
-- **M4 — Linearizable reads, sessions, full KV API (4 wk)**
+  - [ ] Put/Get/Delete end to end
+- **M4 — Linearizable reads, sessions, full KV API (3.5 wk)**
   - [ ] ReadIndex / lease reads
   - [ ] Client sessions (exactly-once)
   - [ ] Full KV API (CAS, Range)
-- **M5 — Snapshots + follower recovery (3.5 wk)**
+- **M5 — Snapshots + follower recovery (2.5 wk)**
   - [ ] Snapshots + log compaction
   - [ ] Catch up lagging followers
 - **M6 — Membership changes + leadership transfer (3 wk)**
   - [ ] Add/remove node
   - [ ] Leadership transfer
-- **M7 — Performance optimizations + benchmarks (3.5 wk)**
-  - [ ] D-13 optimizations (batching, group-commit fsync)
-  - [ ] Benchmarks vs. M3 baseline
-- **M8 — Kubernetes, mTLS, observability, chaos, v1.0 (5 wk)**
-  - [ ] Kubernetes deployment + mTLS
-  - [ ] Grafana dashboards + observer UI (D-48)
-  - [ ] Chaos Mesh campaign, v1.0 release
+- **M7 — Kubernetes, observer UI, chaos, v1.0 (3.5 wk)**
+  - [ ] Kubernetes on kind
+  - [ ] Observer UI (D-48) + one Grafana dashboard
+  - [ ] Chaos Mesh nightly run, v1.0
 
-Full 391-task checklist: [WBS.md](../WBS.md)
+Full 201-task checklist (about 25 weeks): [WBS.md](../WBS.md)
 
