@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 ## [Unreleased]
 
 ### Changed
+- 2026-11-22: Rewrote `README.md` with standard sections: overview, features, tech stack, getting started,
+  documentation, contributing, license.
 - 2026-11-21: **Re-scoped as a learning project.** Speed is no longer a goal. Milestones are now M0–M7: the old M7
   (performance) is gone and the old M8 is now M7. Most decisions are now Decided; only D-22 (license) is open.
   All docs are shorter. `WBS.md` went from 391 to 201 tasks and the estimate is about 25 weeks.

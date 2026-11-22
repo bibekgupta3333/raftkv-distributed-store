@@ -1,40 +1,53 @@
 # RaftKV
 
-**A learning project: a replicated key-value store with Raft built from scratch in Go.**
+A replicated key-value store built on the Raft consensus algorithm, written from scratch in Go as a learning project.
 
-> Status: **design phase.** No code yet.
+> **Status:** design phase. No code yet. See the [roadmap](docs/implementation-roadmap.md).
 
-## The idea
+## Overview
 
-Five nodes keep identical copies of a key → value store. They elect a **leader**, and every write goes through it.
-The leader saves each change to its **write-ahead log**, copies it to the others, and replies "OK" once **3 of 5**
-have it on disk. If the leader dies, the rest elect a new one within a second or two, and no confirmed write is lost.
+RaftKV runs as a 5-node cluster. The nodes elect a leader, replicate every write to a majority before acknowledging
+it, and keep serving as long as any 3 nodes are up. Reads are linearizable.
 
-Reads are **linearizable**: you always see the latest confirmed value. Nodes take **snapshots** so a node that was
-down can catch up quickly, and nodes can be **added or removed** while the cluster runs.
+## Features
 
-The fun part is proving it works. Tests kill leaders, freeze processes, and cut the network while a
-**linearizability checker** looks for any wrong answer. A small **observer page** lets you watch all of it live.
+- Leader election with PreVote and CheckQuorum
+- Log replication with majority commit
+- Linearizable reads (ReadIndex)
+- Exactly-once writes through client sessions
+- Write-ahead log with crash recovery
+- Snapshots and follower catch-up
+- Online membership changes and leadership transfer
+- gRPC API: `Put`, `Get`, `Delete`, `CompareAndSwap`, `Range`
+- Prometheus metrics, OpenTelemetry tracing, and a live observer UI
 
-It runs entirely on a laptop: 5 nodes in Docker, or on a local Kubernetes cluster (kind).
+## Tech stack
 
-## Tech
+Go · gRPC · Protocol Buffers · Pebble · Docker · Kubernetes (kind) · Prometheus · OpenTelemetry · GitHub Actions
 
-Go · gRPC · Protobuf · Raft (own implementation) · Pebble · Docker · Kubernetes (kind) · Prometheus · OpenTelemetry · GitHub Actions
+## Getting started
 
-## Docs
+Not available yet. The first runnable cluster arrives in milestone M2. The planned commands are:
 
-| Doc | What's in it |
-|-----|--------------|
-| [docs/raftkv-in-5-minutes.md](docs/raftkv-in-5-minutes.md) | **Start here.** One-page summary of everything |
-| [docs/simple-guide.md](docs/simple-guide.md) | Plain-English explanation, no jargon |
-| [docs/design-decisions.md](docs/design-decisions.md) | All decisions (`D-xx`), milestones, repo layout |
-| [docs/architecture.md](docs/architecture.md) | Components inside a node |
-| [docs/system-design.md](docs/system-design.md) | Election, replication, reads, snapshots, recovery, membership, failures |
-| [docs/api-design.md](docs/api-design.md) | gRPC API and errors |
-| [docs/storage-design.md](docs/storage-design.md) | WAL format, Pebble layout, crash recovery |
-| [docs/testing.md](docs/testing.md) | Simulator, linearizability checker, fault injection |
-| [docs/ci-e2e.md](docs/ci-e2e.md) | GitHub Actions e2e and nightly chaos |
-| [docs/implementation-roadmap.md](docs/implementation-roadmap.md) | Milestones M0–M7 |
-| [WBS.md](WBS.md) | Task checklist |
-| [CHANGELOG.md](CHANGELOG.md) · [memory.md](memory.md) · [Agent.md](Agent.md) | History, project memory, agent rules |
+```sh
+make test   # unit and simulator tests
+make e2e    # 5-node cluster in docker-compose with fault injection
+make chaos  # Chaos Mesh tests on a local kind cluster
+```
+
+## Documentation
+
+- [RaftKV in 5 minutes](docs/raftkv-in-5-minutes.md): one-page overview
+- [Design decisions](docs/design-decisions.md)
+- [Architecture](docs/architecture.md) · [System design](docs/system-design.md)
+- [API design](docs/api-design.md) · [Storage design](docs/storage-design.md)
+- [Testing](docs/testing.md) · [CI and e2e](docs/ci-e2e.md)
+- [Roadmap](docs/implementation-roadmap.md) · [Task checklist](WBS.md)
+
+## Contributing
+
+See [Agent.md](Agent.md) for project conventions. Log notable changes in [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+Not chosen yet. Apache-2.0 is planned ([D-22](docs/design-decisions.md)).
