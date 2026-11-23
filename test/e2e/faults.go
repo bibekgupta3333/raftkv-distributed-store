@@ -45,17 +45,22 @@ func (l *FaultLog) Logf(format string, args ...any) {
 
 // --- fault driver (WBS 2.6.2, 2.6.3) --------------------------------------
 
+// docker runs the docker CLI. On failure the error carries the CLI's output
+// (e.g. "container ... is not running"), not just the exit status.
 func (c *Cluster) docker(args ...string) (string, error) {
 	out, err := exec.Command("docker", args...).CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	msg := strings.TrimSpace(string(out))
+	if err != nil {
+		return msg, fmt.Errorf("docker %s: %w: %s", args[0], err, msg)
+	}
+	return msg, nil
 }
 
 // execRoot runs a shell command as root inside node id. Nodes run as a
 // non-root user, but the container holds NET_ADMIN, which root may use.
 func (c *Cluster) execRoot(id int, script string) error {
-	out, err := c.docker("exec", "-u", "0", ContainerName(id), "sh", "-c", script)
-	if err != nil {
-		return fmt.Errorf("exec on node %d %q: %v: %s", id, script, err, out)
+	if _, err := c.docker("exec", "-u", "0", ContainerName(id), "sh", "-c", script); err != nil {
+		return fmt.Errorf("exec on node %d %q: %w", id, script, err)
 	}
 	return nil
 }
