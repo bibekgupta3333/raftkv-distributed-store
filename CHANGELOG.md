@@ -6,6 +6,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 ## [Unreleased]
 
 ### Added
+- 2026-11-24: Snapshots and log compaction (D-14, D-30): Pebble checkpoints every 100k applied entries, the 2 newest
+  kept, and the WAL trimmed to min(snapshot, durable applied) minus a 10k-entry retention tail. InstallSnapshot
+  streams 1 MiB CRC-checked chunks (no resume) and installs with an atomic `sm/CURRENT` swap. Snapshot metrics,
+  `Cluster.Status.snapshot_index`, a `snapshot` simulator profile and an e2e follower-wipe fault (#17).
+- 2026-11-24: Porcupine models for CompareAndSwap and Range pages, the `raftkv_mutation` broken build with
+  `make mutation`, and docker e2e `TestLinearizableKVUnderFaults` / `TestOldLeaderServesNoStaleRead` (#18).
+- 2026-11-23: Client sessions for exactly-once writes (D-09, D-26, D-27), `CompareAndSwap`, paged `Range`
+  (D-10, D-34), follower write forwarding with opt-in REDIRECT (D-28), D-11 limits checked before propose, and
+  `raftkvctl cas` / `raftkvctl range` (#15).
 - 2026-11-23: ReadIndex in the Raft core: waits for the leader's no-op, batches concurrent reads into one heartbeat
   round, and lets followers ask the leader through the new `ReadIndex` peer RPC (D-05, D-36) (#14).
 - 2026-11-23: STALE `Get` reports the applied index it read at. Optional lease reads (`--lease-reads`) are off by
@@ -18,6 +27,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   Mesh PodChaos/NetworkChaos manifests (D-47) (#13).
 
 ### Changed
+- 2026-11-24: **Breaking:** the state machine lives in `sm/db-*` behind `sm/CURRENT`; data directories from before
+  M5 are refused and must be wiped (#17).
+- 2026-11-23: `pkg/client` uses sessions and write forwarding by default and retries indeterminate writes with the
+  same sequence (#15).
 - 2026-11-23: Linearizable `Get` is served by any member through ReadIndex instead of through the log. Followers no
   longer answer `Get` with NOT_LEADER. D-25 lease is now `(ElectionTick-1)*tick*(1-drift)-margin` = 710 ms (#14).
 - 2026-11-23: Brought `WBS.md` (100/201 leaves ticked with PR links), `README.md`, `Agent.md` and `memory.md` up
@@ -73,6 +86,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   invariant) is Decided. D-25 to D-47 amend D-11, D-12, D-23, and D-24.
 
 ### Fixed
+- 2026-11-24: `TestLimitBoundaries` timed out under -race on CI; the 1000-key page boundary is now tested at the
+  store (#19).
 - 2026-11-23: docker-compose e2e, broken since M3. The harness now proposes encoded Put commands, and the debug
   Propose RPC rejects payloads the state machine cannot apply instead of committing a poison pill (#11).
 - 2026-11-23: Flaky `TestRetryBoundedByDeadline` (#11).

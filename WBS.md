@@ -27,11 +27,11 @@ tasks, and every task aims at a working, tested feature.
 | M1 | Raft core + deterministic simulator | 36/39 | 5 | In progress |
 | M2 | WAL + gRPC transport + real 5-process cluster | 33/38 | 4 | In progress |
 | M3 | Pebble state machine + basic KV | 17/20 | 2.5 | In progress |
-| M4 | Linearizable reads, client sessions, full KV API | 9/25 | 3.5 | In progress |
-| M5 | Snapshots + follower catch-up | 0/18 | 2.5 | Not started |
+| M4 | Linearizable reads, client sessions, full KV API | 23/25 | 3.5 | In progress |
+| M5 | Snapshots + follower catch-up | 16/18 | 2.5 | In progress |
 | M6 | Membership changes + leadership transfer | 0/21 | 3 | Not started |
 | M7 | Kubernetes, observer UI, chaos tests, v1.0 | 12/25 | 3.5 | In progress |
-| **Total** | | **121/201** | **25** | |
+| **Total** | | **151/201** | **25** | |
 
 M0–M3 are "In progress" only because their exit reviews (release tags, linked evidence) and a few e2e leaves are
 still open; all their feature work is merged (#2–#9).
@@ -211,55 +211,55 @@ still open; all their feature work is merged (#2–#9).
   - [x] 4.2.3 Opt-in stale reads that return the applied index → test (#14)
   - [x] 4.2.4 Optional lease reads behind a flag, off by default (D-25) → unit tests (#14)
   - [x] 4.2.5 Lease sim: violation found when drift is beyond the bound, none within it → both asserted (#14)
-- [ ] **4.3 Client sessions (D-09, D-26, D-27)**
-  - [ ] 4.3.1 `RegisterSession` through the log, server assigns the ID, stored under the session prefix → integration test
-  - [ ] 4.3.2 Dedup on apply: `(client_id, seq)` check, cached response, update in the same batch → unit test
-  - [ ] 4.3.3 Leader stamps time into each command; replicas expire sessions after 10 minutes using it → test: replicas agree
-  - [ ] 4.3.4 Client library: auto-register, increasing sequence, retry with the same sequence → unit test
-  - [ ] 4.3.5 Exactly-once e2e: every write retried 1–3 times after random drops, counter model → 0 duplicates
-  - [ ] 4.3.6 Session sim: 10,000 seeds crossing the expiry time, identical session table hash → passes
-- [ ] **4.4 Full KV API (D-10, D-28, D-34)**
-  - [ ] 4.4.1 Follower forwards writes to the leader; client can opt in to a redirect instead (D-28) → e2e test
-  - [ ] 4.4.2 `CompareAndSwap` per api-design.md → unit and e2e tests
-  - [ ] 4.4.3 `Range` with prefix or [start, end), page limit, continuation token, linearizable or stale per page → tests incl. paging across writes
-  - [ ] 4.4.4 `raftkvctl cas/range` → e2e smoke
-- [ ] **4.5 Limits and errors (D-11)**
-  - [ ] 4.5.1 Key ≤ 4 KiB, value ≤ 1 MiB, Range page ≤ 1,000 keys / 4 MiB, checked before propose → boundary tests (limit ok, limit + 1 rejected)
-  - [ ] 4.5.2 gRPC status codes and error details per api-design.md, deadlines passed through → table tests
-- [ ] **4.6 Linearizability coverage**
-  - [ ] 4.6.1 Porcupine models for CAS and Range → known-bad histories detected
-  - [ ] 4.6.2 e2e mixing Put/Get/Delete/CAS/Range with leader and follower reads under leader kill, pause, partition → 0 violations, runs nightly
+- [x] **4.3 Client sessions (D-09, D-26, D-27)**
+  - [x] 4.3.1 `RegisterSession` through the log, server assigns the ID, stored under the session prefix → integration test (#15)
+  - [x] 4.3.2 Dedup on apply: `(client_id, seq)` check, cached response, update in the same batch → unit test (#15)
+  - [x] 4.3.3 Leader stamps time into each command; replicas expire sessions after 10 minutes using it → test: replicas agree (#15)
+  - [x] 4.3.4 Client library: auto-register, increasing sequence, retry with the same sequence → unit test (#15)
+  - [x] 4.3.5 Exactly-once e2e: every write retried 1–3 times after random drops, counter model → 0 duplicates (#15)
+  - [x] 4.3.6 Session sim: 10,000 seeds crossing the expiry time, identical session table hash → passes (#15)
+- [x] **4.4 Full KV API (D-10, D-28, D-34)**
+  - [x] 4.4.1 Follower forwards writes to the leader; client can opt in to a redirect instead (D-28) → e2e test (#15)
+  - [x] 4.4.2 `CompareAndSwap` per api-design.md → unit and e2e tests (#15)
+  - [x] 4.4.3 `Range` with prefix or [start, end), page limit, continuation token, linearizable or stale per page → tests incl. paging across writes (#15)
+  - [x] 4.4.4 `raftkvctl cas/range` → e2e smoke (#15)
+- [x] **4.5 Limits and errors (D-11)**
+  - [x] 4.5.1 Key ≤ 4 KiB, value ≤ 1 MiB, Range page ≤ 1,000 keys / 4 MiB, checked before propose → boundary tests (limit ok, limit + 1 rejected) (#15)
+  - [x] 4.5.2 gRPC status codes and error details per api-design.md, deadlines passed through → table tests (#15)
+- [x] **4.6 Linearizability coverage**
+  - [x] 4.6.1 Porcupine models for CAS and Range → known-bad histories detected (#18)
+  - [x] 4.6.2 e2e mixing Put/Get/Delete/CAS/Range with leader and follower reads under leader kill, pause, partition → 0 violations, runs nightly (#18)
 - [ ] **4.9 M4 exit review**
-  - [ ] 4.9.1 Link evidence for every M4 exit criterion; update api-design.md (final API) and system-design.md (read path, sessions) → linked, diffs reviewed
+  - [ ] 4.9.1 Link evidence for every M4 exit criterion; update api-design.md (final API) and system-design.md (read path, sessions) → linked, diffs reviewed (partial #18: evidence list and doc diffs in the PR body)
   - [ ] 4.9.2 Update CHANGELOG.md and memory.md, tag `v0.3.0` → diff reviewed, tag exists
 
 ---
 
 ## 5. M5 — Snapshots + follower catch-up
 
-- [ ] **5.1 Raft core snapshot support**
-  - [ ] 5.1.1 `Storage.Snapshot()` / `ApplySnapshot`, compaction index in `raftLog` → unit tests
-  - [ ] 5.1.2 Leader sends a snapshot when the follower needs compacted entries (Progress Snapshot state) → unit tests
-  - [ ] 5.1.3 Follower handles a snapshot (reject stale, reset log, update commit) → unit tests
-  - [ ] 5.1.4 Sim: low snapshot threshold plus crashes during install → 10,000 seeds pass
-- [ ] **5.2 Snapshot creation (internal/snapshot)**
-  - [ ] 5.2.1 Metadata `{index, term, membership, format_version, checksum}` (D-14) → round-trip test
-  - [ ] 5.2.2 Pebble checkpoint taken between apply batches so its index equals `appliedIndex` → test asserts equality
-  - [ ] 5.2.3 Trigger every 100k entries (configurable), keep the last 2, clean up temp dirs on start → tests with small thresholds
-- [ ] **5.3 WAL compaction**
-  - [ ] 5.3.1 Release WAL segments under the D-30 rule, with a small retention tail for slow followers → unit test
-  - [ ] 5.3.2 Steady-write run: WAL disk use stays bounded → result recorded
-- [ ] **5.4 Transfer and install**
-  - [ ] 5.4.1 Sender: `InstallSnapshot` stream in 1 MiB chunks → integration test
-  - [ ] 5.4.2 Receiver: stage chunks in a temp dir, verify checksum; an interrupted transfer starts over (D-14) → corrupt chunk rejected, killed transfer restarts
-  - [ ] 5.4.3 Install: close Pebble, atomic dir swap (rename plus dir fsync), reset WAL to the snapshot index, reopen → test
-  - [ ] 5.4.4 Crash safety: kill -9 at each install step → always old or new state, never a mix
-  - [ ] 5.4.5 Session table restored from the snapshot; exactly-once test across a snapshot boundary → passes
-- [ ] **5.5 Recovery scenarios (e2e)**
-  - [ ] 5.5.1 Wiped follower rejoins via snapshot and its state hash matches (20 runs); long-partitioned follower catches up past compaction → all pass
-  - [ ] 5.5.2 Add follower-wipe to the e2e fault driver and nightly; linearizability still passes → 0 violations
+- [x] **5.1 Raft core snapshot support**
+  - [x] 5.1.1 `Storage.Snapshot()` / `ApplySnapshot`, compaction index in `raftLog` → unit tests (#17)
+  - [x] 5.1.2 Leader sends a snapshot when the follower needs compacted entries (Progress Snapshot state) → unit tests (#17)
+  - [x] 5.1.3 Follower handles a snapshot (reject stale, reset log, update commit) → unit tests (#17)
+  - [x] 5.1.4 Sim: low snapshot threshold plus crashes during install → 10,000 seeds pass (#17)
+- [x] **5.2 Snapshot creation (internal/snapshot)**
+  - [x] 5.2.1 Metadata `{index, term, membership, format_version, checksum}` (D-14) → round-trip test (#17)
+  - [x] 5.2.2 Pebble checkpoint taken between apply batches so its index equals `appliedIndex` → test asserts equality (#17)
+  - [x] 5.2.3 Trigger every 100k entries (configurable), keep the last 2, clean up temp dirs on start → tests with small thresholds (#17)
+- [x] **5.3 WAL compaction**
+  - [x] 5.3.1 Release WAL segments under the D-30 rule, with a small retention tail for slow followers → unit test (#17)
+  - [x] 5.3.2 Steady-write run: WAL disk use stays bounded → result recorded (#17)
+- [x] **5.4 Transfer and install**
+  - [x] 5.4.1 Sender: `InstallSnapshot` stream in 1 MiB chunks → integration test (#17)
+  - [x] 5.4.2 Receiver: stage chunks in a temp dir, verify checksum; an interrupted transfer starts over (D-14) → corrupt chunk rejected, killed transfer restarts (#17)
+  - [x] 5.4.3 Install: close Pebble, atomic dir swap (rename plus dir fsync), reset WAL to the snapshot index, reopen → test (#17)
+  - [x] 5.4.4 Crash safety: kill -9 at each install step → always old or new state, never a mix (#17)
+  - [x] 5.4.5 Session table restored from the snapshot; exactly-once test across a snapshot boundary → passes (#17)
+- [x] **5.5 Recovery scenarios (e2e)**
+  - [x] 5.5.1 Wiped follower rejoins via snapshot and its state hash matches (20 runs); long-partitioned follower catches up past compaction → all pass (#17)
+  - [x] 5.5.2 Add follower-wipe to the e2e fault driver and nightly; linearizability still passes → 0 violations (#17)
 - [ ] **5.9 M5 exit review**
-  - [ ] 5.9.1 Link evidence for every M5 exit criterion; add snapshot metrics (size, duration, installs) and update storage-design.md → linked, diff reviewed
+  - [ ] 5.9.1 Link evidence for every M5 exit criterion; add snapshot metrics (size, duration, installs) and update storage-design.md → linked, diff reviewed (partial #17: snapshot metrics and storage-design done)
   - [ ] 5.9.2 Update CHANGELOG.md and memory.md, tag `v0.4.0` → diff reviewed, tag exists
 
 ---
