@@ -587,3 +587,13 @@ func (r *raft) advance(rd Ready) {
 		}
 	}
 }
+
+// reportUnreachable implements RawNode.ReportUnreachable.
+func (r *raft) reportUnreachable(id uint64) {
+	if r.state != StateLeader {
+		return
+	}
+	if pr, ok := r.prs[id]; ok && id != r.id && pr.State == ProgressReplicate {
+		pr.becomeProbe()
+	}
+}

@@ -517,3 +517,24 @@ func TestRawNodeAPICompiles(*testing.T) {
 	sig[func(*RawNode, Ready)]((*RawNode).Advance)
 	sig[func(*RawNode) Status]((*RawNode).Status)
 }
+
+// ReportUnreachable drops a Replicate follower to Probe (D-12) and is a no-op
+// for followers and unknown nodes.
+func TestReportUnreachableDropsToProbe(t *testing.T) {
+	nw := newNetwork(t, 3)
+	nw.campaign(1)
+	if _, _, err := nw.propose(1, "x"); err != nil {
+		t.Fatal(err)
+	}
+	lead := nw.node(1).rn
+	if st := lead.Status().Progress[2].State; st != ProgressReplicate {
+		t.Fatalf("precondition: node 2 state = %v, want Replicate", st)
+	}
+	lead.ReportUnreachable(2)
+	lead.ReportUnreachable(1)  // self: ignored
+	lead.ReportUnreachable(99) // unknown: ignored
+	if st := lead.Status().Progress[2].State; st != ProgressProbe {
+		t.Fatalf("node 2 state after ReportUnreachable = %v, want Probe", st)
+	}
+	nw.node(2).rn.ReportUnreachable(1) // follower: no-op, must not panic
+}

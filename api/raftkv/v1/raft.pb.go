@@ -728,15 +728,19 @@ func (x *ClusterConfig) GetConfigIndex() uint64 {
 }
 
 type AppendEntriesRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterId     uint64                 `protobuf:"varint,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
-	Term          uint64                 `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`
-	LeaderId      uint64                 `protobuf:"varint,3,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
-	PrevLogIndex  uint64                 `protobuf:"varint,4,opt,name=prev_log_index,json=prevLogIndex,proto3" json:"prev_log_index,omitempty"`
-	PrevLogTerm   uint64                 `protobuf:"varint,5,opt,name=prev_log_term,json=prevLogTerm,proto3" json:"prev_log_term,omitempty"`
-	Entries       []*Entry               `protobuf:"bytes,6,rep,name=entries,proto3" json:"entries,omitempty"` // empty = heartbeat
-	LeaderCommit  uint64                 `protobuf:"varint,7,opt,name=leader_commit,json=leaderCommit,proto3" json:"leader_commit,omitempty"`
-	ReadContext   []byte                 `protobuf:"bytes,8,opt,name=read_context,json=readContext,proto3" json:"read_context,omitempty"` // ReadIndex context (D-05), echoed back
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	ClusterId    uint64                 `protobuf:"varint,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
+	Term         uint64                 `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`
+	LeaderId     uint64                 `protobuf:"varint,3,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	PrevLogIndex uint64                 `protobuf:"varint,4,opt,name=prev_log_index,json=prevLogIndex,proto3" json:"prev_log_index,omitempty"`
+	PrevLogTerm  uint64                 `protobuf:"varint,5,opt,name=prev_log_term,json=prevLogTerm,proto3" json:"prev_log_term,omitempty"`
+	Entries      []*Entry               `protobuf:"bytes,6,rep,name=entries,proto3" json:"entries,omitempty"` // empty = heartbeat
+	LeaderCommit uint64                 `protobuf:"varint,7,opt,name=leader_commit,json=leaderCommit,proto3" json:"leader_commit,omitempty"`
+	ReadContext  []byte                 `protobuf:"bytes,8,opt,name=read_context,json=readContext,proto3" json:"read_context,omitempty"` // ReadIndex context (D-05), echoed back
+	// True for the leader's per-tick heartbeat. An empty `entries` alone cannot
+	// tell a heartbeat from an empty (probe) append, and the core treats them
+	// differently (D-12).
+	Heartbeat     bool `protobuf:"varint,9,opt,name=heartbeat,proto3" json:"heartbeat,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -827,17 +831,27 @@ func (x *AppendEntriesRequest) GetReadContext() []byte {
 	return nil
 }
 
+func (x *AppendEntriesRequest) GetHeartbeat() bool {
+	if x != nil {
+		return x.Heartbeat
+	}
+	return false
+}
+
 type AppendEntriesResponse struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	Term       uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
-	From       uint64                 `protobuf:"varint,2,opt,name=from,proto3" json:"from,omitempty"`
-	Success    bool                   `protobuf:"varint,3,opt,name=success,proto3" json:"success,omitempty"`
-	MatchIndex uint64                 `protobuf:"varint,4,opt,name=match_index,json=matchIndex,proto3" json:"match_index,omitempty"` // on success
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Term    uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	From    uint64                 `protobuf:"varint,2,opt,name=from,proto3" json:"from,omitempty"`
+	Success bool                   `protobuf:"varint,3,opt,name=success,proto3" json:"success,omitempty"`
+	// On success: the follower's match index. On reject: the rejected
+	// prev_log_index (the core needs it to ignore stale rejections).
+	MatchIndex uint64 `protobuf:"varint,4,opt,name=match_index,json=matchIndex,proto3" json:"match_index,omitempty"`
 	// On reject: conflict_term = follower's term at prev_log_index (0 if log too short);
 	// conflict_index = first index of that term, or last_index+1 if too short.
 	ConflictIndex uint64 `protobuf:"varint,5,opt,name=conflict_index,json=conflictIndex,proto3" json:"conflict_index,omitempty"`
 	ConflictTerm  uint64 `protobuf:"varint,6,opt,name=conflict_term,json=conflictTerm,proto3" json:"conflict_term,omitempty"`
 	ReadContext   []byte `protobuf:"bytes,7,opt,name=read_context,json=readContext,proto3" json:"read_context,omitempty"`
+	Heartbeat     bool   `protobuf:"varint,8,opt,name=heartbeat,proto3" json:"heartbeat,omitempty"` // answers a heartbeat request
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -919,6 +933,13 @@ func (x *AppendEntriesResponse) GetReadContext() []byte {
 		return x.ReadContext
 	}
 	return nil
+}
+
+func (x *AppendEntriesResponse) GetHeartbeat() bool {
+	if x != nil {
+		return x.Heartbeat
+	}
+	return false
 }
 
 type RequestVoteRequest struct {
@@ -1726,7 +1747,7 @@ const file_raftkv_v1_raft_proto_rawDesc = "" +
 	"\x06member\x18\x02 \x01(\v2\x11.raftkv.v1.MemberR\x06member\"_\n" +
 	"\rClusterConfig\x12+\n" +
 	"\amembers\x18\x01 \x03(\v2\x11.raftkv.v1.MemberR\amembers\x12!\n" +
-	"\fconfig_index\x18\x02 \x01(\x04R\vconfigIndex\"\xa4\x02\n" +
+	"\fconfig_index\x18\x02 \x01(\x04R\vconfigIndex\"\xc2\x02\n" +
 	"\x14AppendEntriesRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x12\n" +
@@ -1736,7 +1757,8 @@ const file_raftkv_v1_raft_proto_rawDesc = "" +
 	"\rprev_log_term\x18\x05 \x01(\x04R\vprevLogTerm\x12*\n" +
 	"\aentries\x18\x06 \x03(\v2\x10.raftkv.v1.EntryR\aentries\x12#\n" +
 	"\rleader_commit\x18\a \x01(\x04R\fleaderCommit\x12!\n" +
-	"\fread_context\x18\b \x01(\fR\vreadContext\"\xe9\x01\n" +
+	"\fread_context\x18\b \x01(\fR\vreadContext\x12\x1c\n" +
+	"\theartbeat\x18\t \x01(\bR\theartbeat\"\x87\x02\n" +
 	"\x15AppendEntriesResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\x04R\x04from\x12\x18\n" +
@@ -1745,7 +1767,8 @@ const file_raftkv_v1_raft_proto_rawDesc = "" +
 	"matchIndex\x12%\n" +
 	"\x0econflict_index\x18\x05 \x01(\x04R\rconflictIndex\x12#\n" +
 	"\rconflict_term\x18\x06 \x01(\x04R\fconflictTerm\x12!\n" +
-	"\fread_context\x18\a \x01(\fR\vreadContext\"\x80\x02\n" +
+	"\fread_context\x18\a \x01(\fR\vreadContext\x12\x1c\n" +
+	"\theartbeat\x18\b \x01(\bR\theartbeat\"\x80\x02\n" +
 	"\x12RequestVoteRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x12\n" +
