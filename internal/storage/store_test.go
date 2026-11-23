@@ -10,6 +10,7 @@ import (
 	raftkvv1 "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1"
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/cockroachdb/pebble/v2/vfs"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/command"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
@@ -190,6 +191,48 @@ func TestApplierResults(t *testing.T) {
 	// Get-through-the-log changes no state.
 	if _, ok, _ := s.Get([]byte("k")); ok {
 		t.Fatal("key should be deleted")
+	}
+}
+
+// CheckProposal accepts exactly what Apply can apply, so the debug Propose RPC
+// can refuse a payload that would otherwise crash every replica (D-33).
+func TestCheckProposal(t *testing.T) {
+	s := openMem(t, vfs.NewMem())
+	defer func() { _ = s.Close() }()
+	a := NewApplier(s, nil)
+	enc := func(c cmdT, err error) []byte {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := proto.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	for name, d := range map[string][]byte{
+		"put":    enc(command.Put(1, 0, []byte("k"), []byte("v"))),
+		"delete": enc(command.Delete(1, 0, []byte("k"))),
+		"get":    enc(command.Get(1, 0, []byte("k"))),
+	} {
+		if err := a.CheckProposal(d); err != nil {
+			t.Errorf("%s: CheckProposal = %v, want nil", name, err)
+		}
+	}
+	bad := map[string][]byte{
+		"raw bytes": []byte("smoke"),
+		"no op":     enc(&raftkvv1.Command{RequestId: 1}, nil),
+		"empty key": enc(&raftkvv1.Command{Op: &raftkvv1.Command_Put{Put: &raftkvv1.PutOp{Value: []byte("v")}}}, nil),
+	}
+	for name, d := range bad {
+		if err := a.CheckProposal(d); err == nil {
+			t.Errorf("%s: CheckProposal = nil, want an error", name)
+		}
+		// Each would indeed have been fatal in Apply.
+		if err := a.Apply([]raft.Entry{{Index: s.Applied() + 1, Term: 1, Type: raft.EntryNormal, Data: d}}); err == nil {
+			t.Errorf("%s: Apply accepted a payload CheckProposal rejects", name)
+		}
 	}
 }
 

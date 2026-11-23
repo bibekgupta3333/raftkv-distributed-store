@@ -18,6 +18,15 @@ type Applier interface {
 	Applied() uint64
 }
 
+// ProposalChecker is optionally implemented by an [Applier] whose Apply fails
+// on payloads it cannot decode (the Pebble applier, M3). Such an entry, once
+// committed, is a poison pill: every replica hits the same fatal apply error
+// (D-33) and the WAL can never be replayed. Paths that propose raw bytes (the
+// debug Propose RPC) call CheckProposal first and reject bad payloads.
+type ProposalChecker interface {
+	CheckProposal(data []byte) error
+}
+
 // MemoryApplier is the temporary in-memory applier for M2 (WBS 2.3.2): it
 // records every applied entry so tests can compare replicas. It is lost on
 // restart, so a restarted node re-applies the whole committed log.
