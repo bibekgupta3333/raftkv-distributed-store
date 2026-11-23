@@ -23,88 +23,91 @@ tasks, and every task aims at a working, tested feature.
 
 | Milestone | Theme | Done / Leaves | Est. weeks | Status |
 |-----------|-------|---------------|------------|--------|
-| M0 | Repo setup, tooling, protos | 6/15 | 1 | Not started |
-| M1 | Raft core + deterministic simulator | 0/39 | 5 | Not started |
-| M2 | WAL + gRPC transport + real 5-process cluster | 0/38 | 4 | Not started |
-| M3 | Pebble state machine + basic KV | 0/20 | 2.5 | Not started |
+| M0 | Repo setup, tooling, protos | 14/15 | 1 | In progress |
+| M1 | Raft core + deterministic simulator | 36/39 | 5 | In progress |
+| M2 | WAL + gRPC transport + real 5-process cluster | 33/38 | 4 | In progress |
+| M3 | Pebble state machine + basic KV | 17/20 | 2.5 | In progress |
 | M4 | Linearizable reads, client sessions, full KV API | 0/25 | 3.5 | Not started |
 | M5 | Snapshots + follower catch-up | 0/18 | 2.5 | Not started |
 | M6 | Membership changes + leadership transfer | 0/21 | 3 | Not started |
 | M7 | Kubernetes, observer UI, chaos tests, v1.0 | 0/25 | 3.5 | Not started |
-| **Total** | | **0/201** | **25** | |
+| **Total** | | **100/201** | **25** | |
+
+M0–M3 are "In progress" only because their exit reviews (release tags, linked evidence) and a few e2e leaves are
+still open; all their feature work is merged (#2–#9).
 
 ---
 
 ## 0. M0 — Repo setup, tooling, protos
 
-- [ ] **0.1 Repository skeleton**
+- [x] **0.1 Repository skeleton**
   - [x] 0.1.1 Resolve D-22 (license, Apache-2.0 unless changed) and add LICENSE → design-decisions.md shows `Decided`
   - [x] 0.1.2 `go mod init` with the D-21 module path and current Go toolchain → `go build ./...` passes
   - [x] 0.1.3 Create the directory layout from design-decisions.md (a `doc.go` per package) → `go vet ./...` passes, tree matches layout
   - [x] 0.1.4 README (summary, links to docs) and CONTRIBUTING.md (branching, commit style, WBS ticking rule) → render on GitHub
   - [x] 0.1.5 Create `CHANGELOG.md` (Keep a Changelog, `Unreleased` section) and `memory.md` (decisions, gotchas, how-tos) → files exist with headings
   - [x] 0.1.6 `.gitignore`, `.editorconfig`, PR template with a "WBS items ticked" checklist → template shows on a test PR
-- [ ] **0.2 Tooling**
-  - [ ] 0.2.1 Pin tool versions (golangci-lint, buf, protoc-gen-go, protoc-gen-go-grpc) via `go tool` directives → `make tools` installs exact versions
-  - [ ] 0.2.2 Makefile targets `all fmt fmt-check lint build test race proto clean help` → `make help` lists each, `make all` passes
-  - [ ] 0.2.3 `.golangci.yml` with a `forbidigo` rule banning `time.Now` in `internal/raft` (D-24) → lint passes, a planted `time.Now()` fails
-  - [ ] 0.2.4 `cmd/raftkvd` and `cmd/raftkvctl` stub mains with version stamped via `-ldflags` → `raftkvd --version` prints version and git SHA
-- [ ] **0.3 Protobuf skeleton**
-  - [ ] 0.3.1 `buf.yaml` (lint STANDARD) and `buf.gen.yaml` → `buf lint` passes
-  - [ ] 0.3.2 `api/raftkv/v1/kv.proto`, `cluster.proto` (D-23), `raft.proto` (D-36) with messages per api-design.md → generates and compiles
-  - [ ] 0.3.3 Commit generated code and add a drift check (`make proto && git diff --exit-code`) (D-43) → CI fails on stale generated code
+- [x] **0.2 Tooling**
+  - [x] 0.2.1 Pin tool versions (golangci-lint, buf, protoc-gen-go, protoc-gen-go-grpc) via `go tool` directives → `make tools` installs exact versions (#2)
+  - [x] 0.2.2 Makefile targets `all fmt fmt-check lint build test race proto clean help` → `make help` lists each, `make all` passes (#2)
+  - [x] 0.2.3 `.golangci.yml` with a `forbidigo` rule banning `time.Now` in `internal/raft` (D-24) → lint passes, a planted `time.Now()` fails (#2)
+  - [x] 0.2.4 `cmd/raftkvd` and `cmd/raftkvctl` stub mains with version stamped via `-ldflags` → `raftkvd --version` prints version and git SHA (#2)
+- [x] **0.3 Protobuf skeleton**
+  - [x] 0.3.1 `buf.yaml` (lint STANDARD) and `buf.gen.yaml` → `buf lint` passes (#2)
+  - [x] 0.3.2 `api/raftkv/v1/kv.proto`, `cluster.proto` (D-23), `raft.proto` (D-36) with messages per api-design.md → generates and compiles (#3)
+  - [x] 0.3.3 Commit generated code and add a drift check (`make proto && git diff --exit-code`) (D-43) → CI fails on stale generated code (#2, #3)
 - [ ] **0.4 CI and exit review**
-  - [ ] 0.4.1 `.github/workflows/pr.yml`: Go cache, `make fmt-check lint build test race`, buf lint, proto drift check → green on `main`
+  - [x] 0.4.1 `.github/workflows/pr.yml`: Go cache, `make fmt-check lint build test race`, buf lint, proto drift check → green on `main` (#2)
   - [ ] 0.4.2 M0 exit review: link evidence for each roadmap M0 exit criterion, update CHANGELOG.md and memory.md, tag `v0.0.1` → all criteria linked, tag exists
 
 ---
 
 ## 1. M1 — Raft core + deterministic simulator
 
-- [ ] **1.1 Core types and interfaces**
-  - [ ] 1.1.1 `Entry`, `HardState`, `Message`, `StateType`, `Config` with validation → unit tests for `Config.Validate`
-  - [ ] 1.1.2 `Storage` interface and `MemoryStorage` → table tests
-  - [ ] 1.1.3 `RawNode` API (`Tick`, `Step`, `Propose`, `Ready`, `HasReady`, `Advance`) and the `Ready` contract (D-01) → godoc plus compile test
-  - [ ] 1.1.4 `raftLog` (unstable + stable, committed, applied) with invariant checks in tests → unit tests
-- [ ] **1.2 Leader election**
-  - [ ] 1.2.1 Follower → candidate on randomized election timeout in ticks (D-08, D-24) → test: timeouts stay within bounds
-  - [ ] 1.2.2 RequestVote handling: term check, log up-to-date check, persisted `votedFor` → table tests for every branch
-  - [ ] 1.2.3 Candidate wins on majority, steps down on higher term or a valid leader's message → unit tests
-  - [ ] 1.2.4 Leader appends a no-op entry on election and sends heartbeats each heartbeat tick → tests: first entry of a term is a no-op, followers don't time out
-  - [ ] 1.2.5 PreVote (D-08): pre-candidate doesn't bump term → test: rejoining partitioned node doesn't raise term
-  - [ ] 1.2.6 CheckQuorum (D-08): leader steps down without majority contact, followers ignore votes while they have a live leader → unit tests
-- [ ] **1.3 Log replication**
-  - [ ] 1.3.1 AppendEntries send with prevIndex/prevTerm from `Progress.next` → unit test
-  - [ ] 1.3.2 Follower consistency check, conflict truncation, append → tests incl. Figure 7 logs
-  - [ ] 1.3.3 Reject with conflict hint and fast leader backtracking → test: large divergence resolves in a few round trips
-  - [ ] 1.3.4 `Progress` tracking (match, next, Probe/Replicate) → unit tests
-  - [ ] 1.3.5 Commit rule: only current-term entries are committed by counting replicas; followers take commit from leader → Figure 8 test passes
-  - [ ] 1.3.6 Committed entries exposed in `Ready`, applied index advanced on `Advance` → unit test
-- [ ] **1.4 Proposals**
-  - [ ] 1.4.1 `Propose` on leader appends to log, `ErrProposalDropped` when there is no leader → unit tests
-  - [ ] 1.4.2 Follower proposal returns a not-leader error with a leader hint (forwarding is added in M4, D-28) → unit test
-  - [ ] 1.4.3 Uncommitted-size limit (D-29) and per-message size limit → tests: proposals rejected past the limit
-- [ ] **1.5 Deterministic simulator (test/sim)**
-  - [ ] 1.5.1 Seeded PRNG, virtual clock, event loop driving N `RawNode`s → same seed gives identical trace (hash compare)
-  - [ ] 1.5.2 Virtual network: delay, drop, duplicate, reorder per link → unit tests on the network model
-  - [ ] 1.5.3 Partition scheduler (random splits, isolate leader, heal) → scenario test
-  - [ ] 1.5.4 Crash/restart model: lose unpersisted state, keep HardState and stable log → scenario test
-  - [ ] 1.5.5 Client workload generator plus a reference model of the applied sequence → planted divergence detected
-- [ ] **1.6 Invariant checker**
-  - [ ] 1.6.1 Election Safety and Leader Append-Only → planted bugs detected
-  - [ ] 1.6.2 Log Matching and Leader Completeness → planted bugs detected
-  - [ ] 1.6.3 State Machine Safety and commit-index never decreases → planted bugs detected
-  - [ ] 1.6.4 Liveness check: after heal, a leader is elected and new proposals commit → per-seed result reported
-- [ ] **1.7 Simulator tooling and CI**
-  - [ ] 1.7.1 Flags `-seeds=N -start=S -faults=profile`; a failing seed prints a repro command → manual check
-  - [ ] 1.7.2 Trace dump on failure (JSONL) and a pretty-printer → failing seed gives a readable trace
-  - [ ] 1.7.3 Regression seeds in `test/sim/regressions/`, replayed on every PR → planted regression seed runs in CI
-  - [ ] 1.7.4 Add a 500-seed sim job to `pr.yml` → green
-  - [ ] 1.7.5 Create `.github/workflows/nightly.yml` with a long sim job (100,000+ seeds) → first nightly green
-- [ ] **1.8 Scenario tests**
-  - [ ] 1.8.1 Raft paper Figure 7 divergent logs converge, Figure 8 commit hazard handled → tests pass
-  - [ ] 1.8.2 Disruptive rejoin with PreVote on vs off (off shows term inflation) → both behaviors asserted
-  - [ ] 1.8.3 Leader isolation with CheckQuorum → step-down asserted
+- [x] **1.1 Core types and interfaces**
+  - [x] 1.1.1 `Entry`, `HardState`, `Message`, `StateType`, `Config` with validation → unit tests for `Config.Validate` (#5)
+  - [x] 1.1.2 `Storage` interface and `MemoryStorage` → table tests (#5)
+  - [x] 1.1.3 `RawNode` API (`Tick`, `Step`, `Propose`, `Ready`, `HasReady`, `Advance`) and the `Ready` contract (D-01) → godoc plus compile test (#5)
+  - [x] 1.1.4 `raftLog` (unstable + stable, committed, applied) with invariant checks in tests → unit tests (#5)
+- [x] **1.2 Leader election**
+  - [x] 1.2.1 Follower → candidate on randomized election timeout in ticks (D-08, D-24) → test: timeouts stay within bounds (#5)
+  - [x] 1.2.2 RequestVote handling: term check, log up-to-date check, persisted `votedFor` → table tests for every branch (#5)
+  - [x] 1.2.3 Candidate wins on majority, steps down on higher term or a valid leader's message → unit tests (#5)
+  - [x] 1.2.4 Leader appends a no-op entry on election and sends heartbeats each heartbeat tick → tests: first entry of a term is a no-op, followers don't time out (#5)
+  - [x] 1.2.5 PreVote (D-08): pre-candidate doesn't bump term → test: rejoining partitioned node doesn't raise term (#5)
+  - [x] 1.2.6 CheckQuorum (D-08): leader steps down without majority contact, followers ignore votes while they have a live leader → unit tests (#5)
+- [x] **1.3 Log replication**
+  - [x] 1.3.1 AppendEntries send with prevIndex/prevTerm from `Progress.next` → unit test (#5)
+  - [x] 1.3.2 Follower consistency check, conflict truncation, append → tests incl. Figure 7 logs (#5)
+  - [x] 1.3.3 Reject with conflict hint and fast leader backtracking → test: large divergence resolves in a few round trips (#5)
+  - [x] 1.3.4 `Progress` tracking (match, next, Probe/Replicate) → unit tests (#5)
+  - [x] 1.3.5 Commit rule: only current-term entries are committed by counting replicas; followers take commit from leader → Figure 8 test passes (#5)
+  - [x] 1.3.6 Committed entries exposed in `Ready`, applied index advanced on `Advance` → unit test (#5)
+- [x] **1.4 Proposals**
+  - [x] 1.4.1 `Propose` on leader appends to log, `ErrProposalDropped` when there is no leader → unit tests (#5)
+  - [x] 1.4.2 Follower proposal returns a not-leader error with a leader hint (forwarding is added in M4, D-28) → unit test (#5)
+  - [x] 1.4.3 Uncommitted-size limit (D-29) and per-message size limit → tests: proposals rejected past the limit (#5)
+- [x] **1.5 Deterministic simulator (test/sim)**
+  - [x] 1.5.1 Seeded PRNG, virtual clock, event loop driving N `RawNode`s → same seed gives identical trace (hash compare) (#7)
+  - [x] 1.5.2 Virtual network: delay, drop, duplicate, reorder per link → unit tests on the network model (#7)
+  - [x] 1.5.3 Partition scheduler (random splits, isolate leader, heal) → scenario test (#7)
+  - [x] 1.5.4 Crash/restart model: lose unpersisted state, keep HardState and stable log → scenario test (#7)
+  - [x] 1.5.5 Client workload generator plus a reference model of the applied sequence → planted divergence detected (#7)
+- [x] **1.6 Invariant checker**
+  - [x] 1.6.1 Election Safety and Leader Append-Only → planted bugs detected (#7)
+  - [x] 1.6.2 Log Matching and Leader Completeness → planted bugs detected (#7)
+  - [x] 1.6.3 State Machine Safety and commit-index never decreases → planted bugs detected (#7)
+  - [x] 1.6.4 Liveness check: after heal, a leader is elected and new proposals commit → per-seed result reported (#7)
+- [x] **1.7 Simulator tooling and CI**
+  - [x] 1.7.1 Flags `-seeds=N -start=S -faults=profile`; a failing seed prints a repro command → manual check (#7)
+  - [x] 1.7.2 Trace dump on failure (JSONL) and a pretty-printer → failing seed gives a readable trace (#7)
+  - [x] 1.7.3 Regression seeds in `test/sim/regressions/`, replayed on every PR → planted regression seed runs in CI (#7)
+  - [x] 1.7.4 Add a 500-seed sim job to `pr.yml` → green (#7)
+  - [x] 1.7.5 Create `.github/workflows/nightly.yml` with a long sim job (100,000+ seeds) → first nightly green (#7)
+- [x] **1.8 Scenario tests**
+  - [x] 1.8.1 Raft paper Figure 7 divergent logs converge, Figure 8 commit hazard handled → tests pass (#5)
+  - [x] 1.8.2 Disruptive rejoin with PreVote on vs off (off shows term inflation) → both behaviors asserted (#5)
+  - [x] 1.8.3 Leader isolation with CheckQuorum → step-down asserted (#5)
 - [ ] **1.9 M1 exit review**
   - [ ] 1.9.1 Run 10,000 seeds with the full fault profile, race detector clean → 0 violations, CI run linked
   - [ ] 1.9.2 Update architecture.md / system-design.md Raft core sections to match the code → diff reviewed
@@ -114,47 +117,49 @@ tasks, and every task aims at a working, tested feature.
 
 ## 2. M2 — WAL + gRPC transport + real 5-process cluster
 
-- [ ] **2.1 WAL (internal/wal)**
-  - [ ] 2.1.1 Record format `[len|type|crc32c|payload]` encoder/decoder → round-trip test plus fuzz seeds
-  - [ ] 2.1.2 Segment files, rollover at a size limit, directory fsync on create → test: rollover at boundary
-  - [ ] 2.1.3 Append entries and HardState records, `Sync()` with fsync (`F_FULLFSYNC` on macOS) → tests
-  - [ ] 2.1.4 Open/replay: rebuild entries and last HardState, handle entries overwritten by a conflict → replay tests
-  - [ ] 2.1.5 Tail repair: cut a torn final record, refuse to start on corruption elsewhere (D-33) → tests
-  - [ ] 2.1.6 Fault-injecting file shim (truncate/corrupt at offset, fail fsync) → shim unit tests
-  - [ ] 2.1.7 Crash matrix: every byte offset of the last 2 records across many random logs → 0 silent corruptions
-  - [ ] 2.1.8 fsync or write error crashes the node, never retried (D-33) → test asserts the exit path
-  - [ ] 2.1.9 `ReleaseTo(index)` deletes whole old segments (used in M5) → unit test
-  - [ ] 2.1.10 WAL implements Raft `Storage` → same Storage test suite as `MemoryStorage` passes
-- [ ] **2.2 Transport (internal/transport)**
-  - [ ] 2.2.1 gRPC server for the Raft service with message-size limits → server starts, rejects oversize messages
-  - [ ] 2.2.2 One outbound `Replicate` stream per follower with a send queue (D-12) → test with in-process peers
-  - [ ] 2.2.3 Flow control: max 256 in-flight messages per follower (D-29) → unit test
-  - [ ] 2.2.4 Reconnect with backoff and jitter, report unreachable peers to the core → test: peer restart reconnects
-  - [ ] 2.2.5 `RequestVote` RPC with pre-vote flag (D-36) → test
-  - [ ] 2.2.6 Static peer address book from config, DNS re-resolved on reconnect → test
-- [ ] **2.3 Node loop and server (internal/node)**
-  - [ ] 2.3.1 Driver loop: tick → `Tick`, inbound → `Step`, `Ready` → persist, send, apply, `Advance` (D-35) → 3 in-process nodes commit entries
-  - [ ] 2.3.2 Temporary in-memory applier plus a debug `Propose` RPC behind a build tag → 5 nodes commit 10k entries
-  - [ ] 2.3.3 Config from YAML file plus flags with validation → table tests
-  - [ ] 2.3.4 Bootstrap from config, node ID saved in the data dir, refuse ID mismatch → tests
-  - [ ] 2.3.5 Graceful shutdown on SIGTERM/SIGINT → test
-  - [ ] 2.3.6 `raftkvctl debug wal-dump` to compare logs across nodes → prints entries from a data dir
-- [ ] **2.4 Observability (D-17)**
-  - [ ] 2.4.1 `log/slog` JSON logs with `node_id`, `term`, `component` fields → log sample in test
-  - [ ] 2.4.2 `/metrics` with Raft metrics (term, state, leader changes, commit/applied index) → asserted in a test
-  - [ ] 2.4.3 WAL fsync timing and transport metrics (sent, failures, reconnects) → asserted
-  - [ ] 2.4.4 OTel tracing with spans `raft.propose`, `wal.fsync`, `apply` → test with an in-memory exporter
-- [ ] **2.5 Packaging and local cluster**
-  - [ ] 2.5.1 Multi-stage Dockerfile (non-root, static binary) → image builds, runs `--version`
-  - [ ] 2.5.2 `deploy/compose/docker-compose.yml` with 5 nodes plus Prometheus, and `make cluster-up/down/logs` → cluster elects a leader
+- [x] **2.1 WAL (internal/wal)**
+  - [x] 2.1.1 Record format `[len|type|crc32c|payload]` encoder/decoder → round-trip test plus fuzz seeds (#4)
+  - [x] 2.1.2 Segment files, rollover at a size limit, directory fsync on create → test: rollover at boundary (#4)
+  - [x] 2.1.3 Append entries and HardState records, `Sync()` with fsync (`F_FULLFSYNC` on macOS) → tests (#4)
+  - [x] 2.1.4 Open/replay: rebuild entries and last HardState, handle entries overwritten by a conflict → replay tests (#4)
+  - [x] 2.1.5 Tail repair: cut a torn final record, refuse to start on corruption elsewhere (D-33) → tests (#4)
+  - [x] 2.1.6 Fault-injecting file shim (truncate/corrupt at offset, fail fsync) → shim unit tests (#4)
+  - [x] 2.1.7 Crash matrix: every byte offset of the last 2 records across many random logs → 0 silent corruptions (#4)
+  - [x] 2.1.8 fsync or write error crashes the node, never retried (D-33) → test asserts the exit path (#4)
+  - [x] 2.1.9 `ReleaseTo(index)` deletes whole old segments (used in M5) → unit test (#4)
+  - [x] 2.1.10 WAL implements Raft `Storage` → same Storage test suite as `MemoryStorage` passes (#6)
+- [x] **2.2 Transport (internal/transport)**
+  - [x] 2.2.1 gRPC server for the Raft service with message-size limits → server starts, rejects oversize messages (#6)
+  - [x] 2.2.2 One outbound `Replicate` stream per follower with a send queue (D-12) → test with in-process peers (#6)
+  - [x] 2.2.3 Flow control: max 256 in-flight messages per follower (D-29) → unit test (#6)
+  - [x] 2.2.4 Reconnect with backoff and jitter, report unreachable peers to the core → test: peer restart reconnects (#6)
+  - [x] 2.2.5 `RequestVote` RPC with pre-vote flag (D-36) → test (#6)
+  - [x] 2.2.6 Static peer address book from config, DNS re-resolved on reconnect → test (#6)
+- [x] **2.3 Node loop and server (internal/node)**
+  - [x] 2.3.1 Driver loop: tick → `Tick`, inbound → `Step`, `Ready` → persist, send, apply, `Advance` (D-35) → 3 in-process nodes commit entries (#6)
+  - [x] 2.3.2 Temporary in-memory applier plus a debug `Propose` RPC behind a build tag → 5 nodes commit 10k entries (#6)
+  - [x] 2.3.3 Config from YAML file plus flags with validation → table tests (#6)
+  - [x] 2.3.4 Bootstrap from config, node ID saved in the data dir, refuse ID mismatch → tests (#6)
+  - [x] 2.3.5 Graceful shutdown on SIGTERM/SIGINT → test (#6)
+  - [x] 2.3.6 `raftkvctl debug wal-dump` to compare logs across nodes → prints entries from a data dir (#6)
+- [x] **2.4 Observability (D-17)**
+  - [x] 2.4.1 `log/slog` JSON logs with `node_id`, `term`, `component` fields → log sample in test (#6)
+  - [x] 2.4.2 `/metrics` with Raft metrics (term, state, leader changes, commit/applied index) → asserted in a test (#6)
+  - [x] 2.4.3 WAL fsync timing and transport metrics (sent, failures, reconnects) → asserted (#6)
+  - [x] 2.4.4 OTel tracing with spans `raft.propose`, `wal.fsync`, `apply` → test with an in-memory exporter (#6)
+- [x] **2.5 Packaging and local cluster**
+  - [x] 2.5.1 Multi-stage Dockerfile (non-root, static binary) → image builds, runs `--version` (#8)
+  - [x] 2.5.2 `deploy/compose/docker-compose.yml` with 5 nodes plus Prometheus, and `make cluster-up/down/logs` → cluster elects a leader (#8)
 - [ ] **2.6 E2E harness (test/e2e)**
-  - [ ] 2.6.1 Go e2e framework: start/stop compose, find leader, wait helpers → smoke test passes
-  - [ ] 2.6.2 Fault driver: `kill -9`, restart, SIGSTOP/SIGCONT → each fault works on one container
-  - [ ] 2.6.3 Fault driver: iptables partition and heal, `tc netem` delay/loss → partition test passes
-  - [ ] 2.6.4 Seeded fault schedule with a timestamped fault log → fault log uploaded as a CI artifact
-  - [ ] 2.6.5 Tests: leader elected on start, new leader after leader kill, minority stops committing and logs match after heal → pass
+  - [x] 2.6.1 Go e2e framework: start/stop compose, find leader, wait helpers → smoke test passes (#8)
+  - [x] 2.6.2 Fault driver: `kill -9`, restart, SIGSTOP/SIGCONT → each fault works on one container (#8)
+  - [x] 2.6.3 Fault driver: iptables partition and heal, `tc netem` delay/loss → partition test passes (#8)
+  - [x] 2.6.4 Seeded fault schedule with a timestamped fault log → fault log uploaded as a CI artifact (#8)
+  - [x] 2.6.5 Tests: leader elected on start, new leader after leader kill, minority stops committing and logs match after heal → pass (#8)
   - [ ] 2.6.6 Test: 200 rounds of kill -9 and restart, no committed entry lost → passes
+    (partial: test added in #8; the PR job runs 20 rounds, the 200-round nightly run has not passed yet)
   - [ ] 2.6.7 Add the short e2e job to `pr.yml` and a long e2e job to `nightly.yml` → both green
+    (partial: both jobs added in #8; `e2e-long` has not had a green night yet)
 - [ ] **2.9 M2 exit review**
   - [ ] 2.9.1 Re-run sim 10,000 seeds and link evidence for every M2 exit criterion → all linked
   - [ ] 2.9.2 Update storage-design.md (WAL as built), system-design.md (node loop), ci-e2e.md (jobs) → diffs reviewed
@@ -164,28 +169,29 @@ tasks, and every task aims at a working, tested feature.
 
 ## 3. M3 — Pebble state machine + basic KV
 
-- [ ] **3.1 Pebble state machine (internal/storage)**
-  - [ ] 3.1.1 Open Pebble with its WAL off (D-02, D-03) → opens and closes cleanly
-  - [ ] 3.1.2 Key prefixes for user data, sessions, and metadata, plus a schema version key → encoding tests
-  - [ ] 3.1.3 Apply batch: Put/Delete plus `appliedIndex` in the same batch (D-04) → unit test
-  - [ ] 3.1.4 Track the durable applied index with a flush listener → test: it advances only after a flush
-  - [ ] 3.1.5 WAL truncation rule (D-30): flush first, never `ReleaseTo` past the durable applied index → test: truncation never passes it
-  - [ ] 3.1.6 Recovery: read `appliedIndex`, replay the rest from the WAL → crash test
-  - [ ] 3.1.7 Crash suite: 500 kill -9 during apply, state hash vs reference model; plus truncation-safety test with unflushed memtables → 0 mismatches
-  - [ ] 3.1.8 `raftkvctl debug state-hash` → same hash on all replicas at the same applied index
-- [ ] **3.2 Commands and KV service**
-  - [ ] 3.2.1 Command envelope proto (type, payload, request ID) in log entries → round-trip test
-  - [ ] 3.2.2 Proposal tracking: request ID → waiter, resolved on apply, failed with a retryable error on leader change → unit tests
-  - [ ] 3.2.3 `Put` and `Delete` handlers (validate, propose, wait for apply) → integration tests
-  - [ ] 3.2.4 `Get` through the log, and `NOT_LEADER` errors with a leader hint → integration tests
-- [ ] **3.3 Client library (pkg/client)**
-  - [ ] 3.3.1 Connect to all endpoints, cache the leader, follow `NOT_LEADER` hints → unit test with fake servers
-  - [ ] 3.3.2 Retry on retryable codes with backoff, bounded by the deadline → unit tests
-  - [ ] 3.3.3 `raftkvctl put/get/del` using the client library → e2e smoke
+- [x] **3.1 Pebble state machine (internal/storage)**
+  - [x] 3.1.1 Open Pebble with its WAL off (D-02, D-03) → opens and closes cleanly (#9)
+  - [x] 3.1.2 Key prefixes for user data, sessions, and metadata, plus a schema version key → encoding tests (#9)
+  - [x] 3.1.3 Apply batch: Put/Delete plus `appliedIndex` in the same batch (D-04) → unit test (#9)
+  - [x] 3.1.4 Track the durable applied index with a flush listener → test: it advances only after a flush (#9)
+  - [x] 3.1.5 WAL truncation rule (D-30): flush first, never `ReleaseTo` past the durable applied index → test: truncation never passes it (#9)
+  - [x] 3.1.6 Recovery: read `appliedIndex`, replay the rest from the WAL → crash test (#9)
+  - [x] 3.1.7 Crash suite: 500 kill -9 during apply, state hash vs reference model; plus truncation-safety test with unflushed memtables → 0 mismatches (#9)
+  - [x] 3.1.8 `raftkvctl debug state-hash` → same hash on all replicas at the same applied index (#9)
+- [x] **3.2 Commands and KV service**
+  - [x] 3.2.1 Command envelope proto (type, payload, request ID) in log entries → round-trip test (#9)
+  - [x] 3.2.2 Proposal tracking: request ID → waiter, resolved on apply, failed with a retryable error on leader change → unit tests (#9)
+  - [x] 3.2.3 `Put` and `Delete` handlers (validate, propose, wait for apply) → integration tests (#9)
+  - [x] 3.2.4 `Get` through the log, and `NOT_LEADER` errors with a leader hint → integration tests (#9)
+- [x] **3.3 Client library (pkg/client)**
+  - [x] 3.3.1 Connect to all endpoints, cache the leader, follow `NOT_LEADER` hints → unit test with fake servers (#9)
+  - [x] 3.3.2 Retry on retryable codes with backoff, bounded by the deadline → unit tests (#9)
+  - [x] 3.3.3 `raftkvctl put/get/del` using the client library → e2e smoke (#9)
 - [ ] **3.4 Linearizability harness (test/linearizability)**
-  - [ ] 3.4.1 History recorder (invoke/return times, client, op, result, unknown on timeout) → unit test
-  - [ ] 3.4.2 Porcupine KV model split per key, checker with a timeout (timeout = fail), HTML view on failure → known-bad history detected
+  - [x] 3.4.1 History recorder (invoke/return times, client, op, result, unknown on timeout) → unit test (#9)
+  - [x] 3.4.2 Porcupine KV model split per key, checker with a timeout (timeout = fail), HTML view on failure → known-bad history detected (#9)
   - [ ] 3.4.3 Wire the recorder into e2e with leader kill, follower kill, and partition → checked histories, 0 violations
+    (partial: #9 runs it on an in-process 5-node gRPC cluster; the docker-compose e2e wiring is still open)
 - [ ] **3.9 M3 exit review**
   - [ ] 3.9.1 Link evidence for every M3 exit criterion; update storage-design.md (key schema, durability) and api-design.md (implemented RPCs) → linked, diffs reviewed
   - [ ] 3.9.2 Update CHANGELOG.md and memory.md, tag `v0.2.0` → diff reviewed, tag exists

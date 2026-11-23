@@ -51,7 +51,7 @@ proto: ## regenerate protobuf code
 e2e-image: ## build the e2e node image (debugpropose, iptables, tc)
 	docker build --target e2e --build-arg GOFLAGS_TAGS=debugpropose --build-arg VERSION=$(VERSION) --build-arg SHA=$(SHA) -t $(IMAGE) .
 
-cluster-up: e2e-image ## start the 5-node compose cluster + Prometheus (localhost:19090)
+cluster-up: e2e-image ## 5-node compose cluster + Prometheus :19090, Grafana :13000, observer :18080 (localhost)
 	$(COMPOSE) up -d --no-build
 
 cluster-down: ## stop the compose cluster and delete its volumes
