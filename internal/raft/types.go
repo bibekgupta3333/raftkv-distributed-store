@@ -95,8 +95,8 @@ type SoftState struct {
 
 // MessageType is the kind of a peer message.
 //
-// Types for ReadIndex (M4), snapshots (M5) and leadership transfer (M6) will
-// be appended after the existing ones.
+// Types for snapshots (M5) and leadership transfer (M6) will be appended after
+// the existing ones.
 type MessageType uint8
 
 const (
@@ -120,6 +120,15 @@ const (
 	MsgPreVote
 	// MsgPreVoteResp answers MsgPreVote.
 	MsgPreVoteResp
+	// MsgReadIndex is a follower's ReadIndex request to the leader (D-05,
+	// D-36). Context is the caller's request context. It is term-less (Term
+	// 0) and never changes the receiver's term or role.
+	MsgReadIndex
+	// MsgReadIndexResp answers MsgReadIndex: Index is the read index and
+	// Context echoes the request. Reject means the receiver was not the
+	// leader (or lost leadership before confirming). It never changes the
+	// receiver's term or role.
+	MsgReadIndexResp
 )
 
 func (t MessageType) String() string {
@@ -128,6 +137,7 @@ func (t MessageType) String() string {
 		MsgHeartbeat: "MsgHeartbeat", MsgHeartbeatResp: "MsgHeartbeatResp",
 		MsgVote: "MsgVote", MsgVoteResp: "MsgVoteResp",
 		MsgPreVote: "MsgPreVote", MsgPreVoteResp: "MsgPreVoteResp",
+		MsgReadIndex: "MsgReadIndex", MsgReadIndexResp: "MsgReadIndexResp",
 	}
 	if int(t) < len(names) && names[t] != "" {
 		return names[t]
@@ -135,7 +145,7 @@ func (t MessageType) String() string {
 	return fmt.Sprintf("MessageType(%d)", uint8(t))
 }
 
-func (t MessageType) valid() bool { return t >= MsgApp && t <= MsgPreVoteResp }
+func (t MessageType) valid() bool { return t >= MsgApp && t <= MsgReadIndexResp }
 
 // Message is a peer-to-peer message. It is a plain Go value; the transport
 // (M2) is responsible for encoding it. Fields not used by a given Type are
@@ -162,7 +172,9 @@ type Message struct {
 	// backtracking, system-design 2.1).
 	RejectHint uint64
 
-	// Context is opaque and echoed by heartbeat responses (ReadIndex, M4).
+	// Context is opaque. On MsgHeartbeat it is the ReadIndex round being
+	// confirmed and is echoed by MsgHeartbeatResp; on MsgReadIndex and
+	// MsgReadIndexResp it is the caller's request context (D-05).
 	Context []byte
 }
 
@@ -192,6 +204,10 @@ type Ready struct {
 	CommittedEntries []Entry
 	// Messages must be sent only after Entries and HardState are durable.
 	Messages []Message
+	// ReadStates answer ReadIndex requests made on this node (D-05). Serve
+	// a successful one once the applied index reaches its Index; it needs
+	// nothing persisted first.
+	ReadStates []ReadState
 	// MustSync is true when Term/Vote changed or Entries is non-empty.
 	MustSync bool
 	// Snapshot is reserved for M5 and is always nil today.
@@ -204,6 +220,9 @@ var (
 	// known leader, this node is a candidate, or a size limit (D-29) is hit.
 	// It is safe to retry later.
 	ErrProposalDropped = errors.New("raft: proposal dropped")
+	// ErrReadIndexDropped means a ReadIndex request was not accepted
+	// because this node knows no leader. It is safe to retry later.
+	ErrReadIndexDropped = errors.New("raft: read index dropped, no known leader")
 	// ErrNotLeader is matched (errors.Is) by *NotLeaderError.
 	ErrNotLeader = errors.New("raft: not leader")
 	// ErrUnknownMessage is returned by Step for an invalid message type.

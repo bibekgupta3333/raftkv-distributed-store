@@ -27,6 +27,10 @@ const (
 	DefaultMaxInflight = 256
 	// DefaultVoteTimeout bounds one RequestVote round trip.
 	DefaultVoteTimeout = time.Second
+	// DefaultReadIndexTimeout bounds one ReadIndex round trip. The leader
+	// answers within a heartbeat round; a longer wait means it cannot reach a
+	// quorum, and the follower should retry (maybe at a new leader).
+	DefaultReadIndexTimeout = time.Second
 	// DefaultBackoffMin and DefaultBackoffMax bound reconnect backoff.
 	DefaultBackoffMin = 50 * time.Millisecond
 	DefaultBackoffMax = 2 * time.Second
@@ -87,8 +91,10 @@ type Config struct {
 	QueueSize   int // 0: DefaultQueueSize
 	MaxInflight int // 0: DefaultMaxInflight
 	VoteTimeout time.Duration
-	BackoffMin  time.Duration
-	BackoffMax  time.Duration
+	// ReadIndexTimeout bounds one ReadIndex round trip to the leader (D-05).
+	ReadIndexTimeout time.Duration
+	BackoffMin       time.Duration
+	BackoffMax       time.Duration
 	// DialOptions are extra grpc dial options (credentials, for example).
 	// Without any, the transport uses insecure credentials: mTLS is out of
 	// scope for this learning project (removed D-15).
@@ -125,6 +131,9 @@ func (c *Config) fill() error {
 	if c.VoteTimeout <= 0 {
 		c.VoteTimeout = DefaultVoteTimeout
 	}
+	if c.ReadIndexTimeout <= 0 {
+		c.ReadIndexTimeout = DefaultReadIndexTimeout
+	}
 	if c.BackoffMin <= 0 {
 		c.BackoffMin = DefaultBackoffMin
 	}
@@ -143,6 +152,7 @@ type Transport struct {
 	mu      sync.Mutex
 	inbound map[uint64]*inboundStream
 	votes   map[voteKey]chan raft.Message
+	reads   map[readKey]chan raft.Message
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 	started bool
@@ -162,6 +172,7 @@ func New(cfg Config) (*Transport, error) {
 		peers:   make(map[uint64]*peer),
 		inbound: make(map[uint64]*inboundStream),
 		votes:   make(map[voteKey]chan raft.Message),
+		reads:   make(map[readKey]chan raft.Message),
 		closing: make(chan struct{}),
 	}
 	for _, id := range cfg.Peers.IDs() {
@@ -251,6 +262,12 @@ func (t *Transport) Send(msgs []raft.Message) {
 			t.sendOnInbound(m)
 		case IsVoteResponse(m.Type):
 			t.completeVote(m)
+		case IsReadIndexRequest(m.Type):
+			if p := t.peers[m.To]; p != nil {
+				p.sendReadIndex(m)
+			}
+		case IsReadIndexResponse(m.Type):
+			t.completeReadIndex(m)
 		}
 	}
 }
@@ -303,6 +320,42 @@ func (t *Transport) registerVote(k voteKey) (<-chan raft.Message, func()) {
 		t.mu.Lock()
 		if t.votes[k] == ch {
 			delete(t.votes, k)
+		}
+		t.mu.Unlock()
+	}
+}
+
+// readKey matches a ReadIndex answer to the RPC that asked: the follower and
+// its request context (unique among that follower's requests in flight).
+type readKey struct {
+	from uint64
+	ctx  string
+}
+
+func (t *Transport) completeReadIndex(m raft.Message) {
+	k := readKey{from: m.To, ctx: string(m.Context)}
+	t.mu.Lock()
+	ch := t.reads[k]
+	t.mu.Unlock()
+	if ch == nil {
+		t.cfg.Observer.Dropped(m.To) // the RPC already gave up
+		return
+	}
+	select {
+	case ch <- m:
+	default:
+	}
+}
+
+func (t *Transport) registerReadIndex(k readKey) (<-chan raft.Message, func()) {
+	ch := make(chan raft.Message, 1)
+	t.mu.Lock()
+	t.reads[k] = ch
+	t.mu.Unlock()
+	return ch, func() {
+		t.mu.Lock()
+		if t.reads[k] == ch {
+			delete(t.reads, k)
 		}
 		t.mu.Unlock()
 	}

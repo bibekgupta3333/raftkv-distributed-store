@@ -21,6 +21,7 @@
 //	    // 1. persist rd.Entries and rd.HardState (fsync if rd.MustSync)
 //	    // 2. only then send rd.Messages
 //	    // 3. apply rd.CommittedEntries in order
+//	    // 4. hand rd.ReadStates to waiting reads (D-05)
 //	    node.Advance(rd)
 //	}
 //
@@ -32,8 +33,9 @@
 // # Extension points
 //
 // The API leaves room for later milestones without changing its shape:
-// ReadIndex (M4) adds Ready.ReadStates, and Message.Context is already carried
-// by heartbeats; snapshots (M5) populate Ready.Snapshot, add a Snapshot
-// progress state and a real [Storage.Snapshot]; membership changes (M6) use
-// [EntryConfChange] and per-node voter/learner sets next to Config.Peers.
+// ReadIndex (M4, D-05) added [RawNode.ReadIndex] and Ready.ReadStates, with
+// the round context carried by heartbeats (see read.go); snapshots (M5)
+// populate Ready.Snapshot, add a Snapshot progress state and a real
+// [Storage.Snapshot]; membership changes (M6) use [EntryConfChange] and
+// per-node voter/learner sets next to Config.Peers.
 package raft

@@ -34,6 +34,13 @@ type Profile struct {
 	// Degraded is what a degraded link looks like.
 	Degraded Link
 	Weights  Weights
+	// LeaseReads makes leaders answer reads from a lease (D-25) instead of a
+	// ReadIndex round while the lease is valid.
+	LeaseReads bool
+	// Periods is the [min, max] tick period in ms a node draws at creation;
+	// it is also the node's clock rate (100/period). Zero means [95, 105],
+	// i.e. clocks within about 5% of each other.
+	Periods [2]int64
 }
 
 // Profiles by name. "full" is the one the M1 exit criterion uses (WBS 1.9.1).
@@ -66,6 +73,19 @@ var profiles = []Profile{
 			Partition: 3, IsolateLeader: 3, OneWay: 2, Heal: 4,
 			Crash: 3, CrashLeader: 3, Degrade: 2, ResetLinks: 2,
 		},
+	},
+	{
+		// Lease reads (WBS 4.2.5) with clock drift inside the D-25 bound.
+		// No crashes: a restarted voter forgets the leader it heard from
+		// and may vote at once, which the lease does not survive (see
+		// internal/lease).
+		Name: "lease", Sizes: []int{3, 5}, FaultMs: 20_000,
+		Base:     Link{Drop: 0.03, Dup: 0.03, Reorder: 0.08, MinDelay: 1, MaxDelay: 40},
+		Degraded: Link{Drop: 0.30, Dup: 0.10, Reorder: 0.30, MinDelay: 5, MaxDelay: 400},
+		Weights: Weights{
+			Partition: 3, IsolateLeader: 4, OneWay: 2, Heal: 4, Degrade: 2, ResetLinks: 2,
+		},
+		LeaseReads: true,
 	},
 }
 

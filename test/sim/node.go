@@ -3,6 +3,7 @@ package sim
 import (
 	"math/rand/v2"
 
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/lease"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
 )
 
@@ -23,7 +24,17 @@ type node struct {
 	busy  bool   // a Ready is outstanding (persist pending)
 	inbox []func()
 	// period is this node's tick interval in ms, so nodes drift apart (D-08).
-	period int64
+	// It is also its clock rate: the local clock runs at 100/period of
+	// virtual time (see localNow), measured from (clockAt, clockBase).
+	period             int64
+	clockAt, clockBase int64
+
+	// Lease reads (D-25), when the profile enables them. Volatile.
+	lease     *lease.Lease
+	renewing  bool
+	renewID   uint64
+	renewAt   int64 // local clock when the renewal round was requested
+	renewTerm uint64
 
 	// log mirrors the persisted entries 1..len(log), with chained hashes, for
 	// the checker. It always equals what store holds.
@@ -33,7 +44,13 @@ type node struct {
 }
 
 func newNode(c *Cluster, id uint64) *node {
-	return &node{id: id, c: c, store: raft.NewMemoryStorage(), period: 95 + c.rng.Int64N(11)}
+	lo, hi := c.profile.Periods[0], c.profile.Periods[1]
+	if lo == 0 {
+		lo, hi = 95, 105
+	}
+	n := &node{id: id, c: c, store: raft.NewMemoryStorage(), period: lo + c.rng.Int64N(hi-lo+1)}
+	n.lease = n.newLease()
+	return n
 }
 
 // start (re)creates the RawNode from the disk. D-24: its randomness is a PCG
@@ -46,6 +63,8 @@ func (n *node) start() {
 		panic("sim: NewRawNode: " + err.Error())
 	}
 	n.rn, n.up, n.busy, n.inbox = rn, true, false, nil
+	n.renewing = false
+	n.lease.Revoke()
 	n.inc++
 	n.reloadMirror()
 	c.addTrace(Event{Kind: "start", Node: n.id, Note: "inc=" + itoa(n.inc)})
@@ -81,7 +100,10 @@ func (n *node) scheduleTick() {
 			return
 		}
 		n.c.touch(n)
-		n.do(func() { n.rn.Tick() })
+		n.do(func() {
+			n.rn.Tick()
+			n.maybeRenewLease()
+		})
 		n.scheduleTick()
 	})
 }
@@ -124,6 +146,7 @@ func (n *node) process() {
 			for _, e := range rd.CommittedEntries {
 				c.onApply(n, e)
 			}
+			c.onReadStates(n, rd)
 			n.rn.Advance(rd)
 			n.busy = false
 			for len(n.inbox) > 0 && n.up {

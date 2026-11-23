@@ -253,7 +253,11 @@ func (c *Client) call(ctx context.Context, write bool, f func(ctx context.Contex
 			ep.memberID.Store(member)
 		}
 		if err == nil {
-			c.setLeader(cur)
+			if write {
+				// Only a write proves leadership: any member serves
+				// reads (D-05), so a read must not pin a follower.
+				c.setLeader(cur)
+			}
 			return nil
 		}
 		last = fromRPC(err)
@@ -397,10 +401,13 @@ func (c *Client) Delete(ctx context.Context, key []byte, os ...Option) (*DeleteR
 	return &DeleteResult{Revision: resp.GetRevision(), Deleted: resp.GetDeleted(), Previous: fromKV(resp.GetPrevious())}, nil
 }
 
-// Get reads key. By default the read is linearizable.
+// Get reads key. By default the read is linearizable (ReadIndex, D-05) and may
+// be served by any member, leader or follower; [WithStale] trades that for a
+// purely local read. The result's Revision is the serving member's applied
+// index.
 func (c *Client) Get(ctx context.Context, key []byte, os ...Option) (*GetResult, error) {
 	o := collect(os)
-	req := &raftkvv1.GetRequest{Header: c.header(), Key: key}
+	req := &raftkvv1.GetRequest{Header: c.header(), Key: key, Consistency: raftkvv1.Consistency_LINEARIZABLE}
 	if o.stale {
 		req.Consistency, req.MinRevision = raftkvv1.Consistency_STALE, o.minRevision
 	}

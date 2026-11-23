@@ -31,6 +31,8 @@ const (
 	ReasonValueTooLarge   = "VALUE_TOO_LARGE"
 	ReasonMalformed       = "MALFORMED_REQUEST"
 	ReasonInternal        = "INTERNAL"
+	ReasonReadTimeout     = "READ_INDEX_TIMEOUT"
+	ReasonCorruption      = "STORAGE_CORRUPTION"
 
 	// OutcomeKey is the ErrorInfo.metadata key for writes: DEFINITE means the
 	// request was provably never proposed; INDETERMINATE means it may have
@@ -93,6 +95,44 @@ func mapWaitError(err error) error {
 		return newError(codes.Internal, ReasonInternal, Indeterminate, err.Error(), nil)
 	}
 }
+
+// mapReadError turns a failed read into a status (api-design 6.1). Reads have
+// no side effects, so there is no outcome metadata and all but corruption are
+// safe to retry, usually at another member.
+func mapReadError(err error) error {
+	var se *storageErr
+	switch {
+	case errors.As(err, &se):
+		return newError(codes.DataLoss, ReasonCorruption, "", se.Error(), nil)
+	case errors.Is(err, raft.ErrReadIndexDropped), errors.Is(err, node.ErrReadRejected):
+		return newError(codes.Unavailable, ReasonNoLeader, "", "no leader to confirm the read", nil)
+	case errors.Is(err, node.ErrStopped):
+		return newError(codes.Unavailable, ReasonNoLeader, "", "node is shutting down", nil)
+	case errors.Is(err, context.DeadlineExceeded):
+		return newError(codes.DeadlineExceeded, ReasonReadTimeout, "", "read index not confirmed before the deadline", nil)
+	case errors.Is(err, context.Canceled):
+		return newError(codes.Canceled, ReasonReadTimeout, "", "cancelled", nil)
+	default:
+		return newError(codes.Internal, ReasonInternal, "", err.Error(), nil)
+	}
+}
+
+// mapStaleWaitError is for a STALE read whose min_revision was not reached.
+func mapStaleWaitError(err error) error {
+	switch {
+	case errors.Is(err, node.ErrStopped):
+		return newError(codes.Unavailable, ReasonNoLeader, "", "node is shutting down", nil)
+	case errors.Is(err, context.Canceled):
+		return newError(codes.Canceled, ReasonRevisionMissing, "", "cancelled", nil)
+	default:
+		return newError(codes.DeadlineExceeded, ReasonRevisionMissing, "", "revision not reached", nil)
+	}
+}
+
+// storageErr marks an error from the local store inside a read.
+type storageErr struct{ err error }
+
+func (e *storageErr) Error() string { return e.err.Error() }
 
 // mapValidation turns a command validation error into INVALID_ARGUMENT.
 func mapValidation(err error) error {

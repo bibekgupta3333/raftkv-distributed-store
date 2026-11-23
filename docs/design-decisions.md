@@ -45,7 +45,7 @@ answered before the listed milestone.
 | D-22 | License | Decided | Apache-2.0. | M0 |
 | D-23 | Admin API | Decided | A `Cluster` gRPC service: `AddLearner`, `PromoteLearner`, `RemoveMember`, `TransferLeadership`, `ListMembers`, `Status`. | M6 |
 | D-24 | Time | Decided | The Raft core runs on a logical `Tick()`, so tests are deterministic. Wall clock is used only for lease reads, session timestamps (D-27), and metrics. | M1 |
-| D-25 | Lease reads (optional) | Proposed | Off by default. When on, the lease is about 800 ms (assumed clock drift 0.1, 100 ms margin). | M4 |
+| D-25 | Lease reads (optional) | Decided | Off by default (`lease_reads`). When on, the lease is `(ElectionTick − 1) × tick × (1 − 0.1) − 100 ms` = 710 ms (assumed clock drift 0.1, 100 ms margin; one tick less than the election timeout because a follower may tick right after hearing from the leader). Unsafe beyond the drift bound or if a voter restarts inside the lease. | M4 |
 | D-26 | Session setup | Decided | Clients call `RegisterSession` (a replicated entry), and the server assigns the ID. | M4 |
 | D-27 | Session expiry time | Decided | The leader stamps the time into each command, and every replica expires sessions using that stamped time. | M4 |
 | D-28 | Writes sent to a follower | Decided | The follower forwards the write to the leader. A client can opt in to a redirect (leader hint) instead. | M4 |

@@ -150,11 +150,22 @@ Every tick the leader sends `Heartbeat{term, commit, ctx}`. Heartbeats reset fol
 
 1. If the leader has **not committed an entry in its current term**, queue the read until it has. Before that its `commitIndex` may be behind.
 2. `readIndex = commitIndex`.
-3. Send a heartbeat carrying `ctx`. Concurrent reads can share one round.
+3. Send a heartbeat carrying `ctx`. Concurrent reads can share one round: at most one round is in flight, and reads that
+   arrive during it wait together for the next round, which starts as soon as the current one completes. (A read may not
+   join a round already in flight: that round's `readIndex` was taken before the read started.) Heartbeat ticks resend the
+   in-flight round's `ctx`, so a lost heartbeat costs one tick.
 4. When 2 followers ack that `ctx`, the leader knows it was still leader when it took `readIndex`.
 5. The serving node waits until `appliedIndex ≥ readIndex`, then reads Pebble.
 
 **Follower reads:** the follower sends `ReadIndex{ctx}` to the leader, which runs steps 1–4 and replies with `readIndex`. The follower does step 5 locally.
+
+**Implementation notes (M4).** `RawNode.ReadIndex(ctx)` queues the request; answers come back as `Ready.ReadStates`.
+`MsgReadIndex` / `MsgReadIndexResp` are term-less: they never change the receiver's term or role (the quorum round, not
+the message term, makes the answer safe). A non-leader rejects a forwarded request, and a leader that steps down rejects
+every queued and in-flight read, so callers retry at once instead of waiting for a deadline. The node retries rejected
+reads with backoff until the request deadline. The simulator checks every read against READ-1 (the read index is at
+least the highest commit index any node had when the read started) and READ-2 (a leader's read index is an entry of its
+own term, i.e. after its no-op), in every seed of every profile.
 
 ```mermaid
 sequenceDiagram
@@ -178,10 +189,14 @@ sequenceDiagram
 
 ### 3.2 Lease read (optional, D-25)
 
-- When a quorum acks a heartbeat sent at time `t`, `leaseExpiry = t + electionTimeoutMin × (1 − ρ) − margin`. Defaults: 1000 ms, `ρ = 0.1`, 100 ms margin → about **800 ms**. Uses the monotonic clock.
+- When a quorum acks a heartbeat sent at time `t`, `leaseExpiry = t + (ElectionTick − 1) × tick × (1 − ρ) − margin`. Defaults: 10 ticks of 100 ms, `ρ = 0.1`, 100 ms margin → **710 ms**. Only `ElectionTick − 1` ticks count because a follower may tick right after it resets its timer on the heartbeat. Uses the monotonic clock. The node renews the lease with one ReadIndex round per tick (`t` = when the round was requested).
 - While the lease is valid and the leader has committed an entry this term, it reads at `commitIndex` without a round trip.
 - **Why it is safe:** followers will not vote for anyone else for at least `electionTimeoutMin` after hearing from the leader (T5). That holds only if clock **rates** differ by less than `ρ`. A process pause between the lease check and the read is the real danger, so the lease is checked again after the read and the result is discarded if it expired.
 - The lease ends on step-down, on a higher term, when a transfer starts, and on any voter-set change.
+- **Restarts break it too:** a restarted voter has forgotten it heard from the leader and may vote at once. That is
+  another reason lease reads are off by default; the simulator's `lease` profile has no crashes for this reason. The
+  simulator shows both sides of the drift bound (WBS 4.2.5): with clocks within about 5% there is no violation, and with
+  the leader's clock 5× slow a stale read is found.
 
 ### 3.3 Stale reads
 
