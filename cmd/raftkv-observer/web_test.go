@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,10 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
-	raftkvv1 "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/kvtest"
 )
 
@@ -88,17 +85,12 @@ func TestObserverAgainstCluster(t *testing.T) {
 	lead := c.Leader(15 * time.Second)
 	var targets []Target
 	for _, id := range c.IDs() {
-		conn, err := grpc.NewClient(c.Addr(id), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		tg, closeFn, err := dial(Endpoint{fmt.Sprint("n", id), c.Addr(id)}, 400*time.Millisecond)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = conn.Close() })
-		cl := raftkvv1.NewClusterClient(conn)
-		name := "n" + string(rune('0'+id))
-		targets = append(targets, Target{Endpoint: Endpoint{name, c.Addr(id)},
-			Status: func(ctx context.Context) (*raftkvv1.StatusResponse, error) {
-				return cl.Status(ctx, &raftkvv1.StatusRequest{})
-			}})
+		t.Cleanup(closeFn)
+		targets = append(targets, tg)
 	}
 	const interval = 500 * time.Millisecond
 	o := NewObserver(interval)
@@ -131,5 +123,24 @@ func TestObserverAgainstCluster(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("leader kill missing from timeline: %q", texts(s.Events))
+	}
+
+	// The restarted node is seen again within a few polls (capped reconnect
+	// backoff) and that shows up in the timeline.
+	c.Start(lead)
+	deadline := time.Now().Add(10 * time.Second)
+	for !s.Nodes[lead-1].Up {
+		if time.Now().After(deadline) {
+			t.Fatalf("restarted node never seen again: %q", texts(s.Events))
+		}
+		time.Sleep(interval)
+		s = o.Update(time.Now(), pollAll(ctx, targets, 400*time.Millisecond))
+	}
+	back := false
+	for _, e := range s.Events {
+		back = back || (e.Kind == EventReachable && e.Node == leadName)
+	}
+	if !back {
+		t.Fatalf("restart missing from timeline: %q", texts(s.Events))
 	}
 }

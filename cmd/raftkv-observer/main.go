@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 
 	raftkvv1 "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1"
@@ -117,17 +118,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	targets := make([]Target, 0, len(cfg.endpoints))
 	for _, ep := range cfg.endpoints {
-		// Connections are lazy: an unreachable node only fails its own polls.
-		conn, err := grpc.NewClient(ep.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		t, closeFn, err := dial(ep, cfg.rpcTimeout)
 		if err != nil {
 			_, _ = fmt.Fprintln(stderr, "raftkv-observer:", err)
 			return 2
 		}
-		defer func() { _ = conn.Close() }()
-		cl := raftkvv1.NewClusterClient(conn)
-		targets = append(targets, Target{Endpoint: ep, Status: func(ctx context.Context) (*raftkvv1.StatusResponse, error) {
-			return cl.Status(ctx, &raftkvv1.StatusRequest{})
-		}})
+		defer closeFn()
+		targets = append(targets, t)
 	}
 
 	lis, err := net.Listen("tcp", cfg.listen)
@@ -149,4 +146,23 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 	_ = srv.Shutdown(sctx)
 	return 0
+}
+
+// dial returns a Target that polls ep. Connections are lazy: an unreachable
+// node only fails its own polls. Reconnect backoff is capped near the poll
+// interval, because gRPC's default (up to 120 s) would hide a restarted node
+// for minutes.
+func dial(ep Endpoint, connectTimeout time.Duration) (Target, func(), error) {
+	conn, err := grpc.NewClient(ep.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           backoff.Config{BaseDelay: 100 * time.Millisecond, Multiplier: 1.6, Jitter: 0.2, MaxDelay: time.Second},
+			MinConnectTimeout: connectTimeout,
+		}))
+	if err != nil {
+		return Target{}, nil, err
+	}
+	cl := raftkvv1.NewClusterClient(conn)
+	return Target{Endpoint: ep, Status: func(ctx context.Context) (*raftkvv1.StatusResponse, error) {
+		return cl.Status(ctx, &raftkvv1.StatusRequest{})
+	}}, func() { _ = conn.Close() }, nil
 }
