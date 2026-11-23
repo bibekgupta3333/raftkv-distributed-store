@@ -26,10 +26,13 @@ type fake struct {
 	srv   *grpc.Server
 	calls atomic.Int32
 
-	mu   sync.Mutex
-	put  func(n int) (*raftkvv1.PutResponse, error)
-	get  func(n int) (*raftkvv1.GetResponse, error)
-	sawH *raftkvv1.RequestHeader
+	mu       sync.Mutex
+	put      func(n int) (*raftkvv1.PutResponse, error)
+	get      func(n int) (*raftkvv1.GetResponse, error)
+	sawH     *raftkvv1.RequestHeader
+	sessions []*raftkvv1.WriteSession // session of every Put, in order
+	regs     atomic.Int32
+	reg      func(n int) (*raftkvv1.RegisterSessionResponse, error)
 }
 
 func newFake(t *testing.T, id uint64) *fake {
@@ -51,6 +54,7 @@ func (f *fake) Put(_ context.Context, req *raftkvv1.PutRequest) (*raftkvv1.PutRe
 	n := int(f.calls.Add(1))
 	f.mu.Lock()
 	f.sawH = req.GetHeader()
+	f.sessions = append(f.sessions, req.GetSession())
 	fn := f.put
 	f.mu.Unlock()
 	if fn == nil {
@@ -68,6 +72,24 @@ func (f *fake) Get(_ context.Context, _ *raftkvv1.GetRequest) (*raftkvv1.GetResp
 		return &raftkvv1.GetResponse{Header: f.hdr(), Found: true, Kv: &raftkvv1.KeyValue{Value: []byte("v")}}, nil
 	}
 	return fn(n)
+}
+
+// RegisterSession hands out client IDs 100, 101, ... (not counted in calls).
+func (f *fake) RegisterSession(context.Context, *raftkvv1.RegisterSessionRequest) (*raftkvv1.RegisterSessionResponse, error) {
+	n := int(f.regs.Add(1))
+	f.mu.Lock()
+	fn := f.reg
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(n)
+	}
+	return &raftkvv1.RegisterSessionResponse{Header: f.hdr(), ClientId: uint64(99 + n)}, nil
+}
+
+func (f *fake) seen() []*raftkvv1.WriteSession {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*raftkvv1.WriteSession(nil), f.sessions...)
 }
 
 func rpcErr(code codes.Code, reason, outcome string, hint *raftkvv1.LeaderHint) error {
@@ -111,7 +133,7 @@ func TestFollowsNotLeaderHint(t *testing.T) {
 	a, b, c := newFake(t, 1), newFake(t, 2), newFake(t, 3)
 	a.put = func(int) (*raftkvv1.PutResponse, error) { return nil, notLeader(a, c) }
 	b.put = a.put
-	cl := fastClient(t, []string{a.addr, b.addr, c.addr}, nil)
+	cl := fastClient(t, []string{a.addr, b.addr, c.addr}, func(c *Config) { c.Redirect = true })
 	// Teach the client who is who via a successful read on each endpoint.
 	for range 3 {
 		if _, err := cl.Get(context.Background(), []byte("k")); err != nil {
@@ -199,7 +221,7 @@ func TestIndeterminateWriteNotRetriedButReadIs(t *testing.T) {
 	unknown := func() error { return rpcErr(codes.Unavailable, "OUTCOME_UNKNOWN", "INDETERMINATE", nil) }
 	a.put = func(int) (*raftkvv1.PutResponse, error) { return nil, unknown() }
 	a.get = func(int) (*raftkvv1.GetResponse, error) { return nil, unknown() }
-	cl := fastClient(t, []string{a.addr, b.addr}, nil)
+	cl := fastClient(t, []string{a.addr, b.addr}, func(c *Config) { c.DisableSessions = true })
 
 	_, err := cl.Put(context.Background(), []byte("k"), []byte("v"))
 	var ce *Error
@@ -217,7 +239,7 @@ func TestIndeterminateWriteNotRetriedButReadIs(t *testing.T) {
 
 	// Opt-in retry for idempotent writes.
 	a.calls.Store(0)
-	cl2 := fastClient(t, []string{a.addr, b.addr}, func(c *Config) { c.RetryIndeterminate = true })
+	cl2 := fastClient(t, []string{a.addr, b.addr}, func(c *Config) { c.RetryIndeterminate, c.DisableSessions = true, true })
 	cl2.setLeader(0)
 	if _, err := cl2.Put(context.Background(), []byte("k"), []byte("v")); err != nil {
 		t.Fatalf("RetryIndeterminate Put: %v", err)
@@ -238,25 +260,31 @@ func TestNonRetryableFailsImmediately(t *testing.T) {
 	}
 }
 
-// The retry loop is bounded by the caller's deadline and reports the last error.
+// The retry loop is bounded by the caller's context and reports the last
+// server error, DEFINITE because no attempt could have applied. Deterministic:
+// the backoff ends the context on the third retry and then sleeps "forever",
+// so the loop can only stop through the context path, with no RPC in flight
+// (no wall-clock assertions; the old version flaked under -race).
 func TestRetryBoundedByDeadline(t *testing.T) {
 	a := newFake(t, 1)
 	a.put = func(int) (*raftkvv1.PutResponse, error) {
 		return nil, rpcErr(codes.Unavailable, "NO_LEADER", "DEFINITE", nil)
 	}
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
 	cl := fastClient(t, []string{a.addr}, func(c *Config) {
-		c.Backoff = func(int) time.Duration { return 5 * time.Millisecond }
+		c.Backoff = func(attempt int) time.Duration {
+			if attempt == 2 {
+				stop()
+				return time.Hour
+			}
+			return 0
+		}
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
-	start := time.Now()
 	_, err := cl.Put(ctx, []byte("k"), []byte("v"))
 	var ce *Error
-	if !errors.As(err, &ce) || ce.Reason != "NO_LEADER" || ce.Attempts < 3 {
-		t.Fatalf("err = %v", err)
-	}
-	if el := time.Since(start); el > time.Second {
-		t.Fatalf("took %v with a 150ms deadline", el)
+	if !errors.As(err, &ce) || ce.Reason != "NO_LEADER" || ce.Indeterminate() || ce.Attempts != 3 || a.calls.Load() != 3 {
+		t.Fatalf("err = %v, calls = %d", err, a.calls.Load())
 	}
 }
 
