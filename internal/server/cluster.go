@@ -18,6 +18,8 @@ type StatusMember interface {
 	ID() uint64
 	ClusterID() uint64
 	FirstIndex() (uint64, error)
+	// SnapshotIndex is the newest local snapshot's index (0 if none).
+	SnapshotIndex() uint64
 }
 
 // Cluster implements raftkvv1.ClusterServer. Only Status is served; the
@@ -52,14 +54,13 @@ func (s *Cluster) Status(_ context.Context, req *raftkvv1.StatusRequest) (*raftk
 			ClusterId: s.member.ClusterID(), MemberId: s.member.ID(),
 			RaftTerm: st.Term, Revision: applied, LeaderId: st.Lead,
 		},
-		State:        stateToProto(st.State),
-		LeaderId:     st.Lead,
-		Term:         st.Term,
-		CommitIndex:  st.Commit,
-		AppliedIndex: applied,
-		LastLogIndex: st.LastIndex,
-		// Snapshots arrive with M5 (D-14); until then no member has one.
-		SnapshotIndex: 0,
+		State:         stateToProto(st.State),
+		LeaderId:      st.Lead,
+		Term:          st.Term,
+		CommitIndex:   st.Commit,
+		AppliedIndex:  applied,
+		LastLogIndex:  st.LastIndex,
+		SnapshotIndex: s.member.SnapshotIndex(), // D-14
 	}
 	if first, err := s.member.FirstIndex(); err == nil {
 		resp.FirstLogIndex = first

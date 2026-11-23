@@ -58,7 +58,25 @@ type Config struct {
 	// while clock drift stays within lease.DefaultDrift and no voter
 	// restarts inside the lease window.
 	LeaseReads bool `yaml:"lease_reads"`
+
+	// SnapshotEntries is how many entries are applied between two
+	// snapshots (D-14: 100,000).
+	SnapshotEntries uint64 `yaml:"snapshot_entries"`
+	// SnapshotRetainEntries is how many entries below the snapshot index
+	// stay in the WAL so briefly lagging followers catch up from the log
+	// instead of a snapshot (storage-design 1.8: 10,000).
+	SnapshotRetainEntries uint64 `yaml:"snapshot_retain_entries"`
+	// WALSegmentBytes is the WAL segment rollover size (0: 64 MiB, D-03).
+	// Trimming deletes whole segments, so it is the granularity of
+	// reclaimed disk.
+	WALSegmentBytes int64 `yaml:"wal_segment_bytes"`
 }
+
+// Snapshot defaults (D-14, storage-design 1.8).
+const (
+	DefaultSnapshotEntries       = 100_000
+	DefaultSnapshotRetainEntries = 10_000
+)
 
 // LeaseDuration is the read lease length for this timing (D-25): about 710 ms
 // with the defaults.
@@ -78,6 +96,9 @@ func DefaultConfig() Config {
 		HeartbeatTick: raft.DefaultHeartbeatTick,
 		LogLevel:      "info",
 		MaxMsgBytes:   transport.DefaultMaxMsgBytes,
+
+		SnapshotEntries:       DefaultSnapshotEntries,
+		SnapshotRetainEntries: DefaultSnapshotRetainEntries,
 	}
 }
 
@@ -141,6 +162,12 @@ func (c Config) Validate() error {
 	}
 	if c.MaxMsgBytes <= 0 {
 		bad("max_msg_bytes must be positive")
+	}
+	if c.SnapshotEntries == 0 {
+		bad("snapshot_entries must be positive")
+	}
+	if c.WALSegmentBytes < 0 {
+		bad("wal_segment_bytes must not be negative")
 	}
 	if c.LeaseReads {
 		if _, err := c.LeaseDuration(); err != nil {
@@ -256,6 +283,9 @@ func LoadConfig(args []string, out io.Writer) (Config, error) {
 	fromOrdinal := fs.String("node-id-from-ordinal", "",
 		"derive the node ID from a StatefulSet pod name: 1 + its ordinal (raftkv-2 -> 3)")
 	leaseReads := fs.Bool("lease-reads", false, "serve linearizable reads from a leader lease (D-25; off by default)")
+	snapEntries := fs.Uint64("snapshot-entries", 0, "entries applied between snapshots (D-14, default 100000)")
+	snapRetain := fs.Uint64("snapshot-retain-entries", 0, "entries kept in the WAL below the snapshot (default 10000)")
+	walSegment := fs.Int64("wal-segment-bytes", 0, "WAL segment size in bytes (default 64 MiB)")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -311,6 +341,12 @@ func LoadConfig(args []string, out io.Writer) (Config, error) {
 			cfg.NodeID = id
 		case "lease-reads":
 			cfg.LeaseReads = *leaseReads
+		case "snapshot-entries":
+			cfg.SnapshotEntries = *snapEntries
+		case "snapshot-retain-entries":
+			cfg.SnapshotRetainEntries = *snapRetain
+		case "wal-segment-bytes":
+			cfg.WALSegmentBytes = *walSegment
 		}
 	})
 	if flagErr != nil {

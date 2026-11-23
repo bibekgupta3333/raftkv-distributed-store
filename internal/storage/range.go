@@ -49,6 +49,8 @@ func (s *Store) Range(o RangeOptions) (kvs []KV, more bool, err error) {
 	if len(o.End) > 0 {
 		upper = UserKey(o.End)
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
 	if err != nil {
 		return nil, false, err
