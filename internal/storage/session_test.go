@@ -129,14 +129,14 @@ func TestSessionDedupOnApply(t *testing.T) {
 		Expected: &raftkvv1.CasOp_ExpectedValue{ExpectedValue: []byte("nope")},
 		Action:   &raftkvv1.CasOp_NewValue{NewValue: []byte("z")}})
 	c1 := apply(entryOf(10, withSession(cas, 1, 5, 4)))
-	c2 := apply(entryOf(11, withSession(proto(cas), 1, 5, 4)))
+	c2 := apply(entryOf(11, withSession(roundTrip(cas), 1, 5, 4)))
 	if c1.Succeeded || !c2.Duplicate || c2.Succeeded || string(c2.Value.Data) != "v4" || !c2.Found || c2.Index != 10 {
 		t.Fatalf("cas %+v, duplicate %+v", c1, c2)
 	}
 	del, _ := command.Delete(0, t0, []byte("k"))
 	del.GetDelete().ReturnPrevious = true
 	d1 := apply(entryOf(12, withSession(del, 1, 6, 5)))
-	d2 := apply(entryOf(13, withSession(proto(del), 1, 6, 5)))
+	d2 := apply(entryOf(13, withSession(roundTrip(del), 1, 6, 5)))
 	if !d2.Duplicate || !d2.Found || string(d2.Previous.Data) != string(d1.Previous.Data) {
 		t.Fatalf("delete %+v, duplicate %+v", d1, d2)
 	}
@@ -145,7 +145,7 @@ func TestSessionDedupOnApply(t *testing.T) {
 	}
 }
 
-func proto(c *raftkvv1.Command) *raftkvv1.Command {
+func roundTrip(c *raftkvv1.Command) *raftkvv1.Command {
 	b, _ := command.Marshal(c)
 	out, _ := command.Unmarshal(b)
 	return out

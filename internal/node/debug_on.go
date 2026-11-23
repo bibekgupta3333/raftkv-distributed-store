@@ -16,7 +16,8 @@ import (
 )
 
 // DebugProposeMethod is the full gRPC method of the temporary debug RPC. It
-// carries a BytesValue (the raw log entry payload) and answers a UInt64Value
+// carries a BytesValue (the raw log entry payload; with the Pebble applier it
+// must be an encoded raft.proto Command, see [ProposalChecker]) and answers a UInt64Value
 // (the entry's log index once applied). It is hand-registered rather than
 // generated from a .proto because it is throw-away scaffolding for M2, removed
 // when the real KV API lands in M4 (WBS 2.3.2).
@@ -28,6 +29,14 @@ func (d *debugServer) propose(_ any, ctx context.Context, dec func(any) error, _
 	req := new(wrapperspb.BytesValue)
 	if err := dec(req); err != nil {
 		return nil, err
+	}
+	// The payload must be something the applier can apply: with the Pebble
+	// applier (M3) an undecodable entry would crash every replica once
+	// committed (D-33), so it is refused before it reaches the log.
+	if pc, ok := d.n.applier.(ProposalChecker); ok {
+		if err := pc.CheckProposal(req.GetValue()); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
 	}
 	idx, err := d.n.ProposeAndWait(ctx, req.GetValue())
 	var nl *raft.NotLeaderError

@@ -24,6 +24,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/command"
 )
 
 const (
@@ -320,16 +322,43 @@ func (c *Cluster) conn(id int) (*grpc.ClientConn, error) {
 	return cc, nil
 }
 
-// Propose sends data to node id's debug Propose RPC and returns the log index
-// at which it was applied. An error means the proposal is not acknowledged; it
-// may or may not eventually commit.
+// encodeEntry wraps a test payload in the log entry format the node applies:
+// an encoded Put command (key "e2e/<data>", value data). Since M3 the nodes
+// run the Pebble state machine, which treats an undecodable entry as fatal
+// (D-33), so raw bytes can no longer be proposed. The request ID is 0: no
+// client waits on the result.
+func encodeEntry(data []byte) ([]byte, error) {
+	cmd, err := command.Put(0, 0, append([]byte("e2e/"), data...), data)
+	if err != nil {
+		return nil, err
+	}
+	return command.Marshal(cmd)
+}
+
+// decodeEntry is the inverse of encodeEntry for a wal-dump payload: it returns
+// the Put value, or raw unchanged if it is not a Put command.
+func decodeEntry(raw string) string {
+	cmd, err := command.Unmarshal([]byte(raw))
+	if err != nil || command.KindOf(cmd) != command.KindPut {
+		return raw
+	}
+	return string(cmd.GetPut().GetValue())
+}
+
+// Propose sends data (as a Put command, see encodeEntry) to node id's debug
+// Propose RPC and returns the log index at which it was applied. An error
+// means the proposal is not acknowledged; it may or may not eventually commit.
 func (c *Cluster) Propose(ctx context.Context, id int, data []byte) (uint64, error) {
 	cc, err := c.conn(id)
 	if err != nil {
 		return 0, err
 	}
+	entry, err := encodeEntry(data)
+	if err != nil {
+		return 0, err
+	}
 	resp := new(wrapperspb.UInt64Value)
-	if err := cc.Invoke(ctx, debugProposeMethod, wrapperspb.Bytes(data), resp); err != nil {
+	if err := cc.Invoke(ctx, debugProposeMethod, wrapperspb.Bytes(entry), resp); err != nil {
 		return 0, err
 	}
 	return resp.GetValue(), nil
@@ -380,8 +409,8 @@ type WALEntry struct {
 
 // WALDump is the parsed wal-dump of one stopped node.
 type WALDump struct {
-	Entries map[uint64]string
-	Summary string // the "summary ..." line, which includes the log digest
+	Entries map[uint64]string // index -> payload (the Put value for e2e entries)
+	Summary string            // the "summary ..." line, which includes the log digest
 }
 
 // DumpWALs runs `raftkvctl debug wal-dump` against each node's volume. The
@@ -409,7 +438,7 @@ func (c *Cluster) DumpWALs() map[int]WALDump {
 			case strings.HasPrefix(line, "entry index="):
 				idx, data, ok := parseEntryLine(line)
 				if ok {
-					d.Entries[idx] = data
+					d.Entries[idx] = decodeEntry(data)
 				}
 			}
 		}

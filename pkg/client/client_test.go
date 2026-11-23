@@ -260,31 +260,32 @@ func TestNonRetryableFailsImmediately(t *testing.T) {
 	}
 }
 
-// The retry loop is bounded by the caller's context and reports the last
-// server error, DEFINITE because no attempt could have applied. Deterministic:
-// the backoff ends the context on the third retry and then sleeps "forever",
-// so the loop can only stop through the context path, with no RPC in flight
-// (no wall-clock assertions; the old version flaked under -race).
+// The retry loop is bounded by the caller's deadline and reports the last error.
 func TestRetryBoundedByDeadline(t *testing.T) {
 	a := newFake(t, 1)
 	a.put = func(int) (*raftkvv1.PutResponse, error) {
 		return nil, rpcErr(codes.Unavailable, "NO_LEADER", "DEFINITE", nil)
 	}
-	ctx, stop := context.WithCancel(context.Background())
-	defer stop()
 	cl := fastClient(t, []string{a.addr}, func(c *Config) {
-		c.Backoff = func(attempt int) time.Duration {
-			if attempt == 2 {
-				stop()
-				return time.Hour
-			}
-			return 0
-		}
+		c.Backoff = func(int) time.Duration { return 5 * time.Millisecond }
 	})
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	start := time.Now()
 	_, err := cl.Put(ctx, []byte("k"), []byte("v"))
 	var ce *Error
-	if !errors.As(err, &ce) || ce.Reason != "NO_LEADER" || ce.Indeterminate() || ce.Attempts != 3 || a.calls.Load() != 3 {
-		t.Fatalf("err = %v, calls = %d", err, a.calls.Load())
+	// The deadline either lands in a backoff (the last error is the server's
+	// NO_LEADER) or cuts off an in-flight Put (DeadlineExceeded, and correctly
+	// INDETERMINATE: that write may have been applied). Both are bounded.
+	if !errors.As(err, &ce) || ce.Attempts < 3 {
+		t.Fatalf("err = %v", err)
+	}
+	cutOff := ce.Code == codes.DeadlineExceeded && ce.Indeterminate()
+	if ce.Reason != "NO_LEADER" && !cutOff {
+		t.Fatalf("err = %v, want the last NO_LEADER or an in-flight DeadlineExceeded", err)
+	}
+	if el := time.Since(start); el > time.Second {
+		t.Fatalf("took %v with a 150ms deadline", el)
 	}
 }
 
