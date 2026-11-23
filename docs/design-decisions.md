@@ -42,7 +42,7 @@ answered before the listed milestone.
 | D-18 | Correctness testing | Decided | A deterministic simulator for the Raft core, the Porcupine linearizability checker over recorded histories, and fault injection (kill, pause, partition). | M1+ |
 | D-19 | CI | Decided | GitHub Actions. Every PR: lint, unit and race tests, simulator, and a short 5-node docker-compose e2e with faults. Nightly: a longer simulator run plus kind + Chaos Mesh. | M2+ |
 | D-21 | Go & module path | Decided | Latest stable Go. Module `github.com/bibekgupta3333/raftkv-distributed-store`. | M0 |
-| D-22 | License | Proposed | Apache-2.0. | M0 |
+| D-22 | License | Decided | Apache-2.0. | M0 |
 | D-23 | Admin API | Decided | A `Cluster` gRPC service: `AddLearner`, `PromoteLearner`, `RemoveMember`, `TransferLeadership`, `ListMembers`, `Status`. | M6 |
 | D-24 | Time | Decided | The Raft core runs on a logical `Tick()`, so tests are deterministic. Wall clock is used only for lease reads, session timestamps (D-27), and metrics. | M1 |
 | D-25 | Lease reads (optional) | Proposed | Off by default. When on, the lease is about 800 ms (assumed clock drift 0.1, 100 ms margin). | M4 |
@@ -88,6 +88,3 @@ test/chaos/           Chaos Mesh manifests
 deploy/k8s/           Kubernetes manifests
 ```
 
-## Still open
-
-- **D-22**: license (Apache-2.0 unless you prefer another).

@@ -1,0 +1,16 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - forbidigo
+  settings:
+    forbidigo:
+      forbid:
+        - pattern: ^time\.(Now|Since|Until|Sleep|After|Tick|NewTimer|NewTicker)$
+          msg: "D-24: the Raft core runs on logical ticks and must not read the wall clock"
+  exclusions:
+    rules:
+      - path-except: ^internal/raft/
+        linters: [forbidigo]
+      - path: _test\.go
+        linters: [forbidigo]
