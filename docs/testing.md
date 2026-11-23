@@ -160,8 +160,10 @@ same monotonic clock (ns since run start). Clients on different hosts are not al
 clocks can't be compared.
 
 ```jsonc
-{"proc":17,"op":904211,"type":"invoke","f":"cas","key":"k-0042","expect":"v-17-903998","value":"v-17-904211","t":81234567890}
-{"proc":17,"op":904211,"type":"ok","f":"cas","key":"k-0042","result":{"swapped":true},"t":81236001234}
+{"proc":3,"op":9042,"type":"invoke","f":"cas","key":"e0/g1/k2","value":"v-3-9042","t":81234567890,"cmp":"value","expect":"v-5-8998"}
+{"proc":3,"op":9042,"type":"ok","f":"cas","key":"e0/g1/k2","value":"v-5-9001","found":true,"t":81236001234,"swapped":false}
+{"proc":4,"op":9043,"type":"invoke","f":"range","key":"e0/g1/","t":81236100000,"end":"e0/g10"}
+{"proc":4,"op":9043,"type":"ok","f":"range","key":"e0/g1/","t":81236900000,"kvs":[{"k":"e0/g1/k0","v":"v-2-9020"}],"more":true}
 ```
 
 | Field | Meaning |
@@ -170,11 +172,19 @@ clocks can't be compared.
 | `op` | Unique per run. Pairs an `invoke` with its result. |
 | `type` | `invoke`, `ok` (happened), `fail` (definitely did **not** happen), `info` (unknown) |
 | `f` | `put`, `get`, `delete`, `cas`, `range` |
-| `value` | Unique per write (`v-<proc>-<op>`), so every read traces back to exactly one write. |
+| `key` | The key; for `range`, the first key of the page's span |
+| `value` | On a write: the value written, unique per write (`v-<proc>-<op>`), so every read traces back to exactly one write. On a `get` / `cas` result: the value read |
+| `found` | `get` / `cas` result: whether the key existed (for `cas`: after the swap, or when the compare failed) |
+| `deleted` | `delete` result: whether the key existed (optional; checked when present) |
+| `cmp`, `expect`, `rev`, `del` | `cas` invoke: compare kind `value` / `absent` / `rev`, the expected value, the expected mod revision (`rev` only: `expect` then holds the value read with that revision), and whether the action deletes |
+| `swapped` | `cas` result |
+| `end`, `kvs`, `more` | `range`: exclusive end of the requested span (`""` = no end), the pairs the page returned, and whether it stopped at its limit |
 
-Retries of one logical op reuse the same session `(client_id, seq)` and are recorded as **one** op, from the first
-attempt to the final outcome. The fault injector writes `faults-<run>.jsonl` with the same clock so faults can be
-shown next to the history.
+The recorder is `test/linearizability` (`Recorder`, `ConvertEvents`). Retries of one logical op reuse the same
+session `(client_id, seq)` and are recorded as **one** op, from the first attempt to the final outcome. Each Range
+**page** is recorded as its own op (D-34); a continuation page's `key` is the first key after the previous page's last
+key. The e2e fault driver writes `fault-log.txt` (wall clock) next to `history.jsonl` so faults can be lined up with
+the history.
 
 ### 3.2 Classifying results
 
@@ -186,45 +196,78 @@ shown next to the history.
 | Timeout, connection reset, `UNAVAILABLE` after sending, leader lost after proposing | `info` | May or may not have been applied |
 | An indeterminate **read** | dropped | Reads change nothing, so dropping them is safe |
 
-**Indeterminate writes**: an `info` op gets return time = +∞ (it may take effect any time after it was sent) and an
-unknown output that the model accepts in any state. Because values are unique, a later read that sees the value pins
-it down. After an `info` write the client retires that `proc` and continues under a new one, since it is no longer
-sequential (standard Jepsen practice).
+**Indeterminate writes** (the client's `OUTCOME_UNKNOWN` / `INDETERMINATE` outcome, api-design 6.1, including a
+`cas`): an `info` op gets return time = +∞ (it may take effect any time after it was sent) and an unknown output that
+the model accepts in any state. Linearizing it last is the same as "never applied", so it is modelled as
+may-or-may-not-have-happened. Because values are unique, a later read that sees the value pins it down. After an
+`info` write the client retires that `proc` and continues under a new one, since it is no longer sequential (standard
+Jepsen practice). In the workloads most clients use sessions (D-09), so the client retries an unknown write with the
+same sequence and it rarely ends `info`; one or two workers write without a session so that `info` writes do occur.
 
-### 3.3 Porcupine model (KV with CAS)
+### 3.3 Porcupine model (KV with CAS and Range)
 
-Uses `github.com/anishathalye/porcupine` with a **partitioned** model that splits the history by key.
-Linearizability is compositional, so checking each key on its own is sound for single-key ops.
+Uses `github.com/anishathalye/porcupine` (`test/linearizability/model.go`, `KVModel`).
 
 ```text
 State per key:  absent | present(value)
 Init:           absent
 put(v):         always ok;                 new = present(v)
-delete:         always ok;                 new = absent
+delete:         always ok;                 new = absent; if `deleted` was recorded it must equal "state was present"
 get:            ok iff output matches state (absent = not_found)
-cas(e, v):      if state == e: ok iff swapped == true;  new = present(v)
-                else:          ok iff swapped == false; new = state
-                unknown output (info): allow both branches (nondeterministic model)
+cas(cmp, act):  matches = (cmp absent: state absent | cmp value e: state == present(e))
+                matches:  ok iff swapped == true  and the returned key == the new state; new = act applied
+                          (act = set v: present(v); act = delete: absent)
+                else:     ok iff swapped == false and the returned current value == state; new = state
+                          (a failed compare is an ordinary linearizable read)
+                unknown output (info): new = matches ? act applied : state, any output accepted;
+                          the +∞ return time covers "never applied"
+range page:     ok iff the keys present in the page's span, with their values, in order, are exactly `kvs`
 put/delete with unknown output: same as known; the +∞ return time covers "maybe never applied"
 ```
 
-- **Range** touches many keys and can't be split by key. It is checked only in short, low-concurrency histories over
-  a small keyspace with an unpartitioned model.
-- **Stale reads** (`consistency=STALE`, D-05) are not linearizable by design. They are recorded but left out of the
-  check.
+- **Revision compares.** `cas` with `expected_mod_revision = r` is checked as a value compare against the value the
+  client read together with revision `r`. That is exact, not an approximation: every write stores a unique value, a
+  revision names exactly one write, and a failed CAS changes nothing, so "the key's mod revision is `r`" holds iff
+  "the key's current value is the one written at `r`".
+- **Range pages (D-34).** Each page is linearizable on its own; a multi-page scan is not one snapshot. So each page is
+  one operation: a single atomic read of every key in its **span**. The span is the requested `[start, end)` (prefix
+  scans: `[prefix, prefixEnd)`) for the last page, and `[start, lastKey]` for a page that stopped at its limit
+  (`more`), since it claims nothing about keys after its last key. Within the span the page must return exactly the
+  present keys with their current values (so a missing key, a deleted key, a stale value, a key outside the span, or a
+  page that mixes two points in time are all violations). Forward scans only; the workload does not issue reverse
+  scans.
+- **Partitioning.** Linearizability is compositional: a history is linearizable iff each independent sub-history is.
+  Single-key ops touch one key, so without ranges every key is its own partition. A range page joins all keys its span
+  covers (among the keys that appear anywhere in the history; a key never written or returned is absent throughout)
+  into one partition, by union-find, and is checked against all of them at one point. The workload keeps every scan
+  inside one small key group (`e<epoch>/g<n>/k0..k2`), so partitions stay at one group. This is sound (no false
+  alarms) and complete for page atomicity, unlike checking a page as separate per-key reads, which would miss a page
+  that is not one cut (see the `page is not one atomic cut` known-bad history in `model_test.go`).
+- **Stale reads** (`consistency=STALE`, D-05) are not linearizable by design. They are not part of checked workloads.
 - **Lease reads** (optional, D-25) are checked as normal linearizable reads.
+
+Known-bad histories that each model must reject live in `test/linearizability/model_test.go` (CAS: swap on a
+non-matching compare, no swap on a matching one, stale current value, lost update between two CASes, swap on a
+superseded revision, invisible swap, indeterminate CAS observed although its compare never matched; Range: missing
+key, deleted key, ghost value or key, stale page, key outside the span, limited page skipping a key, non-atomic page)
+next to good histories the models must accept (failed compares, concurrent CASes, indeterminate CAS applied, never
+applied and applied late, paged scans that see newer state on later pages).
 
 ### 3.4 Keeping the check tractable, and testing the checker
 
-Porcupine's search grows quickly with concurrency, so checked workloads use 1,000–10,000 keys, at most about 16
-concurrent clients per key, and a 60 s checker timeout per key (timeout = exit code 3). For longer runs the workload
-pauses briefly every few minutes with no faults active; the history is cut at these quiet points and each window is
-checked separately.
+Porcupine's search grows quickly with concurrency. Checked workloads use a small key space with few keys per
+partition and a few concurrent clients per key, and the checker gets a 60 s timeout (timeout = failure, exit code 3).
+For longer runs the e2e workload moves every client to fresh keys at the start of each fault cycle
+(`Workload.NextEpoch`): operations of different epochs never share a partition, so each cycle is checked separately,
+which has the effect of cutting the history at quiet points.
 
-**The checker must catch a deliberately broken build.** Nightly runs (and any run used as evidence) include one run
-against a test-only build with a known bug switched on, for example followers serving "linearizable" reads locally
-without ReadIndex, or a skipped fsync. It sits behind a build tag (`//go:build raftkv_mutation`) that is never in a
-normal build. The checker **must** report a violation. If it doesn't, the run is invalid.
+**The checker must catch a deliberately broken build.** `internal/server/mutation_on.go` (`//go:build
+raftkv_mutation`, never in a normal build) makes every member serve "linearizable" Get and Range from local state
+without ReadIndex. `TestCheckerCatchesBrokenReadPath` isolates a follower, overwrites a key and a key group on the
+majority (put, CAS, delete), then reads them through the isolated follower: in a normal build the reads fail or time
+out (dropped) and the history is linearizable; with the tag the checker **must** report a violation for the Get and for
+the Range page, or the test fails. `make mutation` runs it; the PR `check` job and the nightly `e2e-long` job run it
+before the e2e runs count as evidence.
 
 ---
 

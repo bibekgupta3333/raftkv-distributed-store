@@ -3,6 +3,7 @@ package linearizability
 import (
 	"bytes"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +51,7 @@ func TestRecorderEventsAndJSONL(t *testing.T) {
 		t.Fatalf("jsonl:\n%s", buf.String())
 	}
 	back, err := ReadJSONL(&buf)
-	if err != nil || len(back) != 8 || back[3] != ev[3] && (back[3].Found == nil || *back[3].Found != *ev[3].Found) {
+	if err != nil || len(back) != 8 || !reflect.DeepEqual(back, ev) {
 		t.Fatalf("round trip: %v %+v", err, back)
 	}
 }

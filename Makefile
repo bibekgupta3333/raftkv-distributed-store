@@ -10,7 +10,7 @@ SEEDS   ?= 500
 FAULTS  ?= full
 TRACEDIR ?= out/sim
 
-.PHONY: all fmt fmt-check lint build test race proto clean help tools sim e2e e2e-image cluster-up cluster-down cluster-logs
+.PHONY: all fmt fmt-check lint build test race proto clean help tools sim e2e e2e-image mutation cluster-up cluster-down cluster-logs
 
 all: fmt-check lint build test ## fmt-check, lint, build, test
 
@@ -62,6 +62,9 @@ cluster-logs: ## follow the compose cluster logs
 
 e2e: e2e-image ## docker-compose e2e (E2E_PROFILE=pr|nightly E2E_SEED=n E2E_ROUNDS=n)
 	IMAGE=$(IMAGE) E2E_PROFILE=$(E2E_PROFILE) go test -tags e2e -count=1 -timeout 120m -v ./test/e2e/...
+
+mutation: ## checker vs a deliberately broken read path (testing.md 3.4): must report a violation
+	go test -tags raftkv_mutation -count=1 -v -run TestCheckerCatchesBrokenReadPath ./test/linearizability/
 
 # --- Kubernetes on kind (D-16, WBS 7.1) and Chaos Mesh (D-47, WBS 7.4) ---
 # Every kubectl/helm call names the kind context explicitly, so these targets

@@ -13,6 +13,8 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: make fmt-check lint build test race
+      # testing.md 3.4, WBS 4.6.1: the checker must catch a deliberately broken read path.
+      - run: make mutation
       - name: proto drift check
         run: make proto && git diff --exit-code
   sim:

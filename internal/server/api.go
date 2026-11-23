@@ -127,7 +127,7 @@ func (s *KV) Range(ctx context.Context, req *raftkvv1.RangeRequest) (*raftkvv1.R
 		if err := read(); err != nil {
 			return nil, mapReadError(err)
 		}
-	} else if err := s.member.LinearizableRead(ctx, read); err != nil { // same ReadIndex path as Get (D-05)
+	} else if err := s.linearizableRead(ctx, read); err != nil { // same ReadIndex path as Get (D-05)
 		return nil, mapReadError(err)
 	}
 	resp := &raftkvv1.RangeResponse{Header: s.header(), More: more}

@@ -258,7 +258,7 @@ jobs:
     steps:
       - uses: actions/checkout@<sha>
       - run: make e2e E2E_PROFILE=nightly E2E_SEED=$BASE_SEED
-      - run: make e2e E2E_PROFILE=mutation-canary E2E_SEED=$BASE_SEED   # must detect the planted bug
+      - run: make mutation   # the checker must detect the planted read-path bug (testing.md 3.4)
       - if: always()
         uses: actions/upload-artifact@<sha>
         with: { name: e2e-long, path: out/e2e/, retention-days: 30 }
@@ -297,7 +297,8 @@ CI calls only these Makefile targets (to be created), so local and CI commands a
 |---|---|---|
 | `make test` | `go test -race -shuffle=on -count=1 ./...` plus short fuzz | `unit` |
 | `make sim SEED=<n> [SIM_PROFILE=...]` | Replays one simulator seed exactly | failing `sim` / `sim-long` seed |
-| `make e2e [E2E_PROFILE=pr\|nightly\|mutation-canary] [E2E_SEED=]` | 5-node docker-compose cluster + faults + Porcupine | `e2e-short`, `e2e-long` |
+| `make e2e [E2E_PROFILE=pr\|nightly] [E2E_SEED=]` | 5-node docker-compose cluster + faults + Porcupine | `e2e-short`, `e2e-long` |
+| `make mutation` | Linearizability check against a `-tags raftkv_mutation` build whose followers serve "linearizable" reads locally; must report a violation (testing.md 3.4) | `check`, `e2e-long` |
 | `make chaos-up` | Create a kind cluster, install Chaos Mesh, deploy RaftKV | `chaos` |
 | `make chaos [CHAOS_DURATION=] [CHAOS_SEED=]` | Run the chaos workload and check the history | `chaos` |
 | `make chaos-down` | Delete the kind cluster | — |

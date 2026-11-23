@@ -6,6 +6,7 @@
 //	E2E_SEED     seed for victim choice and the fault schedule (default 1)
 //	E2E_ROUNDS   override the kill/restart round count (pr 20, nightly 200)
 //	E2E_STEPS    override the schedule length (pr 6, nightly 40)
+//	E2E_LIN_CYCLES override the linearizability fault cycles (pr 1, nightly 6)
 //	E2E_OUT      artifact directory (default out/e2e)
 //	E2E_KEEP     keep the cluster running after the test
 package e2e

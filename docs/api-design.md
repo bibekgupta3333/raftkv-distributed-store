@@ -223,7 +223,7 @@ Writes go to the leader. Any member accepts them and forwards by default (D-28).
 | Value size | 0..1 MiB | `INVALID_ARGUMENT / VALUE_TOO_LARGE` |
 | Range page | ≤ 1,000 keys | `INVALID_ARGUMENT / LIMIT_TOO_LARGE` |
 | Range page bytes | ≤ 4 MiB. Page is cut early with `more=true`; at least one KV is returned | none (short page) |
-| gRPC max message | client 2 MiB in / 8 MiB out; peer 8 MiB | `RESOURCE_EXHAUSTED` |
+| gRPC max message | 8 MiB each way. A node serves the KV, Cluster and Raft peer services on one gRPC server and port, so they share this limit; `pkg/client` accepts replies up to 8 MiB (a full Range page plus framing). Requests are bounded far lower by the key and value limits above | `RESOURCE_EXHAUSTED` |
 | Outstanding seqs per session | 64 (`sequence − acked_sequence`) | `FAILED_PRECONDITION / SESSION_WINDOW_EXCEEDED` |
 
 ### 3.3 Deadlines
@@ -237,6 +237,12 @@ Failover takes at least one election timeout (1–2 s, D-08). Deadlines are size
 | `Get` / `Range` STALE | 500 ms | 2 s |
 | Cluster admin changes | 10 s | 30 s |
 | `Status` | 1 s | 1 s |
+
+These are the intended budgets. As of M4, `pkg/client` uses one per-attempt timeout for every RPC
+(`Config.AttemptTimeout`, default 2 s) and a 10 s total (`Config.DefaultTimeout`) when the caller's context has no
+deadline; a caller's deadline always wins. A waiting `Get` or `Range` gives up 20 ms (at most a tenth of the budget)
+before the caller's deadline, so the client sees the server's reason (`READ_INDEX_TIMEOUT`, `REVISION_NOT_REACHED`)
+rather than a bare client-side timeout.
 
 - Deadline expired **before proposing** → `DEADLINE_EXCEEDED / NOT_PROPOSED`. The write definitely did not happen.
 - Deadline expired **after proposing** → `DEADLINE_EXCEEDED / OUTCOME_UNKNOWN`. The entry may still commit. With a session, retrying with the same `(client_id, sequence)` is safe.
