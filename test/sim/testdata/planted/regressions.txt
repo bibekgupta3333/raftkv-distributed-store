@@ -1,0 +1,1 @@
+3 none # planted-bug fixture, replayed by TestSimPlantedRegressionReplay (not by the real regression run)

@@ -3,6 +3,9 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 SHA     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION) -X $(MODULE)/internal/version.GitSHA=$(SHA)
 SEED    ?= 1
+SEEDS   ?= 500
+FAULTS  ?= full
+TRACEDIR ?= out/sim
 
 .PHONY: all fmt fmt-check lint build test race proto clean help tools sim
 
@@ -36,8 +39,8 @@ test: ## unit tests
 race: ## unit tests with race detector
 	go test -race ./...
 
-sim: ## run the deterministic simulator (SEED=n)
-	go test ./test/sim/... -run Sim -seeds=500 -start=$(SEED)
+sim: ## deterministic simulator: SEEDS=500 SEED=1 (first seed) FAULTS=full
+	go test ./test/sim/... -run Sim -seeds=$(SEEDS) -start=$(SEED) -faults=$(FAULTS) -tracedir=$(TRACEDIR) -timeout=60m
 
 proto: ## regenerate protobuf code
 	go tool buf generate

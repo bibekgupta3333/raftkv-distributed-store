@@ -1,0 +1,44 @@
+name: nightly
+# D-19, WBS 1.7.5: long deterministic-simulator run with fresh seeds each day.
+# Later milestones add fuzzing, long e2e and kind + Chaos Mesh jobs here.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "seeds per profile"
+        default: "100000"
+      base_seed:
+        description: "first seed (default: derived from the run ID)"
+        default: ""
+jobs:
+  sim-long:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        faults: [full, lossy, partition, crash]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: run seeds
+        env:
+          SEEDS: ${{ inputs.seeds || '100000' }}
+          BASE: ${{ inputs.base_seed }}
+          FAULTS: ${{ matrix.faults }}
+        run: |
+          # A different seed range every day; the base is logged so a failure can be replayed.
+          SEED="${BASE:-$(( (GITHUB_RUN_ID % 1000000) * 1000000 ))}"
+          echo "profile=$FAULTS first seed=$SEED seeds=$SEEDS"
+          make sim SEEDS="$SEEDS" SEED="$SEED" FAULTS="$FAULTS"
+      - name: upload failing-seed traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-long-failure-${{ matrix.faults }}
+          path: out/sim/
