@@ -61,6 +61,9 @@ func (a *Applier) Store() *Store { return a.store }
 // Applied is the highest applied index; it seeds the Raft core on restart.
 func (a *Applier) Applied() uint64 { return a.store.Applied() }
 
+// AppliedTerm is the term of the entry at Applied (node.AppliedTermer).
+func (a *Applier) AppliedTerm() uint64 { return a.store.AppliedTerm() }
+
 // Close closes the store (flushing first).
 func (a *Applier) Close() error { return a.store.Close() }
 

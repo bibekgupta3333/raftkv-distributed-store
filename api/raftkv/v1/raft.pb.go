@@ -1240,9 +1240,13 @@ type SnapshotMetadata struct {
 	LastIncludedIndex uint64                 `protobuf:"varint,4,opt,name=last_included_index,json=lastIncludedIndex,proto3" json:"last_included_index,omitempty"`
 	LastIncludedTerm  uint64                 `protobuf:"varint,5,opt,name=last_included_term,json=lastIncludedTerm,proto3" json:"last_included_term,omitempty"`
 	Config            *ClusterConfig         `protobuf:"bytes,6,opt,name=config,proto3" json:"config,omitempty"`
-	Files             []*SnapshotFile        `protobuf:"bytes,7,rep,name=files,proto3" json:"files,omitempty"` // streamed in this order
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	Files             []*SnapshotFile        `protobuf:"bytes,7,rep,name=files,proto3" json:"files,omitempty"`                                       // streamed in this order
+	FormatVersion     uint32                 `protobuf:"varint,8,opt,name=format_version,json=formatVersion,proto3" json:"format_version,omitempty"` // snapshot layout version (1 = Pebble checkpoint)
+	// CRC32C of this message, deterministically encoded with checksum,
+	// leader_id and term zeroed: covers index, term, config and the file list.
+	Checksum      uint32 `protobuf:"fixed32,9,opt,name=checksum,proto3" json:"checksum,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SnapshotMetadata) Reset() {
@@ -1322,6 +1326,20 @@ func (x *SnapshotMetadata) GetFiles() []*SnapshotFile {
 		return x.Files
 	}
 	return nil
+}
+
+func (x *SnapshotMetadata) GetFormatVersion() uint32 {
+	if x != nil {
+		return x.FormatVersion
+	}
+	return 0
+}
+
+func (x *SnapshotMetadata) GetChecksum() uint32 {
+	if x != nil {
+		return x.Checksum
+	}
+	return 0
 }
 
 type SnapshotChunk struct {
@@ -1861,7 +1879,7 @@ const file_raftkv_v1_raft_proto_rawDesc = "" +
 	"\fSnapshotFile\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x16\n" +
-	"\x06crc32c\x18\x03 \x01(\aR\x06crc32c\"\xa1\x02\n" +
+	"\x06crc32c\x18\x03 \x01(\aR\x06crc32c\"\xe4\x02\n" +
 	"\x10SnapshotMetadata\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x1b\n" +
@@ -1870,7 +1888,9 @@ const file_raftkv_v1_raft_proto_rawDesc = "" +
 	"\x13last_included_index\x18\x04 \x01(\x04R\x11lastIncludedIndex\x12,\n" +
 	"\x12last_included_term\x18\x05 \x01(\x04R\x10lastIncludedTerm\x120\n" +
 	"\x06config\x18\x06 \x01(\v2\x18.raftkv.v1.ClusterConfigR\x06config\x12-\n" +
-	"\x05files\x18\a \x03(\v2\x17.raftkv.v1.SnapshotFileR\x05files\"\x86\x01\n" +
+	"\x05files\x18\a \x03(\v2\x17.raftkv.v1.SnapshotFileR\x05files\x12%\n" +
+	"\x0eformat_version\x18\b \x01(\rR\rformatVersion\x12\x1a\n" +
+	"\bchecksum\x18\t \x01(\aR\bchecksum\"\x86\x01\n" +
 	"\rSnapshotChunk\x12\x1d\n" +
 	"\n" +
 	"file_index\x18\x01 \x01(\rR\tfileIndex\x12\x16\n" +

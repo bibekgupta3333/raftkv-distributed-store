@@ -18,6 +18,9 @@ type Recovered struct {
 	Entries []Entry
 	// HardState is the last valid HARD_STATE record (zero if none).
 	HardState HardState
+	// Start is the log start set by the last SNAPSHOT_MARKER (zero if none).
+	// Every entry in Entries is above Start.Index.
+	Start Start
 	// TruncatedBytes is how many torn tail bytes were cut off (D-33).
 	TruncatedBytes int64
 }
@@ -30,11 +33,12 @@ func corruptf(seg string, off int, format string, args ...any) error {
 type replayer struct {
 	entries []Entry
 	hs      HardState
+	start   Start
 }
 
 func (r *replayer) lastIndex() uint64 {
 	if len(r.entries) == 0 {
-		return 0
+		return r.start.Index
 	}
 	return r.entries[len(r.entries)-1].Index
 }
@@ -49,10 +53,47 @@ func (r *replayer) apply(rec Record) error {
 			return err
 		}
 		r.hs = hs
+	case RecordSnapshotMarker:
+		s, reset, err := markerFromRecord(rec)
+		if err != nil {
+			return err
+		}
+		switch {
+		case reset:
+			// A snapshot replaced the log (storage-design 4.4 step 6).
+			r.entries = nil
+			r.start = s
+		case s.Index < r.start.Index:
+			// An older log start (a segment preamble written before a
+			// later marker cannot exist, so this is corruption).
+			return fmt.Errorf("%w: snapshot marker %d below log start %d", errBadRecord, s.Index, r.start.Index)
+		default:
+			// The log was trimmed to s (D-30), or this is the preamble of a
+			// segment whose predecessors were deleted: drop entries <=
+			// s.Index. A preamble may name a start below the segment's first
+			// entry (the entries between were in deleted segments); the trim
+			// marker written before that deletion closes the gap, which
+			// replayDir checks at the end.
+			if len(r.entries) > 0 && s.Index > r.lastIndex() {
+				return fmt.Errorf("%w: trim marker %d beyond last entry %d", errBadRecord, s.Index, r.lastIndex())
+			}
+			k := 0
+			for k < len(r.entries) && r.entries[k].Index <= s.Index {
+				k++
+			}
+			if k > 0 && r.entries[k-1].Index == s.Index && r.entries[k-1].Term != s.Term {
+				return fmt.Errorf("%w: trim marker term %d differs from entry %d term %d", errBadRecord, s.Term, s.Index, r.entries[k-1].Term)
+			}
+			r.entries = r.entries[k:]
+			r.start = s
+		}
 	case RecordEntry:
 		e, err := entryFromRecord(rec)
 		if err != nil {
 			return err
+		}
+		if r.start.Index > 0 && e.Index <= r.start.Index {
+			return fmt.Errorf("%w: entry %d at or below the log start %d", errBadRecord, e.Index, r.start.Index)
 		}
 		if len(r.entries) > 0 {
 			first, last := r.entries[0].Index, r.lastIndex()
@@ -204,8 +245,12 @@ func replayDir(fsys FS, dir string, opts Options) ([]segInfo, *Recovered, error)
 		sf.info.maxIndex = res.maxIndex
 		infos = append(infos, sf.info)
 	}
+	if rp.start.Index > 0 && len(rp.entries) > 0 && rp.entries[0].Index != rp.start.Index+1 {
+		return nil, nil, fmt.Errorf("%w: log starts after %d but the first entry is %d", ErrCorrupt, rp.start.Index, rp.entries[0].Index)
+	}
 	rec.Entries = rp.entries
 	rec.HardState = rp.hs
+	rec.Start = rp.start
 	return infos, rec, nil
 }
 

@@ -17,6 +17,9 @@ const WALDir = "wal"
 // StateDir is the state machine's (Pebble) subdirectory of the data directory.
 const StateDir = "sm"
 
+// SnapDir is the snapshots' subdirectory of the data directory (D-14).
+const SnapDir = "snap"
+
 // ErrIdentityMismatch means the data directory belongs to a different node or
 // cluster than the configuration says.
 var ErrIdentityMismatch = errors.New("node: data directory identity mismatch")

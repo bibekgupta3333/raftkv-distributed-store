@@ -93,8 +93,13 @@ type Config struct {
 	VoteTimeout time.Duration
 	// ReadIndexTimeout bounds one ReadIndex round trip to the leader (D-05).
 	ReadIndexTimeout time.Duration
-	BackoffMin       time.Duration
-	BackoffMax       time.Duration
+	// Snapshots sends and receives InstallSnapshot streams (D-14); nil
+	// means this node cannot send or accept snapshots.
+	Snapshots SnapshotHandler
+	// SnapshotTimeout bounds one outgoing snapshot transfer.
+	SnapshotTimeout time.Duration
+	BackoffMin      time.Duration
+	BackoffMax      time.Duration
 	// DialOptions are extra grpc dial options (credentials, for example).
 	// Without any, the transport uses insecure credentials: mTLS is out of
 	// scope for this learning project (removed D-15).
@@ -133,6 +138,9 @@ func (c *Config) fill() error {
 	}
 	if c.ReadIndexTimeout <= 0 {
 		c.ReadIndexTimeout = DefaultReadIndexTimeout
+	}
+	if c.SnapshotTimeout <= 0 {
+		c.SnapshotTimeout = DefaultSnapshotTimeout
 	}
 	if c.BackoffMin <= 0 {
 		c.BackoffMin = DefaultBackoffMin
@@ -268,6 +276,10 @@ func (t *Transport) Send(msgs []raft.Message) {
 			}
 		case IsReadIndexResponse(m.Type):
 			t.completeReadIndex(m)
+		case m.Type == raft.MsgSnap:
+			if p := t.peers[m.To]; p != nil {
+				p.sendSnapshot(m)
+			}
 		}
 	}
 }

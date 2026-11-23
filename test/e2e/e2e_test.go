@@ -219,7 +219,11 @@ func TestSeededFaultSchedule(t *testing.T) {
 	n := pick(6, 40, "E2E_STEPS")
 	c := Start(t, "schedule")
 	c.WaitLeader(30 * time.Second)
-	steps := Schedule(seed(), n)
+	kinds := DefaultKinds
+	if nightly() {
+		kinds = NightlyKinds // WBS 5.5.2: follower wipes too
+	}
+	steps := ScheduleKinds(seed(), n, kinds)
 	c.Faults.Logf("schedule seed=%d steps=%d", seed(), n)
 
 	acked := map[uint64]string{}
@@ -267,4 +271,50 @@ func TestSeededFaultSchedule(t *testing.T) {
 		}
 	}
 	t.Logf("%d acknowledged entries survived %d faults", len(acked), n)
+}
+
+// WBS 5.5.1-5.5.2 (M5 exit criterion 2): with a low snapshot threshold, a
+// follower's data volume is deleted and it restarts empty under its ID. It
+// catches up through InstallSnapshot (the leader's log no longer reaches back
+// to its start) and, once the cluster is stopped, every replica's state hash
+// is identical. E2E_WIPE_RUNS rounds (pr 2, nightly 20), a different follower
+// each time.
+func TestWipedFollowerRejoinsViaSnapshot(t *testing.T) {
+	runs := pick(2, 20, "E2E_WIPE_RUNS")
+	c := StartEnv(t, "wipe-follower", "RAFTKV_SNAPSHOT_ENTRIES=100", "RAFTKV_SNAPSHOT_RETAIN=10")
+	c.WaitLeader(30 * time.Second)
+	r := rand.New(rand.NewPCG(seed(), 5))
+	next := 0
+	write := func(n int) {
+		for range n {
+			c.MustPropose(fmt.Sprintf("w-%d", next))
+			next++
+		}
+	}
+	write(150)
+	for run := range runs {
+		lead := c.WaitLeader(30 * time.Second)
+		victim := 1 + r.IntN(NumNodes)
+		for victim == lead {
+			victim = 1 + r.IntN(NumNodes)
+		}
+		c.Kill(victim)
+		write(150) // the leader snapshots and trims past the victim's log
+		c.Wipe(victim)
+		Eventually(t, 60*time.Second, fmt.Sprintf("node %d to install a snapshot", victim), func() bool {
+			v, err := c.Metric(victim, "raftkv_snapshot_installs_total")
+			return err == nil && v >= 1
+		})
+		write(20)
+		c.WaitConverged(60 * time.Second)
+		t.Logf("run %d/%d: wiped node %d rejoined via snapshot", run+1, runs, victim)
+	}
+	c.StopAll()
+	hashes := c.StateHashes()
+	for id, h := range hashes {
+		if h != hashes[1] {
+			t.Fatalf("state hashes differ: node %d %q vs node 1 %q", id, h, hashes[1])
+		}
+	}
+	t.Logf("all 5 replicas: %s", hashes[1])
 }

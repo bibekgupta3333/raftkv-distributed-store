@@ -281,6 +281,8 @@ sequenceDiagram
 - One snapshot in flight per follower. Replication to others continues.
 - The follower **never** installs a snapshot at or below its `commitIndex`. The old Pebble dir stays live until an atomic rename commits the swap, so a crash leaves either old or new state.
 - After install, `appliedIndex = commitIndex = snapshot.index` and membership comes from the snapshot.
+- The core carries only `{index, term}` in `MsgSnap`; the driver streams the files out of band and reports the outcome with `ReportSnapshot` (success or failure both return the follower to Probe; a failure starts over, D-14). The follower acknowledges with a `MsgAppResp` at the snapshot index.
+- **Wiped follower (same ID).** A follower whose disk was replaced comes back empty while the leader still holds its old `match`. The follower ignores a heartbeat commit index beyond its last index, and rejects the next append at the index it had acknowledged; the leader takes that (responses arrive in order) as lost state, resets `match` to 0 and probes from scratch, which leads to a snapshot. Lowering `match` never uncommits anything. Re-joining under the same ID is still unsafe if the node had voted in the current term (D-32); M6 replaces it with a learner and a new ID.
 
 ### 5.3 Lagging followers
 

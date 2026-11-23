@@ -620,6 +620,10 @@ message SnapshotMetadata {
   uint64 last_included_term = 5;
   ClusterConfig config = 6;
   repeated SnapshotFile files = 7;  // streamed in this order
+  uint32 format_version = 8;        // snapshot layout version (1 = Pebble checkpoint)
+  // CRC32C of this message, deterministically encoded with checksum,
+  // leader_id and term zeroed: covers index, term, config and the file list.
+  fixed32 checksum = 9;
 }
 
 message SnapshotChunk {

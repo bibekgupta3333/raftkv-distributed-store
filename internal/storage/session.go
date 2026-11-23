@@ -270,6 +270,8 @@ func decodeReply(b []byte) (Result, error) {
 // D-27). A new leader stamps at least this, so session time never goes
 // backwards across leader changes.
 func (s *Store) SessionClock() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	v, _, err := s.getMeta(keySessionClock)
 	if err != nil {
 		return 0
@@ -279,6 +281,8 @@ func (s *Store) SessionClock() uint64 {
 
 // HasSession reports whether a session exists in committed state.
 func (s *Store) HasSession(clientID uint64) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	_, c, err := s.db.Get(SessionKey(clientID))
 	if errors.Is(err, pebble.ErrNotFound) {
 		return false, nil
@@ -300,7 +304,12 @@ func (s *Store) SessionHash() (sessions int, sum [sha256.Size]byte, err error) {
 		h.Write(lenBuf[:])
 		h.Write(b)
 	}
-	clock := s.SessionClock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	clock, _, err := s.getMeta(keySessionClock)
+	if err != nil {
+		return 0, sum, err
+	}
 	write(putU64(clock))
 	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte{prefixSession}, UpperBound: []byte{prefixExpiry + 1}})
 	if err != nil {

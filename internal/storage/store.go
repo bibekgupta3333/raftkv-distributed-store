@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -44,10 +45,15 @@ type Options struct {
 // memtable flush, so the WAL must never be trimmed past [Store.DurableApplied]
 // (D-30, see [Store.TruncateWAL]).
 //
-// One goroutine (the node's apply path) commits batches; any goroutine may
-// call the read methods and [Store.Flush].
+// One goroutine (the node's apply path) commits batches, takes checkpoints and
+// swaps the database ([Store.Reopen], snapshot install); any goroutine may
+// call the read methods and [Store.Flush]. Reads wait while a swap is in
+// progress.
 type Store struct {
+	mu       sync.RWMutex // guards db against Reopen
 	db       *pebble.DB
+	dir      string
+	opts     Options
 	readOnly bool
 
 	applied     atomic.Uint64 // last committed batch's index
@@ -70,7 +76,21 @@ func (quietLogger) Fatalf(format string, args ...any) {
 // it recovers is also the durable one: Pebble reopens at its last flush, so
 // everything it holds is on disk (storage-design 2.4).
 func Open(opts Options) (*Store, error) {
-	s := &Store{readOnly: opts.ReadOnly}
+	s := &Store{readOnly: opts.ReadOnly, opts: opts, dir: opts.Dir}
+	db, err := s.openDB(opts.Dir)
+	if err != nil {
+		return nil, err
+	}
+	s.db = db
+	if err := s.recover(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) openDB(dir string) (*pebble.DB, error) {
+	opts := s.opts
 	popts := &pebble.Options{
 		DisableWAL: true, // D-02, D-03
 		FS:         opts.FS,
@@ -85,16 +105,64 @@ func Open(opts Options) (*Store, error) {
 			},
 		},
 	}
-	db, err := pebble.Open(opts.Dir, popts)
+	db, err := pebble.Open(dir, popts)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open pebble: %w", err)
 	}
-	s.db = db
-	if err := s.recover(); err != nil {
-		_ = db.Close()
-		return nil, err
+	return db, nil
+}
+
+// Dir is the directory of the open database.
+func (s *Store) Dir() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dir
+}
+
+// Checkpoint writes a consistent copy of the database to dir, which must not
+// exist (D-14, storage-design 4.1): Pebble's WAL is off, so it flushes first
+// (raising DurableApplied), then hard-links the SSTs and copies the MANIFEST.
+// It returns the applied index and term the copy holds. Call it from the apply
+// goroutine between batches, so the copy's appliedIndex is exactly Applied.
+func (s *Store) Checkpoint(dir string) (index, term uint64, err error) {
+	if s.readOnly {
+		return 0, 0, ErrReadOnly
 	}
-	return s, nil
+	if err := s.Flush(); err != nil {
+		return 0, 0, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	index, term = s.applied.Load(), s.appliedTerm.Load()
+	if err := s.db.Checkpoint(dir); err != nil {
+		return 0, 0, fmt.Errorf("storage: checkpoint: %w", err)
+	}
+	return index, term, nil
+}
+
+// Reopen closes the database and opens the one in dir in its place: the
+// install step of a snapshot (storage-design 4.4 step 5). The old state is
+// discarded, so it is not flushed. Reads block until the new database is open.
+// Applied, AppliedTerm and DurableApplied become the new database's.
+func (s *Store) Reopen(dir string) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.db.Close(); err != nil {
+		return fmt.Errorf("storage: close for reopen: %w", err)
+	}
+	db, err := s.openDB(dir)
+	if err != nil {
+		return err
+	}
+	s.db, s.dir = db, dir
+	s.durable.Store(0) // recover raises it to the new applied index
+	if err := s.recover(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) recover() error {
@@ -170,7 +238,10 @@ func (s *Store) Flush() error {
 		return ErrReadOnly
 	}
 	a := s.applied.Load()
-	if err := s.db.Flush(); err != nil {
+	s.mu.RLock()
+	err := s.db.Flush()
+	s.mu.RUnlock()
+	if err != nil {
 		return fmt.Errorf("storage: flush: %w", err)
 	}
 	for {
@@ -187,11 +258,25 @@ func (s *Store) Close() error {
 	if !s.readOnly {
 		ferr = s.Flush()
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return errors.Join(ferr, s.db.Close())
 }
 
+// Abandon closes the database without flushing, as a crash (kill -9) would
+// leave it: unflushed applies are lost (Pebble's WAL is off, D-03). Tests only.
+func (s *Store) Abandon() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.db.Close()
+}
+
 // Get reads a user key from committed state.
-func (s *Store) Get(key []byte) (Value, bool, error) { return getValue(s.db, key) }
+func (s *Store) Get(key []byte) (Value, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return getValue(s.db, key)
+}
 
 type reader interface {
 	Get(key []byte) ([]byte, io.Closer, error)
@@ -216,6 +301,8 @@ func getValue(r reader, key []byte) (Value, bool, error) {
 // compare (WBS 3.1.7, 3.1.8). It returns the applied index it was taken at. It
 // is meant for quiescent stores (a stopped node or a test).
 func (s *Store) StateHash() (applied uint64, sum [sha256.Size]byte, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	applied = s.Applied()
 	it, err := s.db.NewIter(nil)
 	if err != nil {
@@ -257,6 +344,8 @@ func (s *Store) NewApplyBatch() (*ApplyBatch, error) {
 	if s.readOnly {
 		return nil, ErrReadOnly
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return &ApplyBatch{s: s, b: s.db.NewIndexedBatch(), last: s.Applied()}, nil
 }
 
@@ -309,7 +398,10 @@ func (a *ApplyBatch) Commit() error {
 	if err := a.b.Set(keyAppliedTerm, putU64(a.term), nil); err != nil {
 		return err
 	}
-	if err := a.s.db.Apply(a.b, pebble.NoSync); err != nil {
+	a.s.mu.RLock()
+	err := a.s.db.Apply(a.b, pebble.NoSync)
+	a.s.mu.RUnlock()
+	if err != nil {
 		return fmt.Errorf("storage: commit batch ending at %d: %w", a.last, err)
 	}
 	a.s.appliedTerm.Store(a.term)

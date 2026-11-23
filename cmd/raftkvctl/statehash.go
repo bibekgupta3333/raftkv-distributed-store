@@ -30,7 +30,13 @@ func runStateHash(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "raftkvctl: -data-dir is required")
 		return 2
 	}
-	s, err := storage.Open(storage.Options{Dir: filepath.Join(*dir, node.StateDir), ReadOnly: true})
+	smDir := filepath.Join(*dir, node.StateDir)
+	live, err := storage.ReadCurrent(smDir) // the live database (storage-design 7)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "raftkvctl:", err)
+		return 1
+	}
+	s, err := storage.Open(storage.Options{Dir: filepath.Join(smDir, live), ReadOnly: true})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "raftkvctl:", err)
 		return 1

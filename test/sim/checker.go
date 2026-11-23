@@ -36,7 +36,7 @@ func (v *Violation) IsSafety() bool { return v.Kind != KindLiveness }
 
 // NodeView is what the checker sees of one node after an event: the volatile
 // status of the Raft core plus the node's persisted log. Log holds entries
-// 1..len(Log) (no compaction before M5); Hashes[i] is the chained hash of
+// 1..len(Log), the compacted prefix included (taken from the snapshot); Hashes[i] is the chained hash of
 // entries 1..i+1, so two logs agree on a prefix iff the hashes at its end are
 // equal.
 type NodeView struct {
@@ -175,6 +175,32 @@ func (c *Checker) OnApply(at int64, node, inc uint64, e raft.Entry) *Violation {
 		return viol(KindStateMachineSafety, at, node,
 			"applied entry at index %d differs from the committed entry in the logs", e.Index)
 	}
+	return nil
+}
+
+// OnRestore records that node (in incarnation inc) replaced its state machine
+// with a snapshot holding ents, the applied entries 1..len(ents) (D-14):
+// either installed from the leader or loaded at restart. The snapshot must
+// hold exactly the entries the reference model applied (INV-5), and must
+// never roll the node's state machine back.
+func (c *Checker) OnRestore(at int64, node, inc uint64, ents []raft.Entry) *Violation {
+	k := applyKey{node, inc}
+	last := uint64(len(ents))
+	if last == 0 {
+		return nil
+	}
+	if prev := c.applied[k]; prev >= last {
+		return viol(KindStateMachineSafety, at, node, "snapshot at %d would roll back applied index %d", last, prev)
+	}
+	if last > uint64(len(c.model)) {
+		return viol(KindStateMachineSafety, at, node, "snapshot at %d holds entries no node applied (model length %d)", last, len(c.model))
+	}
+	for i, e := range ents {
+		if e.Index != uint64(i+1) || HashEntry(e) != c.model[i] {
+			return viol(KindStateMachineSafety, at, node, "snapshot at %d differs from the applied entry at index %d", last, i+1)
+		}
+	}
+	c.applied[k] = last
 	return nil
 }
 

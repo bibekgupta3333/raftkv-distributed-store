@@ -41,7 +41,24 @@ type Profile struct {
 	// it is also the node's clock rate (100/period). Zero means [95, 105],
 	// i.e. clocks within about 5% of each other.
 	Periods [2]int64
+	// Snapshots, when Every[1] > 0, makes nodes snapshot their state machine
+	// and compact their logs (D-14, WBS 5.1.4).
+	Snapshots SnapshotPolicy
 }
+
+// SnapshotPolicy is how often simulated nodes snapshot. A seed draws the
+// threshold from Every and the retained log tail from Retain (both [min, max],
+// inclusive). Low values make followers fall behind the leader's first index
+// all the time, so snapshots are sent, interrupted and installed constantly.
+type SnapshotPolicy struct {
+	// Every is the number of applied entries between two snapshots.
+	Every [2]uint64
+	// Retain is how many entries below the snapshot index stay in the log
+	// (D-30's retention tail).
+	Retain [2]uint64
+}
+
+func (p SnapshotPolicy) enabled() bool { return p.Every[1] > 0 }
 
 // Profiles by name. "full" is the one the M1 exit criterion uses (WBS 1.9.1).
 var profiles = []Profile{
@@ -86,6 +103,20 @@ var profiles = []Profile{
 			Partition: 3, IsolateLeader: 4, OneWay: 2, Heal: 4, Degrade: 2, ResetLinks: 2,
 		},
 		LeaseReads: true,
+	},
+	{
+		// Snapshots (WBS 5.1.4, D-14): a very low snapshot threshold and
+		// retention tail, so lagging and restarted followers are brought
+		// back by InstallSnapshot, plus crashes (of sender and receiver)
+		// that interrupt transfers and installs.
+		Name: "snapshot", Sizes: []int{3, 5}, FaultMs: 25_000,
+		Base:     Link{Drop: 0.03, Dup: 0.03, Reorder: 0.08, MinDelay: 1, MaxDelay: 40},
+		Degraded: Link{Drop: 0.30, Dup: 0.10, Reorder: 0.30, MinDelay: 5, MaxDelay: 400},
+		Weights: Weights{
+			Partition: 3, IsolateLeader: 2, OneWay: 1, Heal: 4,
+			Crash: 5, CrashLeader: 2, Degrade: 2, ResetLinks: 2,
+		},
+		Snapshots: SnapshotPolicy{Every: [2]uint64{3, 25}, Retain: [2]uint64{0, 5}},
 	},
 }
 

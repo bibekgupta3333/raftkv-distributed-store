@@ -3,7 +3,9 @@ package server
 import (
 	"path/filepath"
 
+	raftkvv1 "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/node"
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/snapshot"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/storage"
 )
 
@@ -30,7 +32,8 @@ func (o *nodeObserver) OnStop() {
 }
 
 // OpenKVNode replaces the in-memory applier with the Pebble state machine
-// (WBS 3.2.3): it opens <data_dir>/sm, builds the proposal tracker as the
+// (WBS 3.2.3): it opens the live database named by <data_dir>/sm/CURRENT and
+// the snapshot manager over <data_dir>/snap (D-14), builds the proposal tracker as the
 // applier's result sink and the node's observer, registers the KV and Cluster
 // services on the node's gRPC server, and hands the applier to the node, which closes it
 // (flush first) on shutdown. opts.Applier and opts.Observer must be unset.
@@ -42,10 +45,28 @@ func OpenKVNode(cfg node.Config, opts node.Options) (*KVNode, error) {
 	if err := node.EnsureIdentity(cfg.DataDir, node.Identity{NodeID: cfg.NodeID, ClusterID: cfg.ClusterID}); err != nil {
 		return nil, err
 	}
-	store, err := storage.Open(storage.Options{Dir: filepath.Join(cfg.DataDir, node.StateDir)})
+	smDir := filepath.Join(cfg.DataDir, node.StateDir)
+	live, err := storage.PrepareStateDir(smDir) // storage-design 5 step 2
 	if err != nil {
 		return nil, err
 	}
+	store, err := storage.Open(storage.Options{Dir: live})
+	if err != nil {
+		return nil, err
+	}
+	members := make([]*raftkvv1.Member, 0, len(cfg.Peers))
+	for _, p := range cfg.Peers {
+		members = append(members, &raftkvv1.Member{Id: p.ID, PeerUrl: p.Addr, Role: raftkvv1.MemberRole_VOTER})
+	}
+	snaps, err := snapshot.Open(snapshot.Config{
+		Dir: filepath.Join(cfg.DataDir, node.SnapDir), StateDir: smDir, Store: store,
+		ClusterID: cfg.ClusterID, Members: members,
+	})
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	opts.Snapshots = snaps
 	tracker := NewTracker()
 	opts.Applier = storage.NewApplier(store, tracker)
 	obs := &nodeObserver{Tracker: tracker}

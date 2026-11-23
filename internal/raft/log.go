@@ -4,22 +4,39 @@ import "fmt"
 
 const noLimit = ^uint64(0)
 
-// unstable holds entries the core has accepted but the driver has not yet
-// confirmed as persisted (via Advance). entries[i] has index offset+i.
+// unstable holds what the core has accepted but the driver has not yet
+// confirmed as persisted (via Advance): an incoming snapshot to install and
+// entries. entries[i] has index offset+i; with a snapshot, offset is
+// snapshot.Index+1.
 type unstable struct {
-	offset  uint64
-	entries []Entry
+	snapshot *Snapshot
+	offset   uint64
+	entries  []Entry
+}
+
+// maybeFirstIndex is the first log index if a snapshot is pending.
+func (u *unstable) maybeFirstIndex() (uint64, bool) {
+	if u.snapshot != nil {
+		return u.snapshot.Index + 1, true
+	}
+	return 0, false
 }
 
 func (u *unstable) maybeLastIndex() (uint64, bool) {
 	if n := len(u.entries); n > 0 {
 		return u.offset + uint64(n) - 1, true
 	}
+	if u.snapshot != nil {
+		return u.snapshot.Index, true
+	}
 	return 0, false
 }
 
 func (u *unstable) maybeTerm(i uint64) (uint64, bool) {
 	if i < u.offset {
+		if u.snapshot != nil && u.snapshot.Index == i {
+			return u.snapshot.Term, true
+		}
 		return 0, false
 	}
 	last, ok := u.maybeLastIndex()
@@ -38,6 +55,20 @@ func (u *unstable) stableTo(i, t uint64) {
 	}
 	u.entries = append([]Entry(nil), u.entries[i+1-u.offset:]...)
 	u.offset = i + 1
+}
+
+// stableSnapTo drops the pending snapshot once the driver installed it.
+func (u *unstable) stableSnapTo(i uint64) {
+	if u.snapshot != nil && u.snapshot.Index == i {
+		u.snapshot = nil
+	}
+}
+
+// replaceWith replaces the unstable log with snapshot s (D-14).
+func (u *unstable) replaceWith(s Snapshot) {
+	u.offset = s.Index + 1
+	u.entries = nil
+	u.snapshot = &s
 }
 
 // truncateAndAppend appends after, replacing any conflicting unstable suffix.
@@ -94,6 +125,9 @@ func newLog(storage Storage) (*raftLog, error) {
 }
 
 func (l *raftLog) firstIndex() uint64 {
+	if i, ok := l.unstable.maybeFirstIndex(); ok {
+		return i
+	}
 	i, err := l.storage.FirstIndex()
 	if err != nil {
 		panic(err)
@@ -110,6 +144,25 @@ func (l *raftLog) lastIndex() uint64 {
 		panic(err)
 	}
 	return i
+}
+
+// snapshot is the newest snapshot the leader can send: a pending incoming one,
+// else the storage's (D-14).
+func (l *raftLog) snapshot() (Snapshot, error) {
+	if l.unstable.snapshot != nil {
+		return *l.unstable.snapshot, nil
+	}
+	return l.storage.Snapshot()
+}
+
+func (l *raftLog) hasPendingSnapshot() bool { return l.unstable.snapshot != nil }
+
+// installSnapshot replaces the log with snapshot s: everything up to s.Index
+// is now committed and covered by the snapshot (D-14). The caller has checked
+// that s is newer than the commit index and does not match the log.
+func (l *raftLog) installSnapshot(s Snapshot) {
+	l.committed = s.Index
+	l.unstable.replaceWith(s)
 }
 
 // stableIndex is the last index known persisted.
@@ -300,11 +353,27 @@ func (l *raftLog) appliedTo(i uint64) {
 	l.applied = i
 }
 
+// stableSnapTo records that the snapshot at index i is installed, which also
+// applies it: the state machine now reflects everything up to i.
+func (l *raftLog) stableSnapTo(i uint64) {
+	if l.unstable.snapshot == nil || l.unstable.snapshot.Index != i {
+		return
+	}
+	l.unstable.stableSnapTo(i)
+	if i > l.applied {
+		l.appliedTo(i)
+	}
+}
+
 // stableTo records that entries up to (i, t) are persisted.
 func (l *raftLog) stableTo(i, t uint64) { l.unstable.stableTo(i, t) }
 
-// nextCommittedEnts returns committed-but-unapplied entries.
+// nextCommittedEnts returns committed-but-unapplied entries. Nothing is
+// applied while a snapshot is pending: it must be installed first.
 func (l *raftLog) nextCommittedEnts() []Entry {
+	if l.hasPendingSnapshot() {
+		return nil
+	}
 	lo := max(l.applied+1, l.firstIndex())
 	if l.committed+1 <= lo {
 		return nil
@@ -317,6 +386,9 @@ func (l *raftLog) nextCommittedEnts() []Entry {
 }
 
 func (l *raftLog) hasNextCommittedEnts() bool {
+	if l.hasPendingSnapshot() {
+		return false
+	}
 	return l.committed+1 > max(l.applied+1, l.firstIndex())
 }
 
@@ -338,8 +410,11 @@ func (l *raftLog) checkInvariants() error {
 		return fmt.Errorf("applied %d > committed %d", l.applied, l.committed)
 	case l.committed > l.lastIndex():
 		return fmt.Errorf("committed %d > last %d", l.committed, l.lastIndex())
-	case l.applied+1 < l.firstIndex():
+	case l.applied+1 < l.firstIndex() && !l.hasPendingSnapshot():
 		return fmt.Errorf("applied %d below first index %d", l.applied, l.firstIndex())
+	}
+	if l.hasPendingSnapshot() {
+		return nil // the stable log is replaced when the driver installs it
 	}
 	last, err := l.storage.LastIndex()
 	if err != nil {
