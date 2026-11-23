@@ -33,6 +33,10 @@ type raft struct {
 	// D-29: payload bytes appended by this leader (current term) and not yet
 	// committed.
 	uncommittedSize uint64
+
+	// D-05: ReadIndex state (leader only) and answers for the next Ready.
+	ro         readOnly
+	readStates []ReadState
 }
 
 func newRaft(cfg Config) (*raft, error) {
@@ -83,6 +87,9 @@ func (r *raft) softState() SoftState { return SoftState{Lead: r.lead, State: r.s
 // ---- role transitions ----
 
 func (r *raft) reset(term uint64) {
+	if r.state == StateLeader {
+		r.abortReads() // before the term changes
+	}
 	if r.term != term {
 		r.term = term
 		r.vote = None
@@ -277,6 +284,7 @@ func (r *raft) sendHeartbeat(to uint64) {
 	m := r.newMsg(MsgHeartbeat, to)
 	// Never tell a follower to commit beyond what we know it has.
 	m.Commit = min(r.prs[to].Match, r.log.committed)
+	m.Context = r.readRoundCtx() // D-05: confirms the in-flight ReadIndex round
 	r.send(m)
 }
 
@@ -362,6 +370,15 @@ func (r *raft) appendEntries(ents ...Entry) bool {
 func (r *raft) step(m Message) {
 	if _, member := r.prs[m.From]; !member {
 		return // D-31 spirit: unknown senders are ignored (static membership)
+	}
+	// D-05: ReadIndex messages are term-less (see read.go).
+	switch m.Type {
+	case MsgReadIndex:
+		r.handleReadIndex(m)
+		return
+	case MsgReadIndexResp:
+		r.handleReadIndexResp(m)
+		return
 	}
 	switch {
 	case m.Term > r.term:
@@ -456,6 +473,7 @@ func (r *raft) stepLeader(m Message) {
 		}
 		if r.maybeCommit() {
 			r.bcastAppend() // propagate the new commit index
+			r.maybeStartReadRound()
 		} else {
 			if oldPaused {
 				// The follower was waiting on this reply; an empty append
@@ -468,6 +486,9 @@ func (r *raft) stepLeader(m Message) {
 	case MsgHeartbeatResp:
 		pr.RecentActive = true
 		pr.probeSent = false
+		if len(m.Context) > 0 {
+			r.ackReadRound(m.From, m.Context)
+		}
 		if pr.State == ProgressReplicate && pr.inflights.full() {
 			pr.inflights.freeFirstOne()
 		}
@@ -569,6 +590,7 @@ func (r *raft) advance(rd Ready) {
 			// The leader counts its own entries only once durable.
 			if r.prs[r.id].maybeUpdate(last.Index) && r.maybeCommit() {
 				r.bcastAppend()
+				r.maybeStartReadRound()
 			}
 		}
 	}

@@ -12,6 +12,7 @@ type testNode struct {
 	rn      *RawNode
 	st      *MemoryStorage
 	applied []Entry
+	reads   []ReadState // every ReadState surfaced, in order
 }
 
 // network is a tiny deterministic in-test cluster: FIFO message queue, nodes
@@ -23,6 +24,8 @@ type network struct {
 	queue   []Message
 	blocked map[[2]uint64]bool // directed links that drop messages
 	sent    []Message          // every message ever sent (for assertions)
+	// drop, if set, discards matching messages at send time.
+	drop func(m Message) bool
 }
 
 type netOpt func(*Config)
@@ -92,9 +95,10 @@ func (nw *network) drain(n *testNode) {
 			n.st.SetHardState(rd.HardState)
 		}
 		n.applied = append(n.applied, rd.CommittedEntries...)
+		n.reads = append(n.reads, rd.ReadStates...)
 		for _, m := range rd.Messages {
 			nw.sent = append(nw.sent, m)
-			if !nw.blocked[[2]uint64{m.From, m.To}] {
+			if !nw.blocked[[2]uint64{m.From, m.To}] && (nw.drop == nil || !nw.drop(m)) {
 				nw.queue = append(nw.queue, m)
 			}
 		}
