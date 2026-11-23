@@ -15,6 +15,14 @@ import (
 const usage = `usage: raftkvctl [-version] <command>
 
 commands:
+  put [--endpoints a,b,c] [--timeout 10s] [--prev] [--value-file F] KEY [VALUE]
+  get [--endpoints a,b,c] [--timeout 10s] [--stale [--min-revision N]] [--hex] KEY
+      exit 3 if the key does not exist
+  del [--endpoints a,b,c] [--timeout 10s] [--prev] KEY
+      exit 7 if a write's outcome is unknown (it may have been applied)
+  debug state-hash -data-dir DIR
+      print a stopped node's applied index and state hash; equal hashes at the
+      same applied index mean equal state machines
   debug wal-dump -data-dir DIR [-from N] [-to N] [-max-data N]
       print a stopped node's HardState and log entries, ending with a digest
       line; equal digests on two nodes mean equal logs`
@@ -31,6 +39,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "-version", "--version":
 		_, _ = fmt.Fprintln(stdout, version.String("raftkvctl"))
 		return 0
+	case "put", "get", "del":
+		return runKV(args[0], args[1:], stdout, stderr)
 	case "debug":
 		return runDebug(args[1:], stdout, stderr)
 	default:
@@ -40,6 +50,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func runDebug(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "state-hash" {
+		return runStateHash(args[1:], stdout, stderr)
+	}
 	if len(args) == 0 || args[0] != "wal-dump" {
 		_, _ = fmt.Fprintln(stderr, usage)
 		return 2

@@ -514,16 +514,21 @@ message Entry {
 message Command {
   WriteSession session = 1;
   int64 leader_time_unix_ms = 2;   // stamped by the leader; used only for session expiry (D-27)
+  // Unique per proposal; the proposing node's waiter is keyed by it (M3 proposal tracker).
+  // Replicas ignore it when applying.
+  uint64 request_id = 3;
   oneof op {
     RegisterSessionOp register_session = 9;
     PutOp put = 10;
     DeleteOp delete = 11;
     CasOp cas = 12;
+    GetOp get = 13;                // linearizable read through the log (M3)
   }
 }
 message RegisterSessionOp {}
 message PutOp    { bytes key = 1; bytes value = 2; bool return_previous = 3; }
 message DeleteOp { bytes key = 1; bool return_previous = 2; }
+message GetOp    { bytes key = 1; }
 message CasOp {
   bytes key = 1;
   oneof expected { bytes expected_value = 2; uint64 expected_mod_revision = 3; bool expect_absent = 4; }

@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/node"
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/server"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/version"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/wal"
 )
@@ -38,17 +39,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "raftkvd:", err)
 		return exitConfig
 	}
-	n, err := node.New(cfg, node.Options{LogWriter: stderr})
+	// M3: the Pebble state machine and the KV service replace the in-memory applier.
+	n, err := server.OpenKVNode(cfg, node.Options{LogWriter: stderr})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "raftkvd:", err)
-		if errors.Is(err, node.ErrIdentityMismatch) || errors.Is(err, wal.ErrCorrupt) {
+		if errors.Is(err, node.ErrIdentityMismatch) || errors.Is(err, wal.ErrCorrupt) ||
+			errors.Is(err, node.ErrAppliedOutsideLog) {
 			return exitConfig
 		}
 		return exitFailed
 	}
 	// Blocks until SIGTERM or SIGINT, then shuts down gracefully (D-33: any
 	// fsync error inside exits immediately instead).
-	if err := node.RunUntilSignal(n); err != nil {
+	if err := node.RunUntilSignal(n.Node); err != nil {
 		_, _ = fmt.Fprintln(stderr, "raftkvd:", err)
 		return exitFailed
 	}

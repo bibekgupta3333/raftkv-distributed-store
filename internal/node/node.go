@@ -53,8 +53,13 @@ type Options struct {
 	// addresses; tests use them to get free ports.
 	Listener        net.Listener
 	MetricsListener net.Listener
-	// Applier defaults to a [MemoryApplier] (temporary until M3).
+	// Applier defaults to a [MemoryApplier]. raftkvd passes the Pebble applier
+	// (M3). If it implements io.Closer, Run (or Close) closes it after the loop
+	// stops and the last apply has finished.
 	Applier Applier
+	// Observer is told about role/term changes and shutdown; the KV
+	// proposal tracker uses it to fail waiters on leader change (WBS 3.2.2).
+	Observer Observer
 	// Logger replaces the default JSON logger (which writes to LogWriter).
 	Logger    *slog.Logger
 	LogWriter io.Writer // default os.Stderr
@@ -66,6 +71,15 @@ type Options struct {
 	// WALFS and OnFatal are passed to the WAL (fault injection in tests, D-33).
 	WALFS   wal.FS
 	OnFatal func(error)
+}
+
+// Observer watches the node from the driver loop. Methods run on the loop
+// goroutine and must not block.
+type Observer interface {
+	// OnStatus is called after every handled Ready with the fresh status.
+	OnStatus(st raft.Status)
+	// OnStop is called once when the node is shutting down.
+	OnStop()
 }
 
 // Node is one RaftKV member: the driver loop around the pure core (D-35).
@@ -92,6 +106,9 @@ type Node struct {
 	propCh   chan *proposal
 	unreach  chan uint64
 	stopping chan struct{}
+
+	observer Observer
+	services []func(grpc.ServiceRegistrar)
 
 	status atomic.Pointer[raft.Status]
 	term   atomic.Uint64
@@ -139,6 +156,7 @@ func New(cfg Config, opts Options) (*Node, error) {
 		started:  make(chan struct{}),
 		waiters:  make(map[uint64]*waiter),
 		applier:  opts.Applier,
+		observer: opts.Observer,
 		metrics:  opts.Metrics,
 	}
 	if n.applier == nil {
@@ -171,6 +189,11 @@ func New(cfg Config, opts Options) (*Node, error) {
 	n.store = store
 	if store.TruncatedBytes > 0 {
 		n.log.Warn("cut a torn WAL tail", "component", "wal", "bytes", store.TruncatedBytes) // D-33
+	}
+
+	if err := n.reconcileApplied(); err != nil {
+		_ = store.Close()
+		return nil, err
 	}
 
 	rcfg := raft.DefaultConfig(cfg.NodeID, cfg.PeerIDs(), store,
@@ -212,6 +235,60 @@ func New(cfg Config, opts Options) (*Node, error) {
 	}
 	return n, nil
 }
+
+// ErrAppliedOutsideLog means the state machine's applied index and the WAL
+// disagree in a way that cannot happen without breaking D-30 or losing WAL
+// data: the node refuses to start (storage-design section 5, step 6).
+var ErrAppliedOutsideLog = errors.New("node: applied index is outside the WAL")
+
+// reconcileApplied checks the applier's durable appliedIndex A against the WAL
+// (storage-design 5, steps 6-7). A < firstIndex-1 means entries (A, first) were
+// trimmed before the state machine made them durable: D-30 was broken. A above
+// the last WAL entry means committed entries were lost. If the WAL's
+// persisted commit lags A (it is written lazily), commit is raised to A because
+// only committed entries are ever applied (storage-design 2.2).
+func (n *Node) reconcileApplied() error {
+	applied := n.applier.Applied()
+	if applied == 0 {
+		return nil
+	}
+	first, err := n.store.FirstIndex()
+	if err != nil {
+		return err
+	}
+	last, err := n.store.LastIndex()
+	if err != nil {
+		return err
+	}
+	if applied+1 < first {
+		return fmt.Errorf("%w: applied %d but the WAL starts at %d (D-30 violated)", ErrAppliedOutsideLog, applied, first)
+	}
+	if applied > last {
+		return fmt.Errorf("%w: applied %d but the WAL ends at %d (committed entries lost)", ErrAppliedOutsideLog, applied, last)
+	}
+	hs, err := n.store.InitialState()
+	if err != nil {
+		return err
+	}
+	if hs.Commit < applied {
+		hs.Commit = applied
+		if err := n.store.SetHardState(hs); err != nil {
+			return err
+		}
+		return n.store.Sync()
+	}
+	return nil
+}
+
+// RegisterService lets a service (the KV API) register on the node's gRPC
+// server. It must be called before [Node.Run].
+func (n *Node) RegisterService(f func(grpc.ServiceRegistrar)) { n.services = append(n.services, f) }
+
+// ClusterID is this node's cluster ID.
+func (n *Node) ClusterID() uint64 { return n.cfg.ClusterID }
+
+// PeerAddr returns the configured address of member id, or "".
+func (n *Node) PeerAddr(id uint64) string { return n.cfg.PeerAddrs()[id] }
 
 // Addr is the peer gRPC address the node listens on.
 func (n *Node) Addr() string { return n.lis.Addr().String() }
@@ -335,7 +412,14 @@ func (n *Node) Close() error {
 	if n.metricsLis != nil {
 		_ = n.metricsLis.Close()
 	}
-	return n.store.Close()
+	return errors.Join(n.store.Close(), n.closeApplier())
+}
+
+func (n *Node) closeApplier() error {
+	if c, ok := n.applier.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
 }
 
 // Run serves peers and drives the core until ctx is cancelled (graceful
@@ -344,6 +428,9 @@ func (n *Node) Close() error {
 func (n *Node) Run(ctx context.Context) error {
 	n.srv = n.tr.NewGRPCServer()
 	registerDebug(n.srv, n)
+	for _, f := range n.services {
+		f(n.srv)
+	}
 	go func() { _ = n.srv.Serve(n.lis) }()
 	var metricsSrv *http.Server
 	if n.metricsLis != nil {
@@ -373,7 +460,13 @@ func (n *Node) Run(ctx context.Context) error {
 		cancel()
 	}
 	n.failWaiters(ErrStopped)
+	if n.observer != nil {
+		n.observer.OnStop()
+	}
 	if cerr := n.store.Close(); err == nil { // Close fsyncs the WAL tail
+		err = cerr
+	}
+	if cerr := n.closeApplier(); err == nil {
 		err = cerr
 	}
 	return err
@@ -533,6 +626,9 @@ func (n *Node) publish(rd raft.Ready) {
 	n.status.Store(&st)
 	n.term.Store(st.Term)
 	n.metrics.ObserveStatus(st)
+	if n.observer != nil {
+		n.observer.OnStatus(st)
+	}
 	if rd.SoftState != nil {
 		n.log.Info("raft state changed", "component", "raft",
 			"state", rd.SoftState.State.String(), "leader", rd.SoftState.Lead, "commit", st.Commit)
