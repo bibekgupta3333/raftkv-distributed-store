@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RaftKV Observer</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #6b7385; --line: #dde1e8;
+    --leader: #1f7a4d; --cand: #b26a00; --down: #b3261e; --warn: #b26a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1d2128; --text: #e3e6ec; --muted: #9098a8; --line: #30363f;
+      --leader: #4cc38a; --cand: #f0a63a; --down: #f2766d; --warn: #f0a63a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+         font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; margin-bottom: 16px; }
+  header h1 { font-size: 18px; margin: 0; }
+  header .live { margin-left: auto; }
+  .live.ok { color: var(--leader); } .live.bad { color: var(--down); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .card .role { font-weight: 700; margin-bottom: 8px; }
+  .card.leader { border-color: var(--leader); } .card.leader .role { color: var(--leader); }
+  .card.cand .role { color: var(--cand); }
+  .card.down { opacity: .75; border-style: dashed; } .card.down .role { color: var(--down); }
+  .card dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
+  .card dt { color: var(--muted); } .card dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  .warn { color: var(--warn); }
+  .err { color: var(--muted); font-size: 12px; margin-top: 6px; word-break: break-word; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 16px; }
+  section h3 { margin: 0 0 8px; font-size: 14px; }
+  #spark { width: 100%; height: 48px; display: block; }
+  #spark path { fill: none; stroke: var(--leader); stroke-width: 1.5; }
+  #events { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto; }
+  #events li { padding: 2px 0; border-bottom: 1px solid var(--line); }
+  #events time { color: var(--muted); margin-right: 12px; }
+  #events .unreachable { color: var(--down); } #events .reachable, #events .leader { color: var(--leader); }
+</style>
+</head>
+<body>
+<header>
+  <h1>RaftKV Observer</h1>
+  <span>cluster <b id="cluster">-</b></span>
+  <span>term <b id="term">-</b></span>
+  <span>leader <b id="leader">-</b></span>
+  <span id="live" class="live bad">&#9675; connecting</span>
+</header>
+<div id="cards" class="cards"></div>
+<section>
+  <h3>Writes/s <span id="rate"></span> <small style="color:var(--muted)">(leader applied-index delta, last ~60 s)</small></h3>
+  <svg id="spark" viewBox="0 0 600 48" preserveAspectRatio="none"><path id="sparkpath" d=""></path></svg>
+</section>
+<section>
+  <h3>Events</h3>
+  <ul id="events"></ul>
+</section>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+function text(el, s) { el.textContent = s; }
+
+function ago(from, to) {
+  const s = Math.max(0, Math.round((new Date(to) - new Date(from)) / 1000));
+  return s < 60 ? s + "s ago" : Math.round(s / 60) + "m ago";
+}
+
+function row(dl, label, value, cls) {
+  const dt = document.createElement("dt"); dt.textContent = label;
+  const dd = document.createElement("dd"); dd.textContent = value;
+  if (cls) dd.className = cls;
+  dl.append(dt, dd);
+}
+
+function card(n, st) {
+  const el = document.createElement("div");
+  const isLeader = n.up && n.role === "LEADER";
+  el.className = "card" + (isLeader ? " leader" : "") + (!n.up ? " down" : "") +
+    (n.up && /CANDIDATE/.test(n.role) ? " cand" : "");
+  const h = document.createElement("h2"); h.textContent = n.name; el.append(h);
+  const role = document.createElement("div"); role.className = "role";
+  role.textContent = !n.up ? "DOWN" : n.role + (isLeader ? " ★" : "");
+  el.append(role);
+  const dl = document.createElement("dl");
+  if (n.seen) {
+    row(dl, "id", n.memberId);
+    row(dl, "term", n.term);
+    row(dl, "commit", n.commit);
+    row(dl, "applied", n.applied);
+    row(dl, "lag", n.lag < 0 ? "-" : n.lag + (n.lag > 10 ? " ⚠" : ""), n.lag > 10 ? "warn" : "");
+    row(dl, "snap", n.snapshot);
+  }
+  if (!n.up) row(dl, "last seen", n.seen ? ago(n.lastSeen, st.time) : "never");
+  el.append(dl);
+  if (!n.up && n.err) {
+    const e = document.createElement("div"); e.className = "err"; e.textContent = n.err; el.append(e);
+  }
+  return el;
+}
+
+function spark(rates) {
+  const w = 600, h = 48, n = rates.length;
+  if (n < 2) { $("sparkpath").setAttribute("d", ""); return; }
+  const top = Math.max(1, ...rates);
+  let d = "";
+  rates.forEach((r, i) => {
+    const x = (i / (n - 1)) * w, y = h - 2 - (r / top) * (h - 4);
+    d += (i ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1);
+  });
+  $("sparkpath").setAttribute("d", d);
+  text($("rate"), Math.round(rates[n - 1]) + "/s");
+}
+
+function events(list) {
+  const ul = $("events");
+  ul.replaceChildren(...list.slice().reverse().map((e) => {
+    const li = document.createElement("li"); li.className = e.kind;
+    const t = document.createElement("time"); t.textContent = new Date(e.time).toLocaleTimeString();
+    li.append(t, document.createTextNode(e.text));
+    return li;
+  }));
+}
+
+function render(st) {
+  text($("cluster"), st.clusterId !== "0" ? BigInt(st.clusterId).toString(16) : "-");
+  text($("term"), st.term || "-");
+  text($("leader"), st.leaderName || "none");
+  $("cards").replaceChildren(...st.nodes.map((n) => card(n, st)));
+  spark(st.writesPerSec || []);
+  events(st.events || []);
+}
+
+function connect() {
+  const es = new EventSource("events");
+  es.onopen = () => { const l = $("live"); l.className = "live ok"; l.textContent = "● live"; };
+  es.onmessage = (m) => render(JSON.parse(m.data));
+  es.onerror = () => { const l = $("live"); l.className = "live bad"; l.textContent = "○ disconnected"; };
+}
+connect();
+</script>
+</body>
+</html>

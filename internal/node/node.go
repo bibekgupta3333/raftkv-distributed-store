@@ -310,6 +310,9 @@ func (n *Node) Applier() Applier { return n.applier }
 // ID is this node's ID.
 func (n *Node) ID() uint64 { return n.cfg.NodeID }
 
+// FirstIndex is the first index still in the WAL. Safe from any goroutine.
+func (n *Node) FirstIndex() (uint64, error) { return n.store.FirstIndex() }
+
 // Status returns the most recently published status. It is safe from any
 // goroutine; before the first loop iteration it is the zero value.
 func (n *Node) Status() raft.Status {
@@ -426,7 +429,7 @@ func (n *Node) closeApplier() error {
 // shutdown, WBS 2.3.5) or a fatal error occurs. On cancellation it returns nil
 // after stopping the transport and syncing and closing the WAL.
 func (n *Node) Run(ctx context.Context) error {
-	n.srv = n.tr.NewGRPCServer()
+	n.srv = n.tr.NewGRPCServer(grpc.ChainUnaryInterceptor(n.metrics.UnaryServerInterceptor()))
 	registerDebug(n.srv, n)
 	for _, f := range n.services {
 		f(n.srv)

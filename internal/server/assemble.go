@@ -16,8 +16,8 @@ type KVNode struct {
 
 // OpenKVNode replaces the in-memory applier with the Pebble state machine
 // (WBS 3.2.3): it opens <data_dir>/sm, builds the proposal tracker as the
-// applier's result sink and the node's observer, registers the KV service on
-// the node's gRPC server, and hands the applier to the node, which closes it
+// applier's result sink and the node's observer, registers the KV and Cluster
+// services on the node's gRPC server, and hands the applier to the node, which closes it
 // (flush first) on shutdown. opts.Applier and opts.Observer must be unset.
 func OpenKVNode(cfg node.Config, opts node.Options) (*KVNode, error) {
 	// The identity check must come before anything is created in the data dir.
@@ -40,5 +40,6 @@ func OpenKVNode(cfg node.Config, opts node.Options) (*KVNode, error) {
 		return nil, err
 	}
 	n.RegisterService(New(n, store, tracker).Register)
+	n.RegisterService(NewCluster(n, store).Register) // Status only until M6 (D-48)
 	return &KVNode{Node: n, Store: store, Tracker: tracker}, nil
 }
