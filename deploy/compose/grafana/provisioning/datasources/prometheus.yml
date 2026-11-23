@@ -1,0 +1,13 @@
+# Provisions the compose Prometheus as Grafana's default datasource (WBS 7.3.1).
+# The uid is fixed because the dashboard JSON refers to it.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s
