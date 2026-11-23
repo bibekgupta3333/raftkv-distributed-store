@@ -10,6 +10,11 @@ tool (
 )
 
 require (
+	google.golang.org/grpc v1.84.0
+	google.golang.org/protobuf v1.36.12
+)
+
+require (
 	4d63.com/gocheckcompilerdirectives v1.4.0 // indirect
 	4d63.com/gochecknoglobals v0.2.2 // indirect
 	buf.build/gen/go/bufbuild/bufplugin/protocolbuffers/go v1.36.12-20261002170247-538130002972.2 // indirect
@@ -122,7 +127,7 @@ require (
 	github.com/gobwas/glob v0.2.3 // indirect
 	github.com/godoc-lint/godoc-lint v0.11.4 // indirect
 	github.com/gofrs/flock v0.13.1 // indirect
-	github.com/golang/protobuf v1.5.3 // indirect
+	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golangci/asciicheck v0.5.0 // indirect
 	github.com/golangci/canonicalheader v0.0.0-20260928145534-e18e5c5a078f // indirect
 	github.com/golangci/dupl v0.0.0-20260401084720-c99c5cf5c202 // indirect
@@ -285,7 +290,6 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20261118221215-c8830f628b3f // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261118221215-c8830f628b3f // indirect
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.6.2 // indirect
-	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

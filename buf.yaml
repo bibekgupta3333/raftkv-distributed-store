@@ -4,3 +4,15 @@ modules:
 lint:
   use:
     - STANDARD
+  # docs/api-design.md is the binding API; these STANDARD rules conflict with it
+  # (unprefixed enum values, service names without a Service suffix, and the
+  # etcd/Raft-style AppendEntries RPC names from D-36).
+  ignore_only:
+    ENUM_VALUE_PREFIX:
+      - api/raftkv/v1
+    SERVICE_SUFFIX:
+      - api/raftkv/v1
+    RPC_REQUEST_STANDARD_NAME:
+      - api/raftkv/v1/raft.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - api/raftkv/v1/raft.proto

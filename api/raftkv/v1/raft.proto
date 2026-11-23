@@ -1,0 +1,157 @@
+syntax = "proto3";
+
+package raftkv.v1;
+
+import "raftkv/v1/cluster.proto";
+import "raftkv/v1/kv.proto";
+
+option go_package = "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1;raftkvv1";
+
+// ---------- Log entry (also the WAL ENTRY record payload) ----------
+
+enum EntryType {
+  ENTRY_TYPE_UNSPECIFIED = 0;
+  ENTRY_NORMAL = 1;        // data = Command
+  ENTRY_CONF_CHANGE = 2;   // data = ConfChange
+  ENTRY_NOOP = 3;          // new leader's first entry; data empty
+}
+
+message Entry {
+  uint64 term = 1;
+  uint64 index = 2;
+  EntryType type = 3;
+  bytes data = 4;
+}
+
+message Command {
+  WriteSession session = 1;
+  int64 leader_time_unix_ms = 2;   // stamped by the leader; used only for session expiry (D-27)
+  oneof op {
+    RegisterSessionOp register_session = 9;
+    PutOp put = 10;
+    DeleteOp delete = 11;
+    CasOp cas = 12;
+  }
+}
+message RegisterSessionOp {}
+message PutOp    { bytes key = 1; bytes value = 2; bool return_previous = 3; }
+message DeleteOp { bytes key = 1; bool return_previous = 2; }
+message CasOp {
+  bytes key = 1;
+  oneof expected { bytes expected_value = 2; uint64 expected_mod_revision = 3; bool expect_absent = 4; }
+  oneof action   { bytes new_value = 5; bool delete = 6; }
+}
+
+enum ConfChangeType {
+  CONF_CHANGE_TYPE_UNSPECIFIED = 0;
+  ADD_LEARNER = 1;
+  PROMOTE_LEARNER = 2;
+  REMOVE_MEMBER = 3;
+}
+message ConfChange {
+  ConfChangeType type = 1;
+  Member member = 2;          // full Member for ADD_LEARNER; id only otherwise
+}
+
+message ClusterConfig {
+  repeated Member members = 1;
+  uint64 config_index = 2;
+}
+
+// ---------- AppendEntries (on the Replicate stream) ----------
+
+message AppendEntriesRequest {
+  uint64 cluster_id = 1;
+  uint64 term = 2;
+  uint64 leader_id = 3;
+  uint64 prev_log_index = 4;
+  uint64 prev_log_term = 5;
+  repeated Entry entries = 6;       // empty = heartbeat
+  uint64 leader_commit = 7;
+  bytes read_context = 8;           // ReadIndex context (D-05), echoed back
+}
+
+message AppendEntriesResponse {
+  uint64 term = 1;
+  uint64 from = 2;
+  bool success = 3;
+  uint64 match_index = 4;           // on success
+  // On reject: conflict_term = follower's term at prev_log_index (0 if log too short);
+  // conflict_index = first index of that term, or last_index+1 if too short.
+  uint64 conflict_index = 5;
+  uint64 conflict_term = 6;
+  bytes read_context = 7;
+}
+
+// ---------- RequestVote (incl. PreVote, D-08) ----------
+
+message RequestVoteRequest {
+  uint64 cluster_id = 1;
+  uint64 term = 2;                  // for pre_vote: the term it WOULD use (current+1)
+  uint64 candidate_id = 3;
+  uint64 last_log_index = 4;
+  uint64 last_log_term = 5;
+  bool pre_vote = 6;
+  bool leadership_transfer = 7;     // set after TimeoutNow; skips the leader-stickiness check
+}
+message RequestVoteResponse {
+  uint64 term = 1;
+  bool vote_granted = 2;
+  bool pre_vote = 3;
+  uint64 from = 4;
+}
+
+// ---------- InstallSnapshot (client stream, D-14) ----------
+
+message SnapshotFile {
+  string name = 1;                  // e.g. "000123.sst"
+  uint64 size = 2;
+  fixed32 crc32c = 3;
+}
+
+message SnapshotMetadata {
+  uint64 cluster_id = 1;
+  uint64 leader_id = 2;
+  uint64 term = 3;                  // leader's current term
+  uint64 last_included_index = 4;
+  uint64 last_included_term = 5;
+  ClusterConfig config = 6;
+  repeated SnapshotFile files = 7;  // streamed in this order
+}
+
+message SnapshotChunk {
+  uint32 file_index = 1;            // index into SnapshotMetadata.files
+  uint64 offset = 2;
+  bytes data = 3;                   // <= 1 MiB (D-14)
+  fixed32 crc32c = 4;
+  bool last = 5;                    // final chunk of the snapshot
+}
+
+message InstallSnapshotRequest {
+  oneof msg {
+    SnapshotMetadata metadata = 1;  // MUST be first
+    SnapshotChunk chunk = 2;
+  }
+}
+message InstallSnapshotResponse {
+  uint64 term = 1;
+  uint64 from = 2;
+  bool installed = 3;
+}
+
+// ---------- TimeoutNow and ReadIndex ----------
+
+message TimeoutNowRequest  { uint64 cluster_id = 1; uint64 term = 2; uint64 leader_id = 3; }
+message TimeoutNowResponse { uint64 term = 1; bool accepted = 2; }
+
+message ReadIndexRequest  { uint64 cluster_id = 1; uint64 from = 2; bytes request_ctx = 3; }
+message ReadIndexResponse { uint64 term = 1; uint64 read_index = 2; bytes request_ctx = 3; }
+
+service Raft {
+  // One long-lived stream per (leader, follower), opened by the leader (D-12).
+  rpc Replicate(stream AppendEntriesRequest) returns (stream AppendEntriesResponse);
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc InstallSnapshot(stream InstallSnapshotRequest) returns (InstallSnapshotResponse);
+  rpc TimeoutNow(TimeoutNowRequest) returns (TimeoutNowResponse);
+  rpc ReadIndex(ReadIndexRequest) returns (ReadIndexResponse);
+}

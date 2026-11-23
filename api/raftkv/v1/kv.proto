@@ -1,0 +1,151 @@
+syntax = "proto3";
+
+package raftkv.v1;
+
+option go_package = "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1;raftkvv1";
+
+message RequestHeader {
+  // Optional. If non-zero and not ours: FAILED_PRECONDITION / CLUSTER_ID_MISMATCH.
+  uint64 cluster_id = 1;
+  // Write routing on a non-leader (§7). Default: FORWARD (D-28).
+  WriteRouting write_routing = 2;
+  // Set ONLY by a server forwarding to the leader (one hop). Clients leave it false.
+  bool forwarded = 3;
+}
+
+enum WriteRouting {
+  WRITE_ROUTING_UNSPECIFIED = 0;  // == FORWARD
+  FORWARD = 1;                    // follower forwards to leader (default)
+  REDIRECT = 2;                   // follower returns NOT_LEADER + LeaderHint
+}
+
+message ResponseHeader {
+  uint64 cluster_id = 1;
+  uint64 member_id = 2;   // member that served the request
+  uint64 raft_term = 3;   // serving member's term
+  uint64 revision = 4;    // serving member's appliedIndex when served
+  uint64 leader_id = 5;   // serving member's view of the leader (0 = unknown)
+}
+
+// Exactly-once writes (D-09). See §5.
+message WriteSession {
+  uint64 client_id = 1;       // from RegisterSession (D-26)
+  uint64 sequence = 2;        // +1 per logical write, starting at 1; retries reuse it
+  uint64 acked_sequence = 3;  // highest S with replies for all seqs <= S
+}
+
+enum Consistency {
+  CONSISTENCY_UNSPECIFIED = 0;  // == LINEARIZABLE
+  LINEARIZABLE = 1;             // ReadIndex (or lease if enabled, D-25)
+  STALE = 2;                    // local state, may be old (D-05)
+}
+
+// Carried in google.rpc.Status details on NOT_LEADER (§6).
+message LeaderHint {
+  uint64 leader_id = 1;          // 0 if unknown
+  string leader_client_url = 2;  // e.g. "raftkv-2.raftkv-peer:2379"
+  uint64 term = 3;
+}
+
+message KeyValue {
+  bytes key = 1;
+  bytes value = 2;              // empty if keys_only
+  uint64 create_revision = 3;
+  uint64 mod_revision = 4;
+  uint64 version = 5;           // modifications since creation (1 on create)
+}
+
+service KV {
+  rpc RegisterSession(RegisterSessionRequest) returns (RegisterSessionResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc CompareAndSwap(CompareAndSwapRequest) returns (CompareAndSwapResponse);
+  rpc Range(RangeRequest) returns (RangeResponse);
+}
+
+message RegisterSessionRequest  { RequestHeader header = 1; }
+message RegisterSessionResponse {
+  ResponseHeader header = 1;
+  uint64 client_id = 2;         // log index of the RegisterSession entry (D-26)
+}
+
+message PutRequest {
+  RequestHeader header = 1;
+  bytes key = 2;                // 1..4096 bytes (D-11)
+  bytes value = 3;              // 0..1 MiB (D-11)
+  WriteSession session = 4;
+  bool return_previous = 5;
+}
+message PutResponse {
+  ResponseHeader header = 1;
+  uint64 revision = 2;          // index of the applied entry
+  KeyValue previous = 3;        // only if return_previous && key existed
+}
+
+message GetRequest {
+  RequestHeader header = 1;
+  bytes key = 2;
+  Consistency consistency = 3;
+  // STALE only: wait until appliedIndex >= min_revision. Gives read-your-writes.
+  uint64 min_revision = 4;
+}
+message GetResponse {
+  ResponseHeader header = 1;
+  bool found = 2;
+  KeyValue kv = 3;
+}
+
+message DeleteRequest {
+  RequestHeader header = 1;
+  bytes key = 2;
+  WriteSession session = 3;
+  bool return_previous = 4;
+}
+message DeleteResponse {
+  ResponseHeader header = 1;
+  uint64 revision = 2;
+  bool deleted = 3;             // false if the key did not exist (still OK)
+  KeyValue previous = 4;
+}
+
+message CompareAndSwapRequest {
+  RequestHeader header = 1;
+  bytes key = 2;
+  oneof expected {
+    bytes expected_value = 3;
+    uint64 expected_mod_revision = 4;
+    bool expect_absent = 5;           // create-if-absent
+  }
+  oneof action {
+    bytes new_value = 6;
+    bool delete = 7;
+  }
+  WriteSession session = 8;           // required for safe retry
+}
+message CompareAndSwapResponse {
+  ResponseHeader header = 1;
+  bool succeeded = 2;                 // a failed compare is OK, not an error
+  uint64 revision = 3;                // index of the entry that evaluated the CAS
+  bool found = 4;
+  KeyValue current = 5;               // post-swap on success, conflicting value on failure
+}
+
+message RangeRequest {
+  RequestHeader header = 1;
+  bytes start_key = 2;                // [start_key, end_key); empty end = to the end
+  bytes end_key = 3;
+  bytes prefix = 4;                   // alternative to start/end
+  uint32 limit = 5;                   // 1..1000 (D-11). 0 = 1000
+  bool keys_only = 6;
+  bool reverse = 7;
+  Consistency consistency = 8;
+  uint64 min_revision = 9;            // STALE only
+  bytes page_token = 10;              // from a previous RangeResponse
+}
+message RangeResponse {
+  ResponseHeader header = 1;
+  repeated KeyValue kvs = 2;
+  bool more = 3;
+  bytes next_page_token = 4;          // set iff more
+}
