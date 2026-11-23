@@ -1,0 +1,317 @@
+package transport
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
+
+	raftkvv1 "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1"
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
+)
+
+// Defaults for [Config].
+const (
+	// DefaultMaxMsgBytes is the gRPC message-size limit in both directions. It
+	// matches the WAL's 8 MiB record cap; the core batches at most about 1 MiB
+	// of entries per MsgApp (D-11, D-29).
+	DefaultMaxMsgBytes = 8 << 20
+	// DefaultQueueSize bounds the per-peer outbound queue.
+	DefaultQueueSize = 4096
+	// DefaultMaxInflight is the per-follower in-flight cap (D-29).
+	DefaultMaxInflight = 256
+	// DefaultVoteTimeout bounds one RequestVote round trip.
+	DefaultVoteTimeout = time.Second
+	// DefaultBackoffMin and DefaultBackoffMax bound reconnect backoff.
+	DefaultBackoffMin = 50 * time.Millisecond
+	DefaultBackoffMax = 2 * time.Second
+)
+
+// Handler receives inbound peer messages. Step must hand m to the driver and
+// return promptly (it may block only while the driver's inbox is full, and must
+// return when ctx is done). It must never call the Raft core directly.
+type Handler interface {
+	Step(ctx context.Context, m raft.Message) error
+}
+
+// HandlerFunc adapts a function to [Handler].
+type HandlerFunc func(ctx context.Context, m raft.Message) error
+
+// Step implements [Handler].
+func (f HandlerFunc) Step(ctx context.Context, m raft.Message) error { return f(ctx, m) }
+
+// Observer receives transport events for metrics (D-17, WBS 2.4.3). All methods
+// must be cheap and safe for concurrent use.
+type Observer interface {
+	// MessageSent counts a message written to a peer (or, for responses, to
+	// the inbound stream it answers).
+	MessageSent(peer uint64, t raft.MessageType)
+	// SendFailure counts a failed stream or RPC to peer.
+	SendFailure(peer uint64)
+	// Reconnect counts an attempt to re-establish the stream to peer.
+	Reconnect(peer uint64)
+	// Dropped counts a message discarded because of a full queue, the
+	// in-flight cap, or a dead link.
+	Dropped(peer uint64)
+}
+
+type nopObserver struct{}
+
+func (nopObserver) MessageSent(uint64, raft.MessageType) {}
+func (nopObserver) SendFailure(uint64)                   {}
+func (nopObserver) Reconnect(uint64)                     {}
+func (nopObserver) Dropped(uint64)                       {}
+
+// Config configures a [Transport]. ID, Peers and Handler are required.
+type Config struct {
+	// ID is this node's ID; ClusterID is stamped on every request and, when
+	// non-zero, checked on every inbound one.
+	ID, ClusterID uint64
+	// Peers is the static address book (WBS 2.2.6). It must contain ID.
+	Peers   *AddressBook
+	Handler Handler
+	Logger  *slog.Logger
+	// Observer receives metrics events; nil means none.
+	Observer Observer
+	// OnUnreachable is called (from a transport goroutine, never blocking
+	// long) when the link to a peer fails, so the driver can report it to the
+	// core. nil means ignore.
+	OnUnreachable func(peer uint64)
+
+	MaxMsgBytes int // 0: DefaultMaxMsgBytes
+	QueueSize   int // 0: DefaultQueueSize
+	MaxInflight int // 0: DefaultMaxInflight
+	VoteTimeout time.Duration
+	BackoffMin  time.Duration
+	BackoffMax  time.Duration
+	// DialOptions are extra grpc dial options (credentials, for example).
+	// Without any, the transport uses insecure credentials: mTLS is out of
+	// scope for this learning project (removed D-15).
+	DialOptions []grpc.DialOption
+}
+
+func (c *Config) fill() error {
+	switch {
+	case c.ID == 0:
+		return errors.New("transport: config: ID must be non-zero")
+	case c.Peers == nil || !c.Peers.Has(c.ID):
+		return errors.New("transport: config: Peers must be set and contain ID")
+	case c.Handler == nil:
+		return errors.New("transport: config: Handler is required")
+	}
+	if c.Logger == nil {
+		c.Logger = slog.New(slog.DiscardHandler)
+	}
+	if c.Observer == nil {
+		c.Observer = nopObserver{}
+	}
+	if c.OnUnreachable == nil {
+		c.OnUnreachable = func(uint64) {}
+	}
+	if c.MaxMsgBytes <= 0 {
+		c.MaxMsgBytes = DefaultMaxMsgBytes
+	}
+	if c.QueueSize <= 0 {
+		c.QueueSize = DefaultQueueSize
+	}
+	if c.MaxInflight <= 0 {
+		c.MaxInflight = DefaultMaxInflight
+	}
+	if c.VoteTimeout <= 0 {
+		c.VoteTimeout = DefaultVoteTimeout
+	}
+	if c.BackoffMin <= 0 {
+		c.BackoffMin = DefaultBackoffMin
+	}
+	if c.BackoffMax < c.BackoffMin {
+		c.BackoffMax = max(DefaultBackoffMax, c.BackoffMin)
+	}
+	return nil
+}
+
+// Transport owns the outbound peers and the inbound Raft gRPC service of one
+// node.
+type Transport struct {
+	cfg   Config
+	peers map[uint64]*peer
+
+	mu       sync.Mutex
+	inbound  map[uint64]*inboundStream
+	votes    map[voteKey]chan raft.Message
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	started  bool
+	closed   bool
+	baseCtx  context.Context
+	serverWG sync.WaitGroup
+}
+
+// New validates cfg and builds a Transport. Call [Transport.Start] to begin
+// dialing peers and register the service with a gRPC server.
+func New(cfg Config) (*Transport, error) {
+	if err := cfg.fill(); err != nil {
+		return nil, err
+	}
+	t := &Transport{
+		cfg:     cfg,
+		peers:   make(map[uint64]*peer),
+		inbound: make(map[uint64]*inboundStream),
+		votes:   make(map[voteKey]chan raft.Message),
+	}
+	for _, id := range cfg.Peers.IDs() {
+		if id != cfg.ID {
+			t.peers[id] = newPeer(t, id)
+		}
+	}
+	return t, nil
+}
+
+// NewGRPCServer returns a gRPC server with the transport's message-size limits
+// and the Raft service registered (WBS 2.2.1). Extra options are appended.
+func (t *Transport) NewGRPCServer(extra ...grpc.ServerOption) *grpc.Server {
+	opts := []grpc.ServerOption{
+		grpc.MaxRecvMsgSize(t.cfg.MaxMsgBytes),
+		grpc.MaxSendMsgSize(t.cfg.MaxMsgBytes),
+		grpc.KeepaliveParams(keepalive.ServerParameters{Time: 30 * time.Second, Timeout: 10 * time.Second}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}),
+	}
+	srv := grpc.NewServer(append(opts, extra...)...)
+	raftkvv1.RegisterRaftServer(srv, &raftServer{t: t})
+	return srv
+}
+
+// Start launches one sender goroutine per peer. ctx bounds their lifetime;
+// [Transport.Close] also stops them.
+func (t *Transport) Start(ctx context.Context) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.started || t.closed {
+		return
+	}
+	t.started = true
+	ctx, t.cancel = context.WithCancel(ctx)
+	t.baseCtx = ctx
+	for _, p := range t.peers {
+		t.wg.Add(1)
+		go func() {
+			defer t.wg.Done()
+			p.run(ctx)
+		}()
+	}
+}
+
+// Close stops all peers, closes their connections and waits for the sender
+// goroutines. Inbound handlers end when the gRPC server stops.
+func (t *Transport) Close() {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return
+	}
+	t.closed = true
+	cancel := t.cancel
+	for _, in := range t.inbound {
+		in.cancel()
+	}
+	t.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	t.wg.Wait()
+	for _, p := range t.peers {
+		p.closeConn()
+	}
+}
+
+// Send routes messages produced by one Ready. The driver calls it only after
+// the Ready's entries and HardState are durable (D-35). It never blocks: a full
+// queue drops the message and Raft retries.
+func (t *Transport) Send(msgs []raft.Message) {
+	for _, m := range msgs {
+		if m.To == t.cfg.ID {
+			continue
+		}
+		switch {
+		case IsAppendRequest(m.Type):
+			if p := t.peers[m.To]; p != nil {
+				p.enqueue(m)
+			}
+		case IsVoteRequest(m.Type):
+			if p := t.peers[m.To]; p != nil {
+				p.sendVote(m)
+			}
+		case IsAppendResponse(m.Type):
+			t.sendOnInbound(m)
+		case IsVoteResponse(m.Type):
+			t.completeVote(m)
+		}
+	}
+}
+
+// sendOnInbound queues a response on the inbound Replicate stream opened by
+// the leader m.To. No stream means the leader is gone; drop (Raft retries).
+func (t *Transport) sendOnInbound(m raft.Message) {
+	t.mu.Lock()
+	in := t.inbound[m.To]
+	t.mu.Unlock()
+	if in == nil {
+		t.cfg.Observer.Dropped(m.To)
+		return
+	}
+	select {
+	case in.out <- m:
+	default:
+		t.cfg.Observer.Dropped(m.To)
+	}
+}
+
+type voteKey struct {
+	candidate uint64
+	pre       bool
+}
+
+func (t *Transport) completeVote(m raft.Message) {
+	k := voteKey{candidate: m.To, pre: m.Type == raft.MsgPreVoteResp}
+	t.mu.Lock()
+	ch := t.votes[k]
+	t.mu.Unlock()
+	if ch == nil {
+		t.cfg.Observer.Dropped(m.To)
+		return
+	}
+	select {
+	case ch <- m:
+	default:
+	}
+}
+
+// registerVote makes a waiter for the response to a vote request from
+// candidate. A newer request from the same candidate replaces the older waiter.
+func (t *Transport) registerVote(k voteKey) (<-chan raft.Message, func()) {
+	ch := make(chan raft.Message, 1)
+	t.mu.Lock()
+	t.votes[k] = ch
+	t.mu.Unlock()
+	return ch, func() {
+		t.mu.Lock()
+		if t.votes[k] == ch {
+			delete(t.votes, k)
+		}
+		t.mu.Unlock()
+	}
+}
+
+func (t *Transport) checkSender(cluster, from uint64) error {
+	if t.cfg.ClusterID != 0 && cluster != t.cfg.ClusterID {
+		return fmt.Errorf("cluster id mismatch: got %d, want %d", cluster, t.cfg.ClusterID)
+	}
+	if from == t.cfg.ID || !t.cfg.Peers.Has(from) {
+		return fmt.Errorf("unknown sender %d", from)
+	}
+	return nil
+}
