@@ -263,7 +263,7 @@ func (s *KV) Get(ctx context.Context, req *raftkvv1.GetRequest) (*raftkvv1.GetRe
 		if err := read(); err != nil {
 			return nil, mapReadError(err)
 		}
-	} else if err := s.member.LinearizableRead(ctx, read); err != nil {
+	} else if err := s.linearizableRead(ctx, read); err != nil {
 		return nil, mapReadError(err)
 	}
 	resp := &raftkvv1.GetResponse{Header: s.header(), Found: found}
