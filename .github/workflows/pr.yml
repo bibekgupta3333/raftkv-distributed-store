@@ -25,6 +25,7 @@ jobs:
           cache: true
       # D-18, WBS 1.7.4: 500 seeds with the full fault profile plus the regression seeds.
       - run: make sim SEEDS=500 FAULTS=full
+      - run: make sim SEEDS=500 FAULTS=snapshot
       - name: upload failing-seed traces
         if: failure()
         uses: actions/upload-artifact@v4
