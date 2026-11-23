@@ -554,21 +554,23 @@ message AppendEntriesRequest {
   uint64 leader_id = 3;
   uint64 prev_log_index = 4;
   uint64 prev_log_term = 5;
-  repeated Entry entries = 6;       // empty = heartbeat
+  repeated Entry entries = 6;       // may be empty (a probe append)
   uint64 leader_commit = 7;
   bytes read_context = 8;           // ReadIndex context (D-05), echoed back
+  bool heartbeat = 9;               // the per-tick heartbeat; empty entries alone cannot tell it from a probe
 }
 
 message AppendEntriesResponse {
   uint64 term = 1;
   uint64 from = 2;
   bool success = 3;
-  uint64 match_index = 4;           // on success
+  uint64 match_index = 4;           // on success: follower's match index; on reject: the rejected prev_log_index
   // On reject: conflict_term = follower's term at prev_log_index (0 if log too short);
   // conflict_index = first index of that term, or last_index+1 if too short.
   uint64 conflict_index = 5;
   uint64 conflict_term = 6;
   bytes read_context = 7;
+  bool heartbeat = 8;               // answers a heartbeat request
 }
 
 // ---------- RequestVote (incl. PreVote, D-08) ----------

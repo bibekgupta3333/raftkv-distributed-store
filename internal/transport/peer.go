@@ -161,7 +161,8 @@ func (p *peer) session(ctx context.Context) (established bool, err error) {
 		case m := <-p.queue:
 			if err := p.write(stream, m); err != nil {
 				cancel()
-				<-recvErr
+				rerr := <-recvErr // wait for the receiver before returning
+				_ = rerr
 				return true, err
 			}
 		}

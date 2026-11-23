@@ -46,6 +46,7 @@ func (s *syncBuffer) String() string {
 
 type clusterOptions struct {
 	tracerProvider trace.TracerProvider
+	tick           time.Duration // 0: 10ms
 }
 
 func newTestCluster(t *testing.T, n int, co ...func(*clusterOptions)) *testCluster {
@@ -74,6 +75,9 @@ func newTestCluster(t *testing.T, n int, co ...func(*clusterOptions)) *testClust
 		cfg.DataDir = filepath.Join(dir, fmt.Sprint("n", p.ID))
 		cfg.Peers = peers
 		cfg.TickInterval = 10 * time.Millisecond
+		if opts.tick > 0 {
+			cfg.TickInterval = opts.tick
+		}
 		c.cfgs[p.ID] = cfg
 		c.start(p.ID, opts)
 	}

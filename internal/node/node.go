@@ -328,6 +328,16 @@ func (n *Node) dropWaiter(index uint64, w *waiter) {
 // Started is closed once [Node.Run] is serving peers and driving the core.
 func (n *Node) Started() <-chan struct{} { return n.started }
 
+// Close releases the listeners and the WAL of a node that was built but never
+// run. It is not needed after [Node.Run], which cleans up itself.
+func (n *Node) Close() error {
+	_ = n.lis.Close()
+	if n.metricsLis != nil {
+		_ = n.metricsLis.Close()
+	}
+	return n.store.Close()
+}
+
 // Run serves peers and drives the core until ctx is cancelled (graceful
 // shutdown, WBS 2.3.5) or a fatal error occurs. On cancellation it returns nil
 // after stopping the transport and syncing and closing the WAL.

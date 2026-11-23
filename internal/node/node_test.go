@@ -214,7 +214,12 @@ func TestMetricsListener(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- n.Run(ctx) }()
-	defer func() { cancel(); <-done }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Run: %v", err)
+		}
+	}()
 	waitUntil(t, 10*time.Second, "single node to lead", func() bool { return n.Status().State == raft.StateLeader })
 
 	resp, err := http.Get("http://" + n.MetricsAddr() + "/metrics")
@@ -262,7 +267,12 @@ func TestSingleNodeCluster(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- n.Run(ctx) }()
-	defer func() { cancel(); <-done }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Run: %v", err)
+		}
+	}()
 	waitUntil(t, 10*time.Second, "leadership", func() bool { return n.Status().State == raft.StateLeader })
 	if _, err := n.ProposeAndWait(context.Background(), []byte("solo")); err != nil {
 		t.Fatal(err)
