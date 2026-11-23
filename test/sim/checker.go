@@ -99,9 +99,14 @@ func ChainHashes(log []raft.Entry) []uint64 {
 }
 
 type canonEntry struct {
-	term   uint64
-	entry  uint64 // HashEntry
-	prefix uint64 // chained hash up to and including this entry
+	term uint64
+	// commitTerm bounds from above the term of the leader that committed the
+	// entry: the observer's term when the commit was first seen, made
+	// monotone. Leader Completeness is about the commit term, not the
+	// entry's own term.
+	commitTerm uint64
+	entry      uint64 // HashEntry
+	prefix     uint64 // chained hash up to and including this entry
 }
 
 type leaderMark struct {
@@ -286,20 +291,25 @@ func (c *Checker) checkCommitted(at int64, v NodeView) *Violation {
 			return viol(KindStateMachineSafety, at, v.ID,
 				"committed entry at index %d differs from the entry that was applied", i+1)
 		}
-		c.canon = append(c.canon, canonEntry{term: v.Log[i].Term, entry: eh, prefix: v.Hashes[i]})
+		ct := v.Term
+		if i > 0 {
+			ct = max(ct, c.canon[i-1].commitTerm)
+		}
+		c.canon = append(c.canon, canonEntry{term: v.Log[i].Term, commitTerm: ct, entry: eh, prefix: v.Hashes[i]})
 	}
 	return nil
 }
 
 // INV-4 Leader Completeness: a leader of term T holds every entry committed
-// in a term below T. Committed terms are non-decreasing, so those entries are
-// a prefix of the canonical sequence. The check waits until the leader has no
+// in a term below T (the commit term, not the entry term: an old-term entry
+// may be committed later by a newer leader). Commit terms are non-decreasing,
+// so those entries are a prefix of the canonical sequence. The check waits until the leader has no
 // unpersisted entries, because its log is only compared on stable storage.
 func (c *Checker) checkLeaderCompleteness(at int64, v NodeView) *Violation {
 	if !v.Synced || v.State != raft.StateLeader || uint64(len(v.Log)) != v.LastIndex {
 		return nil
 	}
-	k := sort.Search(len(c.canon), func(i int) bool { return c.canon[i].term >= v.Term })
+	k := sort.Search(len(c.canon), func(i int) bool { return c.canon[i].commitTerm >= v.Term })
 	if k == 0 {
 		return nil
 	}
