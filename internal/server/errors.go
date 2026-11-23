@@ -30,6 +30,12 @@ const (
 	ReasonKeyTooLarge     = "KEY_TOO_LARGE"
 	ReasonValueTooLarge   = "VALUE_TOO_LARGE"
 	ReasonMalformed       = "MALFORMED_REQUEST"
+	ReasonLimitTooLarge   = "LIMIT_TOO_LARGE"
+	ReasonBadPageToken    = "INVALID_PAGE_TOKEN"
+	ReasonSessionExpired  = "SESSION_EXPIRED"
+	ReasonSequenceStale   = "SEQUENCE_STALE"
+	ReasonSessionWindow   = "SESSION_WINDOW_EXCEEDED"
+	ReasonStorage         = "STORAGE_CORRUPTION"
 	ReasonInternal        = "INTERNAL"
 
 	// OutcomeKey is the ErrorInfo.metadata key for writes: DEFINITE means the
@@ -94,10 +100,18 @@ func mapWaitError(err error) error {
 	}
 }
 
-// mapValidation turns a command validation error into INVALID_ARGUMENT.
+// mapValidation turns a command validation error into INVALID_ARGUMENT, or a
+// session rule into FAILED_PRECONDITION. Both are checked before proposing (or
+// decided at apply time without side effects), so the outcome is DEFINITE.
 func mapValidation(err error) error {
 	reason := ReasonMalformed
 	switch {
+	case errors.Is(err, command.ErrSessionExpired):
+		return newError(codes.FailedPrecondition, ReasonSessionExpired, Definite, err.Error(), nil)
+	case errors.Is(err, command.ErrSequenceStale):
+		return newError(codes.FailedPrecondition, ReasonSequenceStale, Definite, err.Error(), nil)
+	case errors.Is(err, command.ErrSessionWindow):
+		return newError(codes.FailedPrecondition, ReasonSessionWindow, Definite, err.Error(), nil)
 	case errors.Is(err, command.ErrEmptyKey):
 		reason = ReasonEmptyKey
 	case errors.Is(err, command.ErrKeyTooLarge):
