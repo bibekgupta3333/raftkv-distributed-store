@@ -1,0 +1,28 @@
+# raftkv-peer: headless Service that gives every pod a stable DNS name
+# (raftkv-N.raftkv-peer) for peer traffic (D-16, WBS 7.1.2). It publishes
+# not-ready pods too: readiness needs a leader, and a leader needs peers to
+# find each other first.
+apiVersion: v1
+kind: Service
+metadata:
+  name: raftkv-peer
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - {name: grpc, port: 7000, targetPort: grpc}
+    - {name: metrics, port: 9100, targetPort: metrics}
+---
+# raftkv: client Service. Only ready pods (known leader, caught up; D-46)
+# receive client traffic. Until follower forwarding lands (D-28, M4) a
+# follower answers NOT_LEADER with a hint the client can only follow to an
+# endpoint it already knows, so clients should list the peer names
+# (raftkv-0.raftkv-peer:7000,...) rather than only this Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: raftkv
+spec:
+  type: ClusterIP
+  ports:
+    - {name: grpc, port: 7000, targetPort: grpc}
