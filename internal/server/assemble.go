@@ -12,6 +12,21 @@ type KVNode struct {
 	*node.Node
 	Store   *storage.Store
 	Tracker *Tracker
+	KV      *KV
+}
+
+// nodeObserver forwards driver-loop events to the tracker and, on shutdown,
+// closes the KV service's forwarding connections.
+type nodeObserver struct {
+	*Tracker
+	kv *KV
+}
+
+func (o *nodeObserver) OnStop() {
+	o.Tracker.OnStop()
+	if o.kv != nil {
+		o.kv.Close()
+	}
 }
 
 // OpenKVNode replaces the in-memory applier with the Pebble state machine
@@ -33,13 +48,16 @@ func OpenKVNode(cfg node.Config, opts node.Options) (*KVNode, error) {
 	}
 	tracker := NewTracker()
 	opts.Applier = storage.NewApplier(store, tracker)
-	opts.Observer = tracker
+	obs := &nodeObserver{Tracker: tracker}
+	opts.Observer = obs
 	n, err := node.New(cfg, opts)
 	if err != nil {
 		_ = store.Close()
 		return nil, err
 	}
-	n.RegisterService(New(n, store, tracker).Register)
+	kv := New(n, store, tracker)
+	obs.kv = kv
+	n.RegisterService(kv.Register)
 	n.RegisterService(NewCluster(n, store).Register) // Status only until M6 (D-48)
-	return &KVNode{Node: n, Store: store, Tracker: tracker}, nil
+	return &KVNode{Node: n, Store: store, Tracker: tracker, KV: kv}, nil
 }

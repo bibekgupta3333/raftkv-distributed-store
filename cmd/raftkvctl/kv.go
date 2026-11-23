@@ -23,6 +23,7 @@ const (
 	exitUnavailable  = 2 // unavailable or deadline (also bad flags: see run)
 	exitNotFound     = 3
 	exitPrecondition = 6
+	exitCASFailed    = 4 // compare failed (not an error)
 	exitUnknown      = 7 // the write may or may not have applied
 )
 

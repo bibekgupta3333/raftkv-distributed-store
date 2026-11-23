@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -38,7 +39,16 @@ const (
 	reasonNotProposed    = "NOT_PROPOSED"
 	reasonOverloaded     = "OVERLOADED"
 	reasonOutcomeUnknown = "OUTCOME_UNKNOWN"
+	reasonSessionExpired = "SESSION_EXPIRED"
 )
+
+// codeOf is the status code for a finished context.
+func codeOf(ctx context.Context) codes.Code {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return codes.Canceled
+	}
+	return codes.DeadlineExceeded
+}
 
 // Error is a failed request: the gRPC status, the server's reason, whether a
 // write may have applied, and any leader hint.
@@ -48,7 +58,8 @@ type Error struct {
 	Outcome Outcome
 	Hint    *raftkvv1.LeaderHint
 	Message string
-	// Attempts is how many calls were made before giving up.
+	// Attempts is how many RPCs were sent before giving up (0 if no member
+	// was reachable).
 	Attempts int
 }
 
