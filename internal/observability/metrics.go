@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"sync"
@@ -8,6 +9,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/status"
 
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
 )
@@ -28,6 +31,9 @@ type Metrics struct {
 	sendFailures *prometheus.CounterVec
 	reconnects   *prometheus.CounterVec
 	dropped      *prometheus.CounterVec
+
+	rpcRequests *prometheus.CounterVec
+	rpcDuration *prometheus.HistogramVec
 
 	mu       sync.Mutex
 	lastLead uint64
@@ -60,9 +66,16 @@ func NewMetrics() *Metrics {
 			Name: "raftkv_transport_reconnects_total", Help: "Peer stream reconnect attempts."}, []string{"peer"}),
 		dropped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "raftkv_transport_dropped_total", Help: "Messages dropped (queue full, in-flight cap, dead link)."}, []string{"peer"}),
+		rpcRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "raftkv_grpc_requests_total", Help: "Unary gRPC requests served, by full method and status code."},
+			[]string{"method", "code"}),
+		rpcDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "raftkv_grpc_request_duration_seconds", Help: "Unary gRPC request latency, by full method.",
+			Buckets: prometheus.ExponentialBuckets(0.0005, 2, 14)}, []string{"method"}),
 	}
 	m.reg.MustRegister(m.term, m.state, m.commit, m.applied, m.lastIndex, m.leaderChanges,
-		m.walFsync, m.walFsyncErrors, m.msgSent, m.sendFailures, m.reconnects, m.dropped)
+		m.walFsync, m.walFsyncErrors, m.msgSent, m.sendFailures, m.reconnects, m.dropped,
+		m.rpcRequests, m.rpcDuration)
 	return m
 }
 
@@ -115,3 +128,17 @@ func (m *Metrics) Reconnect(peer uint64) { m.reconnects.WithLabelValues(id(peer)
 func (m *Metrics) Dropped(peer uint64) { m.dropped.WithLabelValues(id(peer)).Inc() }
 
 func id(peer uint64) string { return strconv.FormatUint(peer, 10) }
+
+// UnaryServerInterceptor counts every unary RPC (KV, Cluster, debug) by method
+// and status code and times it; the Grafana dashboard's request-rate and error
+// panels read these (WBS 7.3.1). Raft peer traffic is a stream and is counted
+// by the transport metrics instead.
+func (m *Metrics) UnaryServerInterceptor() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
+		start := time.Now()
+		resp, err := h(ctx, req)
+		m.rpcDuration.WithLabelValues(info.FullMethod).Observe(time.Since(start).Seconds())
+		m.rpcRequests.WithLabelValues(info.FullMethod, status.Code(err).String()).Inc()
+		return resp, err
+	}
+}
