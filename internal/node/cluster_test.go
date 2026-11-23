@@ -47,6 +47,7 @@ func (s *syncBuffer) String() string {
 type clusterOptions struct {
 	tracerProvider trace.TracerProvider
 	tick           time.Duration // 0: 10ms
+	config         func(*node.Config)
 }
 
 func newTestCluster(t *testing.T, n int, co ...func(*clusterOptions)) *testCluster {
@@ -77,6 +78,9 @@ func newTestCluster(t *testing.T, n int, co ...func(*clusterOptions)) *testClust
 		cfg.TickInterval = 10 * time.Millisecond
 		if opts.tick > 0 {
 			cfg.TickInterval = opts.tick
+		}
+		if opts.config != nil {
+			opts.config(&cfg)
 		}
 		c.cfgs[p.ID] = cfg
 		c.start(p.ID, opts)
