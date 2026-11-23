@@ -560,6 +560,19 @@ func (r *raft) handleAppendReject(pr *Progress, m Message) {
 	if m.LogTerm > 0 {
 		next, _ = r.log.findConflictByTerm(m.RejectHint, m.LogTerm)
 	}
+	if pr.State != ProgressSnapshot && pr.Match > 0 && m.Index == pr.Match && m.RejectHint < pr.Match {
+		// The follower rejects an append right at the index it already
+		// acknowledged (responses arrive in order, so this is not an old
+		// rejection): it lost entries it had made durable, i.e. its disk
+		// was wiped. Forget its match so it is probed (and sent a
+		// snapshot) from scratch. Lowering Match never uncommits anything;
+		// it only stops counting this follower until it catches up again.
+		pr.Match = 0
+		pr.becomeProbe()
+		pr.Next = max(next+1, 1)
+		r.sendAppend(m.From, true)
+		return
+	}
 	if !pr.maybeDecrTo(m.Index, next) {
 		return // stale rejection
 	}
@@ -604,7 +617,11 @@ func (r *raft) stepFollower(m Message) {
 	case MsgHeartbeat:
 		r.electionElapsed = 0
 		r.lead = m.From
-		r.log.commitTo(m.Commit)
+		if m.Commit <= r.log.lastIndex() {
+			r.log.commitTo(m.Commit)
+		}
+		// Otherwise the leader believes we hold entries we do not (our disk
+		// was wiped); keep our commit until appends repair the log.
 		resp := r.newMsg(MsgHeartbeatResp, m.From)
 		resp.Context = m.Context
 		r.send(resp)

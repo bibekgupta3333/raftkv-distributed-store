@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -42,6 +43,7 @@ type Metrics struct {
 	snapInstalls  prometheus.Counter
 	snapTransfers *prometheus.CounterVec // result: ok, failed
 	walTrimmed    prometheus.Gauge
+	installCount  atomic.Uint64
 
 	mu       sync.Mutex
 	lastLead uint64
@@ -143,8 +145,12 @@ func (m *Metrics) SnapshotCreated(index, bytes uint64, d time.Duration) {
 // SnapshotInstalled records a snapshot installed from the leader in d.
 func (m *Metrics) SnapshotInstalled(d time.Duration) {
 	m.snapInstalls.Inc()
+	m.installCount.Add(1)
 	m.snapDuration.WithLabelValues("install").Observe(d.Seconds())
 }
+
+// SnapshotInstalls is how many snapshots this node installed.
+func (m *Metrics) SnapshotInstalls() uint64 { return m.installCount.Load() }
 
 // SnapshotSent records the outcome of a snapshot transfer to a follower.
 func (m *Metrics) SnapshotSent(failed bool) {
