@@ -98,8 +98,8 @@ type Config struct {
 	Snapshots SnapshotHandler
 	// SnapshotTimeout bounds one outgoing snapshot transfer.
 	SnapshotTimeout time.Duration
-	BackoffMin       time.Duration
-	BackoffMax       time.Duration
+	BackoffMin      time.Duration
+	BackoffMax      time.Duration
 	// DialOptions are extra grpc dial options (credentials, for example).
 	// Without any, the transport uses insecure credentials: mTLS is out of
 	// scope for this learning project (removed D-15).
