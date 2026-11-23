@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -24,8 +23,8 @@ func TestLimitBoundaries(t *testing.T) {
 	c := kvtest.New(t, 3, kvtest.Options{Tick: 50 * time.Millisecond})
 	lead := c.Leader(30 * time.Second)
 	kv := rawClient(t, c.Addr(lead))
-	cl := newClient(t, c)                                                    // retries (with a session) for bulk setup writes
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second) // ~1,000 writes under -race
+	cl := newClient(t, c) // retries (with a session) for bulk setup writes
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	keyAt, keyOver := bytes.Repeat([]byte("k"), 4096), bytes.Repeat([]byte("k"), 4097)
 	valAt, valOver := make([]byte, 1<<20), make([]byte, 1<<20+1)
@@ -86,34 +85,9 @@ func TestLimitBoundaries(t *testing.T) {
 		t.Fatalf("rejected requests moved the applied index %d -> %d", before, after)
 	}
 
-	// Range page: 1000 keys pass in one page; 1001 keys need two pages.
-	var wg sync.WaitGroup
-	errs := make(chan error, 1001)
-	for w := range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := w; i < 1001; i += 16 {
-				_, err := cl.Put(ctx, []byte(fmt.Sprintf("r/%04d", i)), nil)
-				errs <- err
-			}
-		}()
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	p, err := kv.Range(ctx, &raftkvv1.RangeRequest{Prefix: []byte("r/"), Limit: 1000})
-	if err != nil || len(p.GetKvs()) != 1000 || !p.GetMore() {
-		t.Fatalf("limit 1000: %d keys more=%v err=%v", len(p.GetKvs()), p.GetMore(), err)
-	}
-	p, err = kv.Range(ctx, &raftkvv1.RangeRequest{Prefix: []byte("r/")}) // 0 = 1000
-	if err != nil || len(p.GetKvs()) != 1000 {
-		t.Fatalf("default limit: %d keys err=%v", len(p.GetKvs()), err)
-	}
+	// The 1,000-key page boundary (1,000 keys in one page, the 1,001st on the
+	// next) is tested at the store, TestRangePageKeyLimit: loading 1,001 keys
+	// through Raft here took over 90 s under -race on CI runners.
 
 	// Range bytes: four 1 MiB values reach 4 MiB with their keys, so the page
 	// is cut after three (at most 4 MiB, at least one pair).
@@ -122,7 +96,7 @@ func TestLimitBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	p, err = kv.Range(ctx, &raftkvv1.RangeRequest{Prefix: []byte("big/")})
+	p, err := kv.Range(ctx, &raftkvv1.RangeRequest{Prefix: []byte("big/")})
 	if err != nil || len(p.GetKvs()) != 3 || !p.GetMore() {
 		t.Fatalf("4 MiB page: %d keys more=%v err=%v, want 3 and more", len(p.GetKvs()), p.GetMore(), err)
 	}

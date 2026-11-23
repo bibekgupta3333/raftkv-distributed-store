@@ -123,3 +123,31 @@ func TestCompareAndSwapApply(t *testing.T) {
 		t.Fatal("key exists after delete and a failed compare")
 	}
 }
+
+// WBS 4.5.1 (D-11) at the store: a page holds at most MaxRangeLimit keys, an
+// unset or oversized limit means MaxRangeLimit, and the next key starts the
+// next page.
+func TestRangePageKeyLimit(t *testing.T) {
+	s := openMem(t, vfs.NewMem())
+	defer func() { _ = s.Close() }()
+	a := NewApplier(s, nil)
+	ents := make([]raft.Entry, 0, MaxRangeLimit+1)
+	for i := range MaxRangeLimit + 1 {
+		ents = append(ents, entryOf(uint64(i+1), put(0, fmt.Sprintf("r/%04d", i), "")))
+	}
+	applyAll(t, a, ents, 100)
+
+	for _, limit := range []int{0, MaxRangeLimit, MaxRangeLimit + 1} {
+		kvs, more, err := s.Range(RangeOptions{Start: []byte("r/"), End: []byte("r0"), Limit: limit})
+		if err != nil || len(kvs) != MaxRangeLimit || !more {
+			t.Fatalf("Limit %d: %d keys more=%v err=%v, want %d and more", limit, len(kvs), more, err, MaxRangeLimit)
+		}
+		if last := string(kvs[len(kvs)-1].Key); last != "r/0999" {
+			t.Fatalf("Limit %d: last key %q, want r/0999", limit, last)
+		}
+	}
+	kvs, more, err := s.Range(RangeOptions{Start: []byte("r/1000"), End: []byte("r0")})
+	if err != nil || len(kvs) != 1 || more {
+		t.Fatalf("second page: %d keys more=%v err=%v, want 1 and no more", len(kvs), more, err)
+	}
+}
