@@ -28,6 +28,8 @@ type Hooks struct {
 	Filter func(now int64, m raft.Message) bool
 	// View may rewrite what the checker sees of a node.
 	View func(v *NodeView)
+	// Install may rewrite the snapshot content a node installs (D-14).
+	Install func(id uint64, ents []raft.Entry) []raft.Entry
 }
 
 // Stats summarises one run.
@@ -45,6 +47,9 @@ type Stats struct {
 	ReadsServed    int
 	ReadsRejected  int
 	LeaseReads     int   // served from a lease
+	Snapshots      int   // snapshots taken (D-14)
+	SnapsSent      int   // InstallSnapshot transfers started
+	SnapsInstalled int   // snapshots installed from a leader
 	LeaderAfterMs  int64 // heal to stable leader, -1 if never
 	CommitAfterMs  int64 // heal to marker applied on all nodes, -1 if never
 	Net            NetStats
@@ -83,6 +88,10 @@ type Cluster struct {
 	readChecked map[uint64]bool
 	readSent    int64
 
+	// snapshots (D-14): payloads by (index, term), and transfers in flight
+	snapPayloads map[snapKey][]raft.Entry
+	snapXfers    map[snapXfer]bool // value: delivered
+
 	// liveness
 	faultEnd      int64
 	leaderAt      int64
@@ -103,6 +112,7 @@ func NewCluster(seed uint64, p Profile, h Hooks, record bool) *Cluster {
 		seed: seed, rng: rng, sched: &Scheduler{}, trace: NewTrace(record), hooks: h, profile: p,
 		pending: map[uint64]pendingCmd{}, markerApplied: map[uint64]bool{}, leaderAt: -1,
 		reads: map[uint64]*simRead{}, outcomes: map[uint64]ReadOutcome{}, readChecked: map[uint64]bool{},
+		snapPayloads: map[snapKey][]raft.Entry{}, snapXfers: map[snapXfer]bool{},
 	}
 	size := p.Sizes[rng.IntN(len(p.Sizes))]
 	for i := 1; i <= size; i++ {
@@ -150,12 +160,73 @@ func (c *Cluster) fail(v *Violation) {
 	}
 }
 
+// snapKey names a snapshot. Its content is the same on every node that has
+// it (State Machine Safety), which the checker verifies on every install.
+type snapKey struct{ index, term uint64 }
+
+// snapXfer is one InstallSnapshot transfer from a leader incarnation.
+type snapXfer struct {
+	from, inc, to uint64
+	snap          snapKey
+}
+
+// sendSnapshot models the InstallSnapshot stream (D-14): the snapshot's content
+// is captured from the sender's disk, the transfer takes a while (during which
+// either side may crash), travels the network like any message (it can be
+// lost, delayed or duplicated), and the leader's driver reports the outcome
+// with ReportSnapshot: success if it arrived, failure otherwise (an
+// interrupted transfer starts over).
+func (c *Cluster) sendSnapshot(n *node, m raft.Message) {
+	s := *m.Snapshot
+	if uint64(len(n.prefix)) != s.Index {
+		panic("sim: leader sends a snapshot it does not hold")
+	}
+	k := snapKey{s.Index, s.Term}
+	if _, ok := c.snapPayloads[k]; !ok {
+		c.snapPayloads[k] = n.prefix
+	}
+	c.stats.SnapsSent++
+	x := snapXfer{from: n.id, inc: n.inc, to: m.To, snap: k}
+	c.snapXfers[x] = false
+	inc := n.inc
+	c.sched.After(5+c.rng.Int64N(100), func() { // streaming the chunks
+		if n.up && n.inc == inc {
+			c.net.Send(m)
+		}
+	})
+	c.sched.After(200+c.rng.Int64N(400), func() { // the RPC returns or times out
+		delivered := c.snapXfers[x]
+		delete(c.snapXfers, x)
+		if !n.up || n.inc != inc {
+			return
+		}
+		c.touch(n)
+		c.addTrace(Event{Kind: "snap-report", Node: n.id, Peer: m.To, Index: s.Index, Note: map[bool]string{true: "ok", false: "failed"}[delivered]})
+		n.do(func() { n.rn.ReportSnapshot(m.To, !delivered) })
+	})
+}
+
+// onRestore feeds a snapshot install (or a restart from a snapshot) to the
+// checker.
+func (c *Cluster) onRestore(n *node, ents []raft.Entry) {
+	if v := c.checker.OnRestore(c.sched.Now(), n.id, n.inc, ents); v != nil {
+		c.fail(v)
+	}
+}
+
 // deliver hands an arrived message to its destination node (if it is up).
 func (c *Cluster) deliver(m raft.Message) {
 	n := c.nodes[m.To-1]
 	if !n.up {
 		c.addTrace(Event{Kind: "lost", Node: m.From, Peer: m.To, Msg: m.Type.String(), Note: "node down"})
 		return
+	}
+	if m.Type == raft.MsgSnap {
+		for x := range c.snapXfers {
+			if x.from == m.From && x.to == m.To && x.snap == (snapKey{m.Snapshot.Index, m.Snapshot.Term}) {
+				c.snapXfers[x] = true
+			}
+		}
 	}
 	c.touch(n)
 	c.addTrace(Event{

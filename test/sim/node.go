@@ -37,10 +37,18 @@ type node struct {
 	renewTerm uint64
 
 	// log mirrors the persisted entries 1..len(log), with chained hashes, for
-	// the checker. It always equals what store holds.
+	// the checker. It equals what store holds, with the compacted prefix
+	// taken from the snapshot (prefix).
 	log     []raft.Entry
 	hashes  []uint64
 	touched bool
+
+	// prefix is the on-disk snapshot's content: the state machine as of
+	// store's snapshot index, modelled as the applied entries 1..index
+	// (D-14). It survives crashes, like store.
+	prefix []raft.Entry
+	// snapEvery and snapRetain are this node's snapshot policy (0: none).
+	snapEvery, snapRetain uint64
 }
 
 func newNode(c *Cluster, id uint64) *node {
@@ -50,6 +58,10 @@ func newNode(c *Cluster, id uint64) *node {
 	}
 	n := &node{id: id, c: c, store: raft.NewMemoryStorage(), period: lo + c.rng.Int64N(hi-lo+1)}
 	n.lease = n.newLease()
+	if sp := c.profile.Snapshots; sp.enabled() {
+		n.snapEvery = sp.Every[0] + c.rng.Uint64N(sp.Every[1]-sp.Every[0]+1)
+		n.snapRetain = sp.Retain[0] + c.rng.Uint64N(sp.Retain[1]-sp.Retain[0]+1)
+	}
 	return n
 }
 
@@ -58,6 +70,10 @@ func newNode(c *Cluster, id uint64) *node {
 func (n *node) start() {
 	c := n.c
 	cfg := raft.DefaultConfig(n.id, c.ids, n.store, rand.New(rand.NewPCG(c.rng.Uint64(), n.id)))
+	snap, _ := n.store.Snapshot()
+	// The state machine restarts from the snapshot and replays the log
+	// after it (storage-design 5).
+	cfg.Applied = snap.Index
 	rn, err := raft.NewRawNode(cfg)
 	if err != nil {
 		panic("sim: NewRawNode: " + err.Error())
@@ -68,20 +84,57 @@ func (n *node) start() {
 	n.inc++
 	n.reloadMirror()
 	c.addTrace(Event{Kind: "start", Node: n.id, Note: "inc=" + itoa(n.inc)})
+	if snap.Index > 0 {
+		c.onRestore(n, n.prefix[:snap.Index])
+	}
 	n.scheduleTick()
 }
 
-// reloadMirror rebuilds the log mirror from storage.
+// reloadMirror rebuilds the log mirror from storage: the compacted prefix from
+// the snapshot, the rest from the log.
 func (n *node) reloadMirror() {
+	first, _ := n.store.FirstIndex()
 	last, _ := n.store.LastIndex()
-	n.log, n.hashes = nil, nil
-	if last >= 1 {
-		ents, err := n.store.Entries(1, last+1, ^uint64(0))
+	if uint64(len(n.prefix)) < first-1 {
+		panic("sim: log compacted past the snapshot (D-30 broken)")
+	}
+	n.log = append([]raft.Entry(nil), n.prefix[:first-1]...)
+	if last >= first {
+		ents, err := n.store.Entries(first, last+1, ^uint64(0))
 		if err != nil {
 			panic("sim: reading own storage: " + err.Error())
 		}
-		n.log = ents
-		n.hashes = ChainHashes(ents)
+		n.log = append(n.log, ents...)
+	}
+	n.hashes = ChainHashes(n.log)
+}
+
+// maybeSnapshot takes a snapshot once snapEvery entries were applied since the
+// last one, then compacts the log, keeping snapRetain entries below it (D-30:
+// never past the snapshot; the sim's applies are durable with the snapshot).
+func (n *node) maybeSnapshot() {
+	if n.snapEvery == 0 {
+		return
+	}
+	applied := n.rn.Status().Applied
+	snap, _ := n.store.Snapshot()
+	if applied < snap.Index+n.snapEvery {
+		return
+	}
+	s, err := n.store.CreateSnapshot(applied)
+	if err != nil {
+		panic("sim: CreateSnapshot: " + err.Error())
+	}
+	n.prefix = append([]raft.Entry(nil), n.log[:applied]...)
+	n.c.addTrace(Event{Kind: "snapshot", Node: n.id, Index: s.Index, Term: s.Term})
+	n.c.stats.Snapshots++
+	if applied > n.snapRetain {
+		first, _ := n.store.FirstIndex()
+		if upTo := applied - n.snapRetain; upTo >= first {
+			if err := n.store.Compact(upTo); err != nil {
+				panic("sim: Compact: " + err.Error())
+			}
+		}
 	}
 }
 
@@ -141,6 +194,10 @@ func (n *node) process() {
 			c.touch(n)
 			n.persist(rd)
 			for _, m := range rd.Messages {
+				if m.Type == raft.MsgSnap {
+					c.sendSnapshot(n, m)
+					continue
+				}
 				c.net.Send(m)
 			}
 			for _, e := range rd.CommittedEntries {
@@ -148,6 +205,7 @@ func (n *node) process() {
 			}
 			c.onReadStates(n, rd)
 			n.rn.Advance(rd)
+			n.maybeSnapshot()
 			n.busy = false
 			for len(n.inbox) > 0 && n.up {
 				f := n.inbox[0]
@@ -155,7 +213,7 @@ func (n *node) process() {
 				f()
 			}
 		}
-		if len(rd.Entries) > 0 || !rd.HardState.IsEmpty() {
+		if len(rd.Entries) > 0 || !rd.HardState.IsEmpty() || rd.Snapshot != nil {
 			c.sched.After(1+c.rng.Int64N(5), func() {
 				finish()
 				n.process()
@@ -166,8 +224,29 @@ func (n *node) process() {
 	}
 }
 
-// persist applies rd.Entries and rd.HardState to the disk (D-01 step 1).
+// persist installs rd.Snapshot, then applies rd.Entries and rd.HardState to
+// the disk (D-01 step 1). The whole Ready becomes durable at once, after the
+// simulated fsync delay, so a crash before then keeps the old state and a crash
+// after it keeps the new one: never a mix (WBS 5.4.4).
 func (n *node) persist(rd raft.Ready) {
+	if s := rd.Snapshot; s != nil {
+		ents, ok := n.c.snapPayloads[snapKey{s.Index, s.Term}]
+		if !ok || uint64(len(ents)) != s.Index {
+			panic("sim: no payload for snapshot " + itoa(s.Index))
+		}
+		if h := n.c.hooks.Install; h != nil {
+			ents = h(n.id, ents)
+		}
+		if err := n.store.ApplySnapshot(*s); err != nil {
+			panic("sim: ApplySnapshot: " + err.Error())
+		}
+		n.prefix = ents
+		n.log = append([]raft.Entry(nil), ents...)
+		n.hashes = ChainHashes(n.log)
+		n.c.addTrace(Event{Kind: "install", Node: n.id, Index: s.Index, Term: s.Term})
+		n.c.stats.SnapsInstalled++
+		n.c.onRestore(n, ents)
+	}
 	if len(rd.Entries) > 0 {
 		n.store.Append(rd.Entries)
 		first := int(rd.Entries[0].Index)
