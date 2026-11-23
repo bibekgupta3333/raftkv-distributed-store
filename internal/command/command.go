@@ -26,6 +26,10 @@ var (
 	ErrKeyTooLarge   = errors.New("command: key is larger than 4096 bytes")
 	ErrValueTooLarge = errors.New("command: value is larger than 1 MiB")
 	ErrNoOp          = errors.New("command: no operation set")
+	// ErrMalformed covers a CompareAndSwap without a usable compare or action
+	// (api-design 3.1: expected_mod_revision 0 is invalid, use expect_absent)
+	// and a session with sequence 0.
+	ErrMalformed = errors.New("command: malformed request")
 )
 
 // Kind names the operation inside a Command.
@@ -37,6 +41,8 @@ const (
 	KindPut
 	KindDelete
 	KindGet
+	KindRegisterSession
+	KindCas
 )
 
 func (k Kind) String() string {
@@ -47,6 +53,10 @@ func (k Kind) String() string {
 		return "delete"
 	case KindGet:
 		return "get"
+	case KindRegisterSession:
+		return "register-session"
+	case KindCas:
+		return "cas"
 	default:
 		return "unknown"
 	}
@@ -96,6 +106,90 @@ func Get(id uint64, leaderTimeMs int64, key []byte) (*raftkvv1.Command, error) {
 		Op: &raftkvv1.Command_Get{Get: &raftkvv1.GetOp{Key: key}}}, nil
 }
 
+// Barrier builds a log read with no key: applying it reads nothing, and its
+// apply on the proposing node marks a linearizable read point for local reads
+// (Range in M4, until ReadIndex replaces log reads, D-05, D-34).
+func Barrier(id uint64, leaderTimeMs int64) *raftkvv1.Command {
+	return &raftkvv1.Command{RequestId: id, LeaderTimeUnixMs: leaderTimeMs,
+		Op: &raftkvv1.Command_Get{Get: &raftkvv1.GetOp{}}}
+}
+
+// RegisterSession builds a session registration (D-26). The applied entry's
+// log index becomes the client ID.
+func RegisterSession(id uint64, leaderTimeMs int64) *raftkvv1.Command {
+	return &raftkvv1.Command{RequestId: id, LeaderTimeUnixMs: leaderTimeMs,
+		Op: &raftkvv1.Command_RegisterSession{RegisterSession: &raftkvv1.RegisterSessionOp{}}}
+}
+
+// Cas builds a validated CompareAndSwap command from op (api-design 3.1).
+func Cas(id uint64, leaderTimeMs int64, op *raftkvv1.CasOp) (*raftkvv1.Command, error) {
+	if err := ValidateCas(op); err != nil {
+		return nil, err
+	}
+	return &raftkvv1.Command{RequestId: id, LeaderTimeUnixMs: leaderTimeMs,
+		Op: &raftkvv1.Command_Cas{Cas: op}}, nil
+}
+
+// ValidateCas checks a CasOp: key and value limits (D-11), exactly one
+// compare and one action, no expected_mod_revision of 0, and no false
+// expect_absent or delete flag.
+func ValidateCas(op *raftkvv1.CasOp) error {
+	if err := validateKey(op.GetKey()); err != nil {
+		return err
+	}
+	switch e := op.GetExpected().(type) {
+	case *raftkvv1.CasOp_ExpectedValue:
+		if len(e.ExpectedValue) > MaxValueSize {
+			return ErrValueTooLarge
+		}
+	case *raftkvv1.CasOp_ExpectedModRevision:
+		if e.ExpectedModRevision == 0 {
+			return fmt.Errorf("%w: expected_mod_revision 0 (use expect_absent)", ErrMalformed)
+		}
+	case *raftkvv1.CasOp_ExpectAbsent:
+		if !e.ExpectAbsent {
+			return fmt.Errorf("%w: expect_absent must be true when set", ErrMalformed)
+		}
+	default:
+		return fmt.Errorf("%w: no compare set", ErrMalformed)
+	}
+	switch a := op.GetAction().(type) {
+	case *raftkvv1.CasOp_NewValue:
+		if len(a.NewValue) > MaxValueSize {
+			return ErrValueTooLarge
+		}
+	case *raftkvv1.CasOp_Delete:
+		if !a.Delete {
+			return fmt.Errorf("%w: delete must be true when set", ErrMalformed)
+		}
+	default:
+		return fmt.Errorf("%w: no action set", ErrMalformed)
+	}
+	return nil
+}
+
+// ValidateSession checks a write session before it is proposed (api-design
+// 5): a nil session or client ID 0 means "no session"; otherwise the sequence
+// starts at 1, the acked sequence is below it, and at most [SessionWindow]
+// sequences are outstanding. The applier enforces the same rules.
+func ValidateSession(s *raftkvv1.WriteSession) error {
+	if s.GetClientId() == 0 {
+		return nil
+	}
+	switch {
+	case s.GetSequence() == 0:
+		return fmt.Errorf("%w: session sequence starts at 1", ErrMalformed)
+	case s.GetAckedSequence() >= s.GetSequence():
+		return ErrSequenceStale
+	case s.GetSequence()-s.GetAckedSequence() > SessionWindow:
+		return ErrSessionWindow
+	}
+	return nil
+}
+
+// ValidateKey checks a key against D-11 (non-empty, at most 4 KiB).
+func ValidateKey(key []byte) error { return validateKey(key) }
+
 func validateKey(key []byte) error {
 	switch {
 	case len(key) == 0:
@@ -132,6 +226,10 @@ func KindOf(c *raftkvv1.Command) Kind {
 		return KindDelete
 	case *raftkvv1.Command_Get:
 		return KindGet
+	case *raftkvv1.Command_RegisterSession:
+		return KindRegisterSession
+	case *raftkvv1.Command_Cas:
+		return KindCas
 	default:
 		return KindUnknown
 	}
