@@ -23,8 +23,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: |
-          if ls test/sim/*_test.go >/dev/null 2>&1; then make sim; else echo "no sim yet"; fi
+      # D-18, WBS 1.7.4: 500 seeds with the full fault profile plus the regression seeds.
+      - run: make sim SEEDS=500 FAULTS=full
+      - name: upload failing-seed traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-failure
+          path: out/sim/
   e2e-short:
     runs-on: ubuntu-latest
     timeout-minutes: 30

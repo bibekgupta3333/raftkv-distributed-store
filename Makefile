@@ -6,6 +6,9 @@ SEED    ?= 1
 IMAGE   ?= raftkvd:e2e
 COMPOSE := IMAGE=$(IMAGE) docker compose -f deploy/compose/docker-compose.yml
 E2E_PROFILE ?= pr
+SEEDS   ?= 500
+FAULTS  ?= full
+TRACEDIR ?= out/sim
 
 .PHONY: all fmt fmt-check lint build test race proto clean help tools sim e2e e2e-image cluster-up cluster-down cluster-logs
 
@@ -39,8 +42,8 @@ test: ## unit tests
 race: ## unit tests with race detector
 	go test -race ./...
 
-sim: ## run the deterministic simulator (SEED=n)
-	go test ./test/sim/... -run Sim -seeds=500 -start=$(SEED)
+sim: ## deterministic simulator: SEEDS=500 SEED=1 (first seed) FAULTS=full
+	go test ./test/sim/... -run Sim -seeds=$(SEEDS) -start=$(SEED) -faults=$(FAULTS) -tracedir=$(TRACEDIR) -timeout=60m
 
 proto: ## regenerate protobuf code
 	go tool buf generate
