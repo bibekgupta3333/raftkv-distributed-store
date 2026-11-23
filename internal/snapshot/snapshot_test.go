@@ -274,7 +274,9 @@ func dirNames(t *testing.T, dir string) []string {
 }
 
 // pipe collects what Send produces so Receive can consume it.
-type pipe struct{ msgs []*raftkvv1.InstallSnapshotRequest }
+type pipe struct {
+	msgs []*raftkvv1.InstallSnapshotRequest
+}
 
 func (p *pipe) send(m *raftkvv1.InstallSnapshotRequest) error {
 	p.msgs = append(p.msgs, proto.Clone(m).(*raftkvv1.InstallSnapshotRequest))
