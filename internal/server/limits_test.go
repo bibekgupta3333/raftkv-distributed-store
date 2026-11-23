@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -18,10 +19,14 @@ import (
 // over is rejected with INVALID_ARGUMENT before anything is proposed (DEFINITE,
 // and the applied index does not move).
 func TestLimitBoundaries(t *testing.T) {
-	c := kvtest.New(t, 3, kvtest.Options{})
-	lead := c.Leader(15 * time.Second)
+	// 50 ms ticks (elections after 0.5-1 s): 1 MiB writes under -race on a
+	// loaded CI runner must not look like a dead leader.
+	c := kvtest.New(t, 3, kvtest.Options{Tick: 50 * time.Millisecond})
+	lead := c.Leader(30 * time.Second)
 	kv := rawClient(t, c.Addr(lead))
-	ctx := ctx5(t)
+	cl := newClient(t, c)                                                    // retries (with a session) for bulk setup writes
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second) // ~1,000 writes under -race
+	defer cancel()
 	keyAt, keyOver := bytes.Repeat([]byte("k"), 4096), bytes.Repeat([]byte("k"), 4097)
 	valAt, valOver := make([]byte, 1<<20), make([]byte, 1<<20+1)
 	absent := &raftkvv1.CompareAndSwapRequest_ExpectAbsent{ExpectAbsent: true}
@@ -89,7 +94,7 @@ func TestLimitBoundaries(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := w; i < 1001; i += 16 {
-				_, err := kv.Put(ctx, &raftkvv1.PutRequest{Key: []byte(fmt.Sprintf("r/%04d", i))})
+				_, err := cl.Put(ctx, []byte(fmt.Sprintf("r/%04d", i)), nil)
 				errs <- err
 			}
 		}()
@@ -113,7 +118,7 @@ func TestLimitBoundaries(t *testing.T) {
 	// Range bytes: four 1 MiB values reach 4 MiB with their keys, so the page
 	// is cut after three (at most 4 MiB, at least one pair).
 	for i := range 4 {
-		if _, err := kv.Put(ctx, &raftkvv1.PutRequest{Key: []byte(fmt.Sprint("big/", i)), Value: valAt}); err != nil {
+		if _, err := cl.Put(ctx, []byte(fmt.Sprint("big/", i)), valAt); err != nil {
 			t.Fatal(err)
 		}
 	}

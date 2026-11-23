@@ -27,8 +27,10 @@ func others(c *kvtest.Cluster, id uint64) []uint64 {
 // WBS 4.2.2: a linearizable Get (the default) is served by the leader and by
 // followers, and each sees every write acknowledged before it started.
 func TestLinearizableGetOnLeaderAndFollowers(t *testing.T) {
-	c := kvtest.New(t, 3, kvtest.Options{})
-	lead := c.Leader(15 * time.Second)
+	// 50 ms ticks: raw Puts do not retry, so a spurious election on a loaded
+	// -race runner must not fail the test.
+	c := kvtest.New(t, 3, kvtest.Options{Tick: 50 * time.Millisecond})
+	lead := c.Leader(30 * time.Second)
 	leader := rawClient(t, c.Addr(lead))
 	members := map[uint64]raftkvv1.KVClient{}
 	for _, id := range c.IDs() {
