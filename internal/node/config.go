@@ -16,6 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/lease"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/observability"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/transport"
@@ -51,6 +52,21 @@ type Config struct {
 
 	LogLevel    string `yaml:"log_level"`
 	MaxMsgBytes int    `yaml:"max_msg_bytes"`
+
+	// LeaseReads lets the leader serve linearizable reads from a lease
+	// instead of a ReadIndex round (D-25). Off by default: it is only safe
+	// while clock drift stays within lease.DefaultDrift and no voter
+	// restarts inside the lease window.
+	LeaseReads bool `yaml:"lease_reads"`
+}
+
+// LeaseDuration is the read lease length for this timing (D-25): about 710 ms
+// with the defaults.
+func (c Config) LeaseDuration() (time.Duration, error) {
+	return lease.Config{
+		ElectionTick: c.ElectionTick, Tick: c.TickInterval,
+		Drift: lease.DefaultDrift, Margin: lease.DefaultMargin,
+	}.Duration()
 }
 
 // DefaultConfig returns the D-08 / D-29 defaults.
@@ -125,6 +141,11 @@ func (c Config) Validate() error {
 	}
 	if c.MaxMsgBytes <= 0 {
 		bad("max_msg_bytes must be positive")
+	}
+	if c.LeaseReads {
+		if _, err := c.LeaseDuration(); err != nil {
+			bad("lease_reads: %v", err)
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -234,6 +255,7 @@ func LoadConfig(args []string, out io.Writer) (Config, error) {
 	logLevel := fs.String("log-level", "", "debug, info, warn or error")
 	fromOrdinal := fs.String("node-id-from-ordinal", "",
 		"derive the node ID from a StatefulSet pod name: 1 + its ordinal (raftkv-2 -> 3)")
+	leaseReads := fs.Bool("lease-reads", false, "serve linearizable reads from a leader lease (D-25; off by default)")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -287,6 +309,8 @@ func LoadConfig(args []string, out io.Writer) (Config, error) {
 				return
 			}
 			cfg.NodeID = id
+		case "lease-reads":
+			cfg.LeaseReads = *leaseReads
 		}
 	})
 	if flagErr != nil {

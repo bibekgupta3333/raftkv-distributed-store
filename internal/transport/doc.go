@@ -7,7 +7,10 @@
 // replies (MsgAppResp, MsgHeartbeatResp) travel back on the same stream, so
 // per-stream order is preserved. Votes and pre-votes use the unary RequestVote
 // RPC; the transport converts its response into a MsgVoteResp or MsgPreVoteResp
-// and hands it to the node like any other inbound message.
+// and hands it to the node like any other inbound message. A follower's
+// ReadIndex request (MsgReadIndex, D-05) uses the unary ReadIndex RPC the same
+// way; a failed call comes back as a rejected MsgReadIndexResp so the reader
+// retries instead of waiting out its deadline.
 //
 // # Contract with the driver (D-35)
 //

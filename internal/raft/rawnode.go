@@ -77,6 +77,20 @@ func (n *RawNode) Propose(data []byte) (index, term uint64, err error) {
 	return n.raft.propose(data)
 }
 
+// ReadIndex requests a linearizable read (D-05). ctx identifies the request
+// and must be unique among requests in flight on this node. On the leader the
+// request is confirmed by a heartbeat quorum (concurrent requests share one
+// round); on a follower it is forwarded to the leader. The answer arrives
+// later as a [ReadState] in [Ready.ReadStates] with the same RequestCtx; it may
+// never arrive (a lost message), so callers need a deadline. A rejected
+// ReadState means retry.
+//
+// It returns [ErrReadIndexDropped] when no leader is known.
+func (n *RawNode) ReadIndex(ctx []byte) error {
+	n.mustBeIdle("ReadIndex")
+	return n.raft.readIndex(ctx)
+}
+
 // Step feeds one inbound peer message to the state machine. It returns
 // [ErrUnknownMessage] for an invalid message type. Messages from nodes outside
 // Config.Peers, and messages addressed to another node, are ignored.
@@ -107,6 +121,7 @@ func (n *RawNode) ReportUnreachable(id uint64) {
 func (n *RawNode) HasReady() bool {
 	r := n.raft
 	return len(r.msgs) > 0 ||
+		len(r.readStates) > 0 ||
 		len(r.log.unstable.entries) > 0 ||
 		r.log.hasNextCommittedEnts() ||
 		r.softState() != n.prevSoft ||
@@ -122,8 +137,9 @@ func (n *RawNode) Ready() Ready {
 		Entries:          r.log.unstableEntries(),
 		CommittedEntries: r.log.nextCommittedEnts(),
 		Messages:         r.msgs,
+		ReadStates:       r.readStates,
 	}
-	r.msgs = nil
+	r.msgs, r.readStates = nil, nil
 	if ss := r.softState(); ss != n.prevSoft {
 		rd.SoftState = &ss
 	}

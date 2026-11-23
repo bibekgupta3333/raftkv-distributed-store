@@ -85,7 +85,7 @@ everything else.
 | INV-7 Durability | A write acknowledged to a client is never lost while a quorum's synced disks survive. |
 | INV-8 Membership | At most one uncommitted config change at a time (D-06). Learners never count toward quorum. |
 | INV-9 Exactly-once | A `(client_id, sequence)` is applied at most once (D-09). |
-| INV-10 Read safety | A ReadIndex read (D-05) sees state at least as new as the commit index when the read arrived. |
+| INV-10 Read safety | A ReadIndex read (D-05) sees state at least as new as the commit index when the read arrived. In the simulator: READ-1 (read index ≥ the highest commit index any node had when the read started) and READ-2 (a leader's read index is an entry of its own term, i.e. after its no-op). |
 | LIVE-1 Liveness | Once faults heal and a majority is connected, a leader is elected within 10 × max election timeout. Reported separately from safety failures. |
 
 At the end of each run the client history goes through Porcupine (§3).

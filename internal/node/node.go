@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/lease"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/observability"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/transport"
@@ -104,6 +105,7 @@ type Node struct {
 
 	inbox    chan raft.Message
 	propCh   chan *proposal
+	readCh   chan readRequest
 	unreach  chan uint64
 	pingCh   chan chan struct{} // /livez pings (D-46)
 	stopping chan struct{}
@@ -116,6 +118,16 @@ type Node struct {
 
 	waitMu  sync.Mutex
 	waiters map[uint64]*waiter
+
+	// Read path (read.go, D-05, D-25).
+	readSeq   atomic.Uint64
+	readMu    sync.Mutex
+	readWait  map[string]chan readResult
+	appliedMu sync.Mutex
+	appliedCh chan struct{} // closed and replaced after every apply
+	epoch     time.Time     // origin of the monotonic lease clock
+	leaseMu   sync.Mutex    // guards lease.l
+	lease     *leaseState   // nil unless lease reads are on
 
 	started chan struct{}
 }
@@ -149,20 +161,31 @@ func New(cfg Config, opts Options) (*Node, error) {
 	}
 
 	n := &Node{
-		cfg:      cfg,
-		inbox:    make(chan raft.Message, inboxSize),
-		propCh:   make(chan *proposal, inboxSize),
-		unreach:  make(chan uint64, 64),
-		pingCh:   make(chan chan struct{}),
-		stopping: make(chan struct{}),
-		started:  make(chan struct{}),
-		waiters:  make(map[uint64]*waiter),
-		applier:  opts.Applier,
-		observer: opts.Observer,
-		metrics:  opts.Metrics,
+		cfg:       cfg,
+		inbox:     make(chan raft.Message, inboxSize),
+		propCh:    make(chan *proposal, inboxSize),
+		readCh:    make(chan readRequest, inboxSize),
+		readWait:  make(map[string]chan readResult),
+		appliedCh: make(chan struct{}),
+		epoch:     time.Now(),
+		unreach:   make(chan uint64, 64),
+		pingCh:    make(chan chan struct{}),
+		stopping:  make(chan struct{}),
+		started:   make(chan struct{}),
+		waiters:   make(map[uint64]*waiter),
+		applier:   opts.Applier,
+		observer:  opts.Observer,
+		metrics:   opts.Metrics,
 	}
 	if n.applier == nil {
 		n.applier = NewMemoryApplier()
+	}
+	if cfg.LeaseReads {
+		d, err := cfg.LeaseDuration()
+		if err != nil {
+			return nil, err
+		}
+		n.lease = &leaseState{l: lease.New(d)} // D-25: off unless configured
 	}
 	if n.metrics == nil {
 		n.metrics = observability.NewMetrics()
@@ -487,6 +510,7 @@ func (n *Node) loop(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			n.rn.Tick()
+			n.maybeRenewLease()
 		case m := <-n.inbox:
 			n.step(m)
 		case id := <-n.unreach:
@@ -496,6 +520,8 @@ func (n *Node) loop(ctx context.Context) error {
 		case pong := <-n.pingCh:
 			close(pong) // D-46: alive = the loop answers; nothing to process
 			continue
+		case rq := <-n.readCh:
+			n.handleRead(rq)
 		}
 		n.absorb()
 		if err := n.processReady(); err != nil {
@@ -519,6 +545,8 @@ func (n *Node) absorb() {
 			n.step(m)
 		case p := <-n.propCh:
 			n.handleProposal(p)
+		case rq := <-n.readCh:
+			n.handleRead(rq)
 		case id := <-n.unreach:
 			n.rn.ReportUnreachable(id)
 		default:
@@ -553,6 +581,8 @@ func (n *Node) processReady() error {
 		if err := n.apply(rd.CommittedEntries); err != nil {
 			return fmt.Errorf("apply: %w", err)
 		}
+		// (4) Answer reads (D-05). They wait for the applied index themselves.
+		n.handleReadStates(rd)
 		n.rn.Advance(rd)
 		n.publish(rd)
 	}
@@ -600,6 +630,7 @@ func (n *Node) apply(ents []raft.Entry) error {
 	if err != nil {
 		return err
 	}
+	n.notifyApplied()
 	n.waitMu.Lock()
 	defer n.waitMu.Unlock()
 	if len(n.waiters) == 0 {

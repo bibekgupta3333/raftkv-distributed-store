@@ -21,9 +21,10 @@ func (r Result) OK() bool { return r.Violation == nil }
 
 // String is a one-line summary.
 func (r Result) String() string {
-	s := fmt.Sprintf("seed=%d profile=%s nodes=%d events=%d hash=%016x terms<=%d committed=%d acked=%d/%d crashes=%d partitions=%d leader+%dms commit+%dms",
+	s := fmt.Sprintf("seed=%d profile=%s nodes=%d events=%d hash=%016x terms<=%d committed=%d acked=%d/%d reads=%d/%d (rejected=%d lease=%d) crashes=%d partitions=%d leader+%dms commit+%dms",
 		r.Seed, r.Profile, r.Stats.Nodes, r.Stats.Events, r.TraceHash, r.Stats.MaxTerm,
-		r.Stats.Committed, r.Stats.Acked, r.Stats.Accepted, r.Stats.Crashes, r.Stats.Partitions,
+		r.Stats.Committed, r.Stats.Acked, r.Stats.Accepted, r.Stats.ReadsServed, r.Stats.Reads,
+		r.Stats.ReadsRejected, r.Stats.LeaseReads, r.Stats.Crashes, r.Stats.Partitions,
 		r.Stats.LeaderAfterMs, r.Stats.CommitAfterMs)
 	if r.Violation != nil {
 		s += " FAIL: " + r.Violation.Error()
