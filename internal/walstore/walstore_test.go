@@ -1,6 +1,7 @@
 package walstore_test
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
@@ -28,7 +29,17 @@ func TestWALStoreConformance(t *testing.T) {
 			Storage:      s,
 			Append:       s.Append,
 			SetHardState: s.SetHardState,
-			Compact:      s.CompactTo,
+			Compact: func(i uint64) error {
+				// D-30: a trim needs a snapshot covering it.
+				term, err := s.Term(i)
+				if err != nil {
+					return err
+				}
+				if snap, _ := s.Snapshot(); snap.Index < i {
+					s.SetSnapshot(raft.Snapshot{Index: i, Term: term})
+				}
+				return s.CompactTo(i)
+			},
 		}
 	})
 }
@@ -67,5 +78,91 @@ func TestReopenRecoversLogAndHardState(t *testing.T) {
 	want := []raft.Entry{ents[0], ents[1], {Index: 3, Term: 3, Data: []byte("c")}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("entries after reopen = %+v, want %+v", got, want)
+	}
+}
+
+func seqEnts(from, to, term uint64) []raft.Entry {
+	var out []raft.Entry
+	for i := from; i <= to; i++ {
+		out = append(out, raft.Entry{Index: i, Term: term, Data: []byte{byte(i)}})
+	}
+	return out
+}
+
+// D-30 backstop: never trim past the newest snapshot.
+func TestCompactToRefusesBeyondSnapshot(t *testing.T) {
+	s := open(t, t.TempDir())
+	defer func() { _ = s.Close() }()
+	if err := s.Append(seqEnts(1, 10, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompactTo(5); !errors.Is(err, walstore.ErrBeyondSnapshot) {
+		t.Fatalf("trim without a snapshot: err = %v", err)
+	}
+	s.SetSnapshot(raft.Snapshot{Index: 6, Term: 1})
+	if err := s.CompactTo(7); !errors.Is(err, walstore.ErrBeyondSnapshot) {
+		t.Fatalf("trim past the snapshot: err = %v", err)
+	}
+	if err := s.CompactTo(6); err != nil {
+		t.Fatal(err)
+	}
+	if snap, _ := s.Snapshot(); snap != (raft.Snapshot{Index: 6, Term: 1}) {
+		t.Fatalf("Snapshot() = %+v", snap)
+	}
+}
+
+// The compaction point and its term survive a restart (SNAPSHOT_MARKER).
+func TestCompactionSurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+	s := open(t, dir)
+	if err := s.Save(raft.Ready{Entries: append(seqEnts(1, 4, 1), seqEnts(5, 9, 2)...), MustSync: true}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetSnapshot(raft.Snapshot{Index: 7, Term: 2})
+	if err := s.CompactTo(6); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = open(t, dir)
+	defer func() { _ = s.Close() }()
+	first, _ := s.FirstIndex()
+	last, _ := s.LastIndex()
+	if first != 7 || last != 9 {
+		t.Fatalf("range after reopen = [%d,%d], want [7,9]", first, last)
+	}
+	if term, err := s.Term(6); err != nil || term != 2 {
+		t.Fatalf("Term(6) = %d, %v; the compaction point keeps its term", term, err)
+	}
+}
+
+// An installed snapshot replaces the log, durably (storage-design 4.4 step 6).
+func TestApplySnapshotSurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+	s := open(t, dir)
+	if err := s.Save(raft.Ready{Entries: seqEnts(1, 8, 1), HardState: raft.HardState{Term: 1, Commit: 2}, MustSync: true}); err != nil {
+		t.Fatal(err)
+	}
+	snap := raft.Snapshot{Index: 20, Term: 3}
+	rd := raft.Ready{Snapshot: &snap, Entries: seqEnts(21, 22, 3), HardState: raft.HardState{Term: 3, Commit: 20}, MustSync: true}
+	if err := s.Save(rd); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = open(t, dir)
+	defer func() { _ = s.Close() }()
+	first, _ := s.FirstIndex()
+	last, _ := s.LastIndex()
+	if first != 21 || last != 22 {
+		t.Fatalf("range after reopen = [%d,%d], want [21,22]", first, last)
+	}
+	if term, _ := s.Term(20); term != 3 {
+		t.Fatalf("Term(20) = %d, want 3", term)
+	}
+	if hs, _ := s.InitialState(); hs.Commit != 20 {
+		t.Fatalf("commit = %d, want 20", hs.Commit)
 	}
 }

@@ -33,6 +33,11 @@ type RecordType uint8
 const (
 	RecordEntry     RecordType = 1 // term/index = entry term/index; payload = entry type + data
 	RecordHardState RecordType = 2 // term = term, index = commit; payload = vote
+	// RecordSnapshotMarker sets the log start (storage-design §1.4, D-14,
+	// D-30): term/index = the compaction point; payload = flags. Without
+	// flagReset, replay drops entries <= index (the log was trimmed); with
+	// it, replay drops every entry (a snapshot replaced the log).
+	RecordSnapshotMarker RecordType = 3
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -92,7 +97,7 @@ func DecodeRecord(b []byte) (Record, int, error) {
 		return Record{}, 0, fmt.Errorf("%w: crc mismatch", errBadRecord)
 	}
 	t := RecordType(b[8])
-	if t != RecordEntry && t != RecordHardState {
+	if t != RecordEntry && t != RecordHardState && t != RecordSnapshotMarker {
 		return Record{}, 0, fmt.Errorf("%w: unknown type %d", errBadRecord, t)
 	}
 	if b[9] != 0 || b[10] != 0 || b[11] != 0 {
@@ -139,6 +144,37 @@ type HardState struct {
 
 // IsEmpty reports whether hs is the zero HardState.
 func (hs HardState) IsEmpty() bool { return hs == HardState{} }
+
+// Start is the log's compaction point: entries up to Index are gone (covered by
+// a snapshot), and Term is the term of the entry at Index. Zero means the log
+// starts at index 1.
+type Start struct {
+	Index uint64
+	Term  uint64
+}
+
+// markerFlagReset marks a SNAPSHOT_MARKER written when a snapshot replaced the
+// whole log (install), as opposed to a trim.
+const markerFlagReset uint64 = 1
+
+func markerRecord(s Start, reset bool) Record {
+	p := make([]byte, 8)
+	if reset {
+		binary.LittleEndian.PutUint64(p, markerFlagReset)
+	}
+	return Record{Type: RecordSnapshotMarker, Term: s.Term, Index: s.Index, Payload: p}
+}
+
+func markerFromRecord(r Record) (Start, bool, error) {
+	if r.Type != RecordSnapshotMarker || len(r.Payload) != 8 {
+		return Start{}, false, fmt.Errorf("%w: malformed snapshot marker", errBadRecord)
+	}
+	flags := binary.LittleEndian.Uint64(r.Payload)
+	if flags&^markerFlagReset != 0 {
+		return Start{}, false, fmt.Errorf("%w: unknown snapshot marker flags %#x", errBadRecord, flags)
+	}
+	return Start{Index: r.Index, Term: r.Term}, flags&markerFlagReset != 0, nil
+}
 
 func (e Entry) record() Record {
 	p := make([]byte, 4+len(e.Data))
