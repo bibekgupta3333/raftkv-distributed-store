@@ -1,0 +1,4 @@
+# <seed> <profile> [# comment]. Replayed on every run by TestSimRegressions (D-18).
+# Add a seed here in the same PR that fixes the bug it found.
+1 full # sanity: the replay machinery runs and a healthy seed passes
+9940 full # leader completeness false positive: checker used entry term instead of commit term
