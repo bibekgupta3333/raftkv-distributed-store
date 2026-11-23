@@ -207,7 +207,9 @@ Writes go to the leader. Any member accepts them and forwards by default (D-28).
 - On mismatch: gRPC `OK`, `succeeded=false`, and `current` holds the key's current state, so the caller can retry a read-modify-write loop without a separate `Get`.
 - The evaluating entry always advances the revision, even when nothing changed.
 
-**Range pages are not a snapshot** (D-34). Each page is linearizable on its own; writes between pages can appear in later pages. `next_page_token` encodes the next start key plus a checksum of the original range parameters.
+**Range pages are not a snapshot** (D-34). Each page is linearizable on its own; writes between pages can appear in later pages. `next_page_token` encodes the next start key plus a checksum of the original range parameters: `version (1 byte) | CRC-32C of start_key, end_key, prefix, keys_only, reverse (4 bytes LE) | resume key`. Forward scans resume at the key just after the last one returned; reverse scans use the last key returned as the new exclusive end. `prefix` and `start_key`/`end_key` together are `MALFORMED_REQUEST`. Until ReadIndex lands (WBS 4.1–4.2), a LINEARIZABLE page waits for a keyless read-barrier entry through the log, the same mechanism `Get` uses, and is therefore served by the leader only (`NOT_LEADER` with a hint elsewhere).
+
+**Forwarded replies.** A follower that forwards a write relays the leader's reply unchanged except `header.member_id`, which names the follower (the member the client talked to); `leader_id`, `raft_term` and `revision` are the leader's.
 
 **Write acknowledgement.** `OK` means the entry is committed (fsynced on a quorum) and applied on the leader. A `STALE` read with `min_revision = revision` sees that write.
 
@@ -380,6 +382,8 @@ Without sessions, a write that times out after commit and is retried is applied 
 **TTL is 10 min (D-09).** The leader stamps its time into each command (D-27), and every replica expires sessions using that stamped time, so expiry is identical everywhere.
 
 **Writes without a session** are accepted but are only at-least-once on retry. `raftkvctl` always uses a session.
+
+**Implementation notes (M4).** Expiry runs at the start of every applied command, using `max(stamped time, previous session clock)`, so a write arriving after more than 10 minutes of idle time gets `SESSION_EXPIRED`. Sessions idle for exactly the TTL are still alive. The leader stamps `max(own clock, applied session clock)`. Duplicates and writes keep a session alive; refused writes (`SEQUENCE_STALE`, `SESSION_WINDOW_EXCEEDED`) do not. Static session checks (`sequence = 0`, `acked >= sequence`, window) also run before proposing. `pkg/client` counts a sequence as finished when its call returns with any outcome, and acks the highest contiguous finished sequence. On `SESSION_EXPIRED` it registers a new session and retries only if no earlier attempt of that write was indeterminate; otherwise it reports the write as indeterminate.
 
 **Client rules:** one sequence per logical write, reused on every retry (including after a redirect); advance `acked_sequence` monotonically; keep the retry budget (10 s) far below the TTL.
 

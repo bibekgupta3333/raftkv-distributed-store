@@ -181,7 +181,8 @@ A one-byte prefix separates namespaces. Client keys can never collide with inter
 | Prefix | Namespace | Key | Value |
 |--------|-----------|-----|-------|
 | `0x6D` `'m'` | Internal metadata | `m` ‖ name | see below |
-| `0x73` `'s'` | Sessions (D-09) | `s` ‖ client_id (8 B big-endian) | `Session`: `last_sequence`, `last_active_unix_ms`, cached replies |
+| `0x73` `'s'` | Sessions (D-09) | `s` ‖ client_id (8 B big-endian) | Session record, 24 bytes LE: `last_sequence`, `acked_sequence`, `last_active_unix_ms` |
+| `0x73` `'s'` | Cached replies | `s` ‖ client_id ‖ sequence (8 B BE) | The reply for that sequence (kind, flags, index, value, previous). One key per reply, so a write never rewrites the other cached replies; dropped when `acked_sequence` passes it or the session expires |
 | `0x74` `'t'` | Session expiry index | `t` ‖ last_active_unix_ms (8 B BE) ‖ client_id | empty. Lets apply expire old sessions by scanning in order |
 | `0x75` `'u'` | **User keys** | `u` ‖ user key (1–4096 bytes) | value header + value |
 | others | reserved | | never written |
@@ -201,6 +202,7 @@ A one-byte prefix separates namespaces. Client keys can never collide with inter
 |-----|-------|---------|
 | `m/appliedIndex` | uint64 LE | **Every apply batch** (D-04) |
 | `m/appliedTerm` | uint64 LE | Every apply batch |
+| `m/sessionClock` | uint64 LE | When a command's leader-stamped time (D-27) is above it. The session "now": the max stamped time applied, so it never goes backwards across leaders |
 | `m/membership` | `ClusterConfig` | In the batch of a conf-change entry |
 | `m/removedMembers` | list of IDs | In the batch of a `REMOVE_MEMBER` (D-31, D-38) |
 | `m/clusterID` | uint64 LE | Once, at bootstrap |

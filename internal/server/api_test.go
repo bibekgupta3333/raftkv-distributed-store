@@ -313,9 +313,7 @@ func TestRangePaging(t *testing.T) {
 	}
 
 	// A token only works for the range it came from.
-	kv := rawClient(t, c.Endpoints()[0])
-	lead := c.Leader(5 * time.Second)
-	kv = rawClient(t, c.Addr(lead))
+	kv := rawClient(t, c.Addr(c.Leader(5*time.Second)))
 	p1, err := kv.Range(ctx, &raftkvv1.RangeRequest{Prefix: []byte("p/"), Limit: 2})
 	if err != nil || !p1.GetMore() {
 		t.Fatalf("first page = %v, %v", p1, err)
