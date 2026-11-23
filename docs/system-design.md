@@ -201,10 +201,16 @@ sequenceDiagram
 ### 3.3 Stale reads
 
 `STALE` reads local Pebble at the current `appliedIndex` on any node, including learners. No linearizability guarantee.
+With `min_revision = r` the node first waits until `appliedIndex ≥ r` (or answers `REVISION_NOT_REACHED`), so a client
+that passes the revision of its own write reads that write or something newer. The response header carries the applied
+index the value was read at.
 
 ### 3.4 Range scans
 
-`Range` uses the same read point as `Get`. One Pebble iterator serves the whole page (D-11), so each page is linearizable. **Pages are not one snapshot** (D-34): each page gets its own read point.
+`Range` uses the same read point as `Get` (`Node.LinearizableRead`): after the read index is applied, one Pebble
+iterator inside the read callback serves the whole page (D-11), so each page is linearizable on any member. **Pages are
+not one snapshot** (D-34): each page gets its own read point. The Porcupine model checks each page as one atomic read
+of every key in the span it covered (testing.md §3.3).
 
 ---
 
@@ -214,28 +220,40 @@ sequenceDiagram
 
 - The client calls `RegisterSession`, a replicated entry. Its log index becomes the `client_id` (D-26).
 - Each write carries `(client_id, seq, ack_seq)`. `seq` increases by 1 per logical write; retries reuse it. `ack_seq` is the highest seq the client has a reply for (with all lower ones done), so the server can drop old cached replies.
-- The state machine stores per session: `{last_seq, responses for seq in (ack_seq, last_seq], last_active}`.
+- The state machine stores, in Pebble (storage-design §3.1): per session a record `{last_seq, acked, last_active}`
+  under `s ‖ client_id`; each cached reply under its own key `s ‖ client_id ‖ seq`; an expiry index
+  `t ‖ last_active ‖ client_id`; and the replicated **session clock** `m/sessionClock`, the highest leader-stamped
+  time applied so far.
 
 ### 4.2 Apply logic (runs the same on every replica)
 
 ```
-apply(entry{client_id, seq, ack_seq, op, leader_ts}):
+apply(entry{op, session{client_id, seq, acked}, leader_ts}):   // internal/storage applyOne / applyWithSession
+  now := sessionClock := max(sessionClock, leader_ts)            // never goes backwards (D-27)
+  expireSessions(now)                                            // idle > 10 min, oldest first, before the op
+  if op is RegisterSession: sessions[entry.index] = {last_active: now}; return client_id = entry.index (D-26)
+  if op has no session:     return execute(op)                   // at-least-once on retry
   s := sessions[client_id]
-  if s == nil:                 return SESSION_EXPIRED          // no side effect
-  s.dropResponses(upTo = ack_seq)
-  if seq <= s.last_seq:
-      if r, ok := s.responses[seq]: return r                 // duplicate: replay, do NOT re-execute
-      else:                         return SEQUENCE_STALE
-  result := execute(op)                                      // Put / Delete / CAS
-  s.responses[seq] = result; s.last_seq = seq; s.last_active = leader_ts
-  expireSessions(now = leader_ts)                            // TTL 10 min, replicated time only (D-27)
-  write {kv change, session change, appliedIndex} in ONE Pebble batch (D-04)
+  if s == nil:              return SESSION_EXPIRED               // no side effect
+  if acked > s.acked:       drop cached replies (s.acked, acked]; s.acked = acked
+  if reply cached for seq:  r := cached; r.duplicate = true      // replay, do NOT re-execute
+  elif seq <= s.acked:      r := SEQUENCE_STALE                  // its reply is gone
+  elif seq - s.acked > 64:  r := SESSION_WINDOW_EXCEEDED
+  else:                     r := execute(op); cache r under seq; s.last_seq = max(s.last_seq, seq)
+  if r is not an error:     s.last_active = now                  // duplicates and writes keep it alive
+  write {kv change, session change, sessionClock, appliedIndex} in ONE Pebble batch (D-04)
 ```
 
-- **Deterministic expiry.** The leader stamps `leader_ts` into each entry (D-27). Replicas never use their own clock, so all expire the same sessions at the same index. A new leader uses `max(own clock, last applied leader_ts)`.
-- **Out-of-order seqs** within a window of 64 are allowed. Beyond that: `SESSION_WINDOW_EXCEEDED`.
+- **Deterministic expiry.** The leader stamps `leader_ts` into each entry (D-27). Replicas never use their own clock;
+  they expire at the session clock, so all expire the same sessions at the same index. Expiry runs before the op, so a
+  write that arrives after more than 10 minutes idle gets `SESSION_EXPIRED`. The leader stamps
+  `max(own clock, applied session clock)`, so a new leader whose clock is behind does not move session time back.
+- **Out-of-order seqs** within a window of 64 above `acked` are allowed (a seq without a cached reply executes even if
+  a higher one already did). Beyond that: `SESSION_WINDOW_EXCEEDED`.
 - **Reads do not use sessions.** They have no side effects.
-- Exactly-once holds only **within a live session**.
+- Exactly-once holds only **within a live session**. The property test `TestSessionTableDeterministic` (10,000 seeds
+  with `-session-seeds=10000`) checks that replicas applying the same log with different batch boundaries and restarts
+  end with the same session table and never execute a `(client_id, seq)` twice.
 
 ### 4.3 Failure cases
 
