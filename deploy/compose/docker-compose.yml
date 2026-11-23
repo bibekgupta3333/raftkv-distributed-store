@@ -1,7 +1,12 @@
 name: raftkv
 
-# 5-node RaftKV cluster plus Prometheus (WBS 2.5.2). The e2e harness drives it
-# from the host: peer gRPC on 127.0.0.1:17001-17005, /metrics on 19001-19005.
+# 5-node RaftKV cluster plus Prometheus (WBS 2.5.2), Grafana (WBS 7.3.1) and the
+# observer UI (D-48, WBS 7.2.3). The e2e harness drives it from the host: peer
+# gRPC on 127.0.0.1:17001-17005, /metrics on 19001-19005; it starts only the
+# five nodes. Everything is published on localhost only:
+#   Prometheus http://127.0.0.1:19090
+#   Grafana    http://127.0.0.1:13000 (anonymous viewer, dashboard "RaftKV overview")
+#   Observer   http://127.0.0.1:18080
 # NET_ADMIN lets the fault driver run iptables / tc inside a node container.
 x-node: &node
   image: ${IMAGE:-raftkvd:e2e}
@@ -57,6 +62,33 @@ services:
     image: prom/prometheus:v2.55.1
     volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
     ports: ["127.0.0.1:19090:9090"]
+    depends_on: [node1, node2, node3, node4, node5]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/raftkv.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["127.0.0.1:13000:3000"]
+    depends_on: [prometheus]
+
+  # Read-only live view of the cluster (D-48). Same image as the nodes, other
+  # binary. It listens on all interfaces inside the container; the port is
+  # published on localhost only (no auth).
+  observer:
+    image: ${IMAGE:-raftkvd:e2e}
+    entrypoint: [/usr/local/bin/raftkv-observer]
+    command:
+      - --listen=:8080
+      - --interval=500ms
+      - --endpoints=node1=node1:7000,node2=node2:7000,node3=node3:7000,node4=node4:7000,node5=node5:7000
+    ports: ["127.0.0.1:18080:8080"]
+    restart: "no"
     depends_on: [node1, node2, node3, node4, node5]
 
 volumes:
