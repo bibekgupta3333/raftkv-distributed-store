@@ -51,7 +51,9 @@ func IsAppendResponse(t raft.MessageType) bool {
 func IsVoteRequest(t raft.MessageType) bool { return t == raft.MsgVote || t == raft.MsgPreVote }
 
 // IsVoteResponse reports whether m answers a RequestVote RPC.
-func IsVoteResponse(t raft.MessageType) bool { return t == raft.MsgVoteResp || t == raft.MsgPreVoteResp }
+func IsVoteResponse(t raft.MessageType) bool {
+	return t == raft.MsgVoteResp || t == raft.MsgPreVoteResp
+}
 
 // AppendRequestToProto converts a MsgApp or MsgHeartbeat.
 func AppendRequestToProto(clusterID uint64, m raft.Message) *raftkvv1.AppendEntriesRequest {

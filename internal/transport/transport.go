@@ -140,15 +140,15 @@ type Transport struct {
 	cfg   Config
 	peers map[uint64]*peer
 
-	mu       sync.Mutex
-	inbound  map[uint64]*inboundStream
-	votes    map[voteKey]chan raft.Message
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	started  bool
-	closed   bool
-	baseCtx  context.Context
-	serverWG sync.WaitGroup
+	mu      sync.Mutex
+	inbound map[uint64]*inboundStream
+	votes   map[voteKey]chan raft.Message
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	started bool
+	closed  bool
+	baseCtx context.Context
+	closing chan struct{} // closed by Close; unblocks idle inbound streams
 }
 
 // New validates cfg and builds a Transport. Call [Transport.Start] to begin
@@ -162,6 +162,7 @@ func New(cfg Config) (*Transport, error) {
 		peers:   make(map[uint64]*peer),
 		inbound: make(map[uint64]*inboundStream),
 		votes:   make(map[voteKey]chan raft.Message),
+		closing: make(chan struct{}),
 	}
 	for _, id := range cfg.Peers.IDs() {
 		if id != cfg.ID {
@@ -214,6 +215,7 @@ func (t *Transport) Close() {
 		return
 	}
 	t.closed = true
+	close(t.closing)
 	cancel := t.cancel
 	for _, in := range t.inbound {
 		in.cancel()

@@ -35,65 +35,22 @@ type recvResult struct {
 
 // Replicate implements the follower side of the long-lived append stream
 // (D-12). The first request identifies the leader; later requests must come
-// from the same leader.
+// from the same leader. A sender may open the stream long before it has
+// anything to say, so the handler must stay interruptible while it waits for
+// the first request (Close and a superseding stream cancel ctx).
 func (s *raftServer) Replicate(stream raftkvv1.Raft_ReplicateServer) error {
 	t := s.t
-	first, err := stream.Recv()
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		return err
-	}
-	leader := first.GetLeaderId()
-	if err := t.checkSender(first.GetClusterId(), leader); err != nil {
-		return status.Error(codes.PermissionDenied, err.Error()) // D-31: unknown senders are refused
-	}
-
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
-	in := &inboundStream{out: make(chan raft.Message, t.cfg.QueueSize), cancel: cancel}
-	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return status.Error(codes.Unavailable, "transport closed")
-	}
-	old := t.inbound[leader]
-	t.inbound[leader] = in
-	t.mu.Unlock()
-	if old != nil {
-		old.cancel() // a leader that reconnects supersedes its previous stream
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() { // single writer: responses leave in the order the core made them
-		defer wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case m := <-in.out:
-				if err := stream.Send(AppendResponseToProto(m)); err != nil {
-					cancel()
-					return
-				}
-				t.cfg.Observer.MessageSent(leader, m.Type)
-			}
+	go func() {
+		select {
+		case <-t.closing:
+			cancel()
+		case <-ctx.Done():
 		}
 	}()
-	defer func() {
-		cancel()
-		wg.Wait() // no Send may outlive the handler
-		t.mu.Lock()
-		if t.inbound[leader] == in {
-			delete(t.inbound, leader)
-		}
-		t.mu.Unlock()
-	}()
 
-	// Receive in a goroutine so a superseded or cancelled stream can return
-	// even while Recv is blocked.
+	// Receive in a goroutine so the handler can return even while Recv blocks.
 	recv := make(chan recvResult)
 	go func() {
 		for {
@@ -109,14 +66,25 @@ func (s *raftServer) Replicate(stream raftkvv1.Raft_ReplicateServer) error {
 		}
 	}()
 
-	req := first
+	var (
+		leader uint64
+		in     *inboundStream
+		wg     sync.WaitGroup
+	)
+	defer func() {
+		cancel()
+		wg.Wait() // no Send may outlive the handler
+		if in != nil {
+			t.mu.Lock()
+			if t.inbound[leader] == in {
+				delete(t.inbound, leader)
+			}
+			t.mu.Unlock()
+		}
+	}()
+
 	for {
-		if req.GetLeaderId() != leader {
-			return status.Error(codes.InvalidArgument, "leader id changed on an open stream")
-		}
-		if err := t.cfg.Handler.Step(ctx, AppendRequestFromProto(req, t.cfg.ID)); err != nil {
-			return status.FromContextError(err).Err()
-		}
+		var req *raftkvv1.AppendEntriesRequest
 		select {
 		case <-ctx.Done():
 			return nil
@@ -128,6 +96,45 @@ func (s *raftServer) Replicate(stream raftkvv1.Raft_ReplicateServer) error {
 				return r.err
 			}
 			req = r.req
+		}
+		if in == nil { // first request: authenticate the leader and register
+			leader = req.GetLeaderId()
+			if err := t.checkSender(req.GetClusterId(), leader); err != nil {
+				return status.Error(codes.PermissionDenied, err.Error()) // D-31: unknown senders are refused
+			}
+			in = &inboundStream{out: make(chan raft.Message, t.cfg.QueueSize), cancel: cancel}
+			t.mu.Lock()
+			if t.closed {
+				t.mu.Unlock()
+				return status.Error(codes.Unavailable, "transport closed")
+			}
+			old := t.inbound[leader]
+			t.inbound[leader] = in
+			t.mu.Unlock()
+			if old != nil {
+				old.cancel() // a leader that reconnects supersedes its previous stream
+			}
+			wg.Add(1)
+			go func() { // single writer: responses leave in the order the core made them
+				defer wg.Done()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case m := <-in.out:
+						if err := stream.Send(AppendResponseToProto(m)); err != nil {
+							cancel()
+							return
+						}
+						t.cfg.Observer.MessageSent(leader, m.Type)
+					}
+				}
+			}()
+		} else if req.GetLeaderId() != leader {
+			return status.Error(codes.InvalidArgument, "leader id changed on an open stream")
+		}
+		if err := t.cfg.Handler.Step(ctx, AppendRequestFromProto(req, t.cfg.ID)); err != nil {
+			return status.FromContextError(err).Err()
 		}
 	}
 }

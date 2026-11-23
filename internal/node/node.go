@@ -1,0 +1,530 @@
+package node
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"math/rand/v2"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc"
+
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/observability"
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/transport"
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/wal"
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/walstore"
+)
+
+// Errors returned by proposals.
+var (
+	// ErrStopped means the node is shutting down.
+	ErrStopped = errors.New("node: stopped")
+	// ErrProposalLost means the entry at the proposed index was replaced by a
+	// different leader's entry before it committed. The command did not run;
+	// retrying is safe only for idempotent commands (sessions arrive in M4, D-09).
+	ErrProposalLost = errors.New("node: proposal replaced by a different entry")
+)
+
+const (
+	inboxSize = 4096
+	// maxBatch bounds how many queued events one loop iteration absorbs before
+	// handling a Ready, so one fsync covers many entries (WAL 1.5) without
+	// starving ticks.
+	maxBatch = 256
+)
+
+// Options are the node's injectable dependencies. The zero value is a normal
+// production node: it listens on the configured addresses, logs JSON to stderr
+// and applies into memory.
+type Options struct {
+	// Listener and MetricsListener replace listening on the configured
+	// addresses; tests use them to get free ports.
+	Listener        net.Listener
+	MetricsListener net.Listener
+	// Applier defaults to a [MemoryApplier] (temporary until M3).
+	Applier Applier
+	// Logger replaces the default JSON logger (which writes to LogWriter).
+	Logger    *slog.Logger
+	LogWriter io.Writer // default os.Stderr
+	// TracerProvider defaults to the global OpenTelemetry provider, a no-op
+	// unless the process installed an SDK.
+	TracerProvider trace.TracerProvider
+	// Metrics defaults to a fresh set.
+	Metrics *observability.Metrics
+	// WALFS and OnFatal are passed to the WAL (fault injection in tests, D-33).
+	WALFS   wal.FS
+	OnFatal func(error)
+}
+
+// Node is one RaftKV member: the driver loop around the pure core (D-35).
+//
+// A single goroutine (the loop in [Node.Run]) owns the RawNode. Every other
+// goroutine talks to it through channels, or reads the atomically published
+// [Node.Status] (docs/architecture.md section 5).
+type Node struct {
+	cfg     Config
+	log     *slog.Logger
+	metrics *observability.Metrics
+	tracer  trace.Tracer
+
+	store   *walstore.Store
+	rn      *raft.RawNode
+	tr      *transport.Transport
+	applier Applier
+
+	lis        net.Listener
+	metricsLis net.Listener
+	srv        *grpc.Server
+
+	inbox    chan raft.Message
+	propCh   chan *proposal
+	unreach  chan uint64
+	stopping chan struct{}
+
+	status atomic.Pointer[raft.Status]
+	term   atomic.Uint64
+
+	waitMu  sync.Mutex
+	waiters map[uint64]*waiter
+
+	started chan struct{}
+}
+
+type proposal struct {
+	data []byte
+	wait bool
+	resp chan proposalResult
+}
+
+type proposalResult struct {
+	index, term uint64
+	w           *waiter
+	err         error
+}
+
+type waiter struct {
+	term uint64
+	done chan error
+}
+
+// New validates cfg, enforces the data directory's identity (WBS 2.3.4), opens
+// the WAL, and builds the core and transport. It does not start any goroutine;
+// call [Node.Run].
+func New(cfg Config, opts Options) (*Node, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if err := EnsureIdentity(cfg.DataDir, Identity{NodeID: cfg.NodeID, ClusterID: cfg.ClusterID}); err != nil {
+		return nil, err
+	}
+
+	n := &Node{
+		cfg:      cfg,
+		inbox:    make(chan raft.Message, inboxSize),
+		propCh:   make(chan *proposal, inboxSize),
+		unreach:  make(chan uint64, 64),
+		stopping: make(chan struct{}),
+		started:  make(chan struct{}),
+		waiters:  make(map[uint64]*waiter),
+		applier:  opts.Applier,
+		metrics:  opts.Metrics,
+	}
+	if n.applier == nil {
+		n.applier = NewMemoryApplier()
+	}
+	if n.metrics == nil {
+		n.metrics = observability.NewMetrics()
+	}
+	tp := opts.TracerProvider
+	if tp == nil {
+		tp = otel.GetTracerProvider()
+	}
+	n.tracer = tp.Tracer("github.com/bibekgupta3333/raftkv-distributed-store/internal/node")
+	n.log = opts.Logger
+	if n.log == nil {
+		w := opts.LogWriter
+		if w == nil {
+			w = os.Stderr
+		}
+		lvl, _ := observability.ParseLevel(cfg.LogLevel)
+		n.log = observability.NewLogger(w, lvl, cfg.NodeID, n.term.Load)
+	}
+
+	store, err := walstore.Open(filepath.Join(cfg.DataDir, WALDir), wal.Options{
+		FS: opts.WALFS, ClusterID: cfg.ClusterID, MemberID: cfg.NodeID, OnFatal: opts.OnFatal,
+	})
+	if err != nil {
+		return nil, err
+	}
+	n.store = store
+	if store.TruncatedBytes > 0 {
+		n.log.Warn("cut a torn WAL tail", "component", "wal", "bytes", store.TruncatedBytes) // D-33
+	}
+
+	rcfg := raft.DefaultConfig(cfg.NodeID, cfg.PeerIDs(), store,
+		rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), cfg.NodeID))) // D-24: randomness is injected, here
+	rcfg.ElectionTick, rcfg.HeartbeatTick = cfg.ElectionTick, cfg.HeartbeatTick
+	rcfg.Applied = n.applier.Applied()
+	if n.rn, err = raft.NewRawNode(rcfg); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+
+	book, err := transport.NewAddressBook(cfg.PeerAddrs())
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	if n.tr, err = transport.New(transport.Config{
+		ID: cfg.NodeID, ClusterID: cfg.ClusterID, Peers: book, Handler: n,
+		Logger:   observability.Component(n.log, "transport"),
+		Observer: n.metrics, MaxMsgBytes: cfg.MaxMsgBytes,
+		OnUnreachable: n.reportUnreachable,
+	}); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+
+	if n.lis = opts.Listener; n.lis == nil {
+		if n.lis, err = net.Listen("tcp", cfg.EffectiveListenAddr()); err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("node: listen: %w", err)
+		}
+	}
+	if n.metricsLis = opts.MetricsListener; n.metricsLis == nil && cfg.MetricsAddr != "" {
+		if n.metricsLis, err = net.Listen("tcp", cfg.MetricsAddr); err != nil {
+			_ = n.lis.Close()
+			_ = store.Close()
+			return nil, fmt.Errorf("node: listen metrics: %w", err)
+		}
+	}
+	return n, nil
+}
+
+// Addr is the peer gRPC address the node listens on.
+func (n *Node) Addr() string { return n.lis.Addr().String() }
+
+// MetricsAddr is the /metrics address, or "" if metrics are disabled.
+func (n *Node) MetricsAddr() string {
+	if n.metricsLis == nil {
+		return ""
+	}
+	return n.metricsLis.Addr().String()
+}
+
+// Metrics returns the node's metrics.
+func (n *Node) Metrics() *observability.Metrics { return n.metrics }
+
+// Applier returns the node's applier.
+func (n *Node) Applier() Applier { return n.applier }
+
+// ID is this node's ID.
+func (n *Node) ID() uint64 { return n.cfg.NodeID }
+
+// Status returns the most recently published status. It is safe from any
+// goroutine; before the first loop iteration it is the zero value.
+func (n *Node) Status() raft.Status {
+	if s := n.status.Load(); s != nil {
+		return *s
+	}
+	return raft.Status{ID: n.cfg.NodeID}
+}
+
+// Step implements [transport.Handler]: it queues an inbound peer message for
+// the driver loop.
+func (n *Node) Step(ctx context.Context, m raft.Message) error {
+	select {
+	case n.inbox <- m:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.stopping:
+		return ErrStopped
+	}
+}
+
+func (n *Node) reportUnreachable(id uint64) {
+	select {
+	case n.unreach <- id:
+	default: // the loop is backed up; the next failure reports again
+	}
+}
+
+// Propose appends data to the log if this node is the leader and returns the
+// index and term it will have if it commits. It does not wait for commit; see
+// [Node.ProposeAndWait]. Errors are the core's: [raft.ErrProposalDropped] and
+// *[raft.NotLeaderError].
+func (n *Node) Propose(ctx context.Context, data []byte) (index, term uint64, err error) {
+	ctx, span := n.tracer.Start(ctx, "raft.propose", trace.WithAttributes(attribute.Int("raft.data_bytes", len(data))))
+	defer span.End()
+	res, err := n.submit(ctx, data, false)
+	span.SetAttributes(attribute.Int64("raft.index", int64(res.index)))
+	return res.index, res.term, err
+}
+
+// ProposeAndWait proposes data and blocks until it has been applied on this
+// node (which implies it committed) and returns its log index. The span
+// raft.propose covers the whole wait.
+func (n *Node) ProposeAndWait(ctx context.Context, data []byte) (uint64, error) {
+	ctx, span := n.tracer.Start(ctx, "raft.propose", trace.WithAttributes(attribute.Int("raft.data_bytes", len(data))))
+	defer span.End()
+	res, err := n.submit(ctx, data, true)
+	if err != nil {
+		span.RecordError(err)
+		return 0, err
+	}
+	span.SetAttributes(attribute.Int64("raft.index", int64(res.index)))
+	select {
+	case err := <-res.w.done:
+		if err != nil {
+			span.RecordError(err)
+		}
+		return res.index, err
+	case <-ctx.Done():
+		n.dropWaiter(res.index, res.w)
+		return 0, ctx.Err()
+	}
+}
+
+func (n *Node) submit(ctx context.Context, data []byte, wait bool) (proposalResult, error) {
+	p := &proposal{data: data, wait: wait, resp: make(chan proposalResult, 1)}
+	select {
+	case n.propCh <- p:
+	case <-ctx.Done():
+		return proposalResult{}, ctx.Err()
+	case <-n.stopping:
+		return proposalResult{}, ErrStopped
+	}
+	select {
+	case res := <-p.resp:
+		return res, res.err
+	case <-ctx.Done():
+		return proposalResult{}, ctx.Err()
+	case <-n.stopping:
+		return proposalResult{}, ErrStopped
+	}
+}
+
+func (n *Node) dropWaiter(index uint64, w *waiter) {
+	n.waitMu.Lock()
+	defer n.waitMu.Unlock()
+	if n.waiters[index] == w {
+		delete(n.waiters, index)
+	}
+}
+
+// Started is closed once [Node.Run] is serving peers and driving the core.
+func (n *Node) Started() <-chan struct{} { return n.started }
+
+// Run serves peers and drives the core until ctx is cancelled (graceful
+// shutdown, WBS 2.3.5) or a fatal error occurs. On cancellation it returns nil
+// after stopping the transport and syncing and closing the WAL.
+func (n *Node) Run(ctx context.Context) error {
+	n.srv = n.tr.NewGRPCServer()
+	registerDebug(n.srv, n)
+	go func() { _ = n.srv.Serve(n.lis) }()
+	var metricsSrv *http.Server
+	if n.metricsLis != nil {
+		metricsSrv = &http.Server{Handler: n.metrics.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() { _ = metricsSrv.Serve(n.metricsLis) }()
+	}
+	n.tr.Start(ctx)
+	close(n.started)
+	n.log.Info("node started", "component", "node", "addr", n.Addr(), "peers", len(n.cfg.Peers))
+
+	err := n.loop(ctx)
+
+	n.log.Info("node stopping", "component", "node", "err", err)
+	close(n.stopping)
+	n.tr.Close()
+	stopped := make(chan struct{})
+	go func() { n.srv.GracefulStop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		n.srv.Stop()
+		<-stopped
+	}
+	if metricsSrv != nil {
+		sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = metricsSrv.Shutdown(sctx)
+		cancel()
+	}
+	n.failWaiters(ErrStopped)
+	if cerr := n.store.Close(); err == nil { // Close fsyncs the WAL tail
+		err = cerr
+	}
+	return err
+}
+
+// loop is the Ready loop of docs/architecture.md 4.2 (D-35).
+func (n *Node) loop(ctx context.Context) error {
+	ticker := time.NewTicker(n.cfg.TickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			n.rn.Tick()
+		case m := <-n.inbox:
+			n.step(m)
+		case id := <-n.unreach:
+			n.rn.ReportUnreachable(id)
+		case p := <-n.propCh:
+			n.handleProposal(p)
+		}
+		n.absorb()
+		if err := n.processReady(); err != nil {
+			return err
+		}
+	}
+}
+
+func (n *Node) step(m raft.Message) {
+	if err := n.rn.Step(m); err != nil {
+		n.log.Debug("step failed", "component", "raft", "type", m.Type.String(), "from", m.From, "err", err)
+	}
+}
+
+// absorb takes already-queued events without blocking, so a burst of proposals
+// or messages shares one Ready and one fsync.
+func (n *Node) absorb() {
+	for range maxBatch {
+		select {
+		case m := <-n.inbox:
+			n.step(m)
+		case p := <-n.propCh:
+			n.handleProposal(p)
+		case id := <-n.unreach:
+			n.rn.ReportUnreachable(id)
+		default:
+			return
+		}
+	}
+}
+
+func (n *Node) handleProposal(p *proposal) {
+	idx, term, err := n.rn.Propose(p.data)
+	res := proposalResult{index: idx, term: term, err: err}
+	if err == nil && p.wait {
+		// Registered inside the loop, before any Ready can apply the entry.
+		res.w = &waiter{term: term, done: make(chan error, 1)}
+		n.waitMu.Lock()
+		n.waiters[idx] = res.w
+		n.waitMu.Unlock()
+	}
+	p.resp <- res
+}
+
+func (n *Node) processReady() error {
+	for n.rn.HasReady() {
+		rd := n.rn.Ready()
+		// (1) Persist before anything is acknowledged (D-33, storage-design 2.1).
+		if err := n.persist(rd); err != nil {
+			return fmt.Errorf("persist: %w", err)
+		}
+		// (2) Only now send messages.
+		n.tr.Send(rd.Messages)
+		// (3) Apply committed entries in order (D-04).
+		if err := n.apply(rd.CommittedEntries); err != nil {
+			return fmt.Errorf("apply: %w", err)
+		}
+		n.rn.Advance(rd)
+		n.publish(rd)
+	}
+	return nil
+}
+
+// persist appends entries and HardState, then fsyncs once if rd.MustSync.
+func (n *Node) persist(rd raft.Ready) error {
+	if err := n.store.Append(rd.Entries); err != nil {
+		return err
+	}
+	if !rd.HardState.IsEmpty() {
+		if err := n.store.SetHardState(rd.HardState); err != nil {
+			return err
+		}
+	}
+	if !rd.MustSync {
+		return nil
+	}
+	_, span := n.tracer.Start(context.Background(), "wal.fsync",
+		trace.WithAttributes(attribute.Int("wal.entries", len(rd.Entries))))
+	start := time.Now()
+	err := n.store.Sync()
+	n.metrics.ObserveFsync(time.Since(start), err)
+	if err != nil {
+		span.RecordError(err)
+	}
+	span.End()
+	return err
+}
+
+func (n *Node) apply(ents []raft.Entry) error {
+	if len(ents) == 0 {
+		return nil
+	}
+	_, span := n.tracer.Start(context.Background(), "apply", trace.WithAttributes(
+		attribute.Int64("raft.first_index", int64(ents[0].Index)),
+		attribute.Int64("raft.last_index", int64(ents[len(ents)-1].Index)),
+		attribute.Int("raft.entries", len(ents))))
+	err := n.applier.Apply(ents)
+	if err != nil {
+		span.RecordError(err)
+	}
+	span.End()
+	if err != nil {
+		return err
+	}
+	n.waitMu.Lock()
+	defer n.waitMu.Unlock()
+	if len(n.waiters) == 0 {
+		return nil
+	}
+	for _, e := range ents {
+		if w, ok := n.waiters[e.Index]; ok {
+			delete(n.waiters, e.Index)
+			if w.term == e.Term {
+				w.done <- nil
+			} else {
+				w.done <- ErrProposalLost
+			}
+		}
+	}
+	return nil
+}
+
+func (n *Node) failWaiters(err error) {
+	n.waitMu.Lock()
+	defer n.waitMu.Unlock()
+	for idx, w := range n.waiters {
+		w.done <- err
+		delete(n.waiters, idx)
+	}
+}
+
+// publish refreshes the shared status, metrics and role-change logs after a
+// Ready has been fully handled.
+func (n *Node) publish(rd raft.Ready) {
+	st := n.rn.Status()
+	n.status.Store(&st)
+	n.term.Store(st.Term)
+	n.metrics.ObserveStatus(st)
+	if rd.SoftState != nil {
+		n.log.Info("raft state changed", "component", "raft",
+			"state", rd.SoftState.State.String(), "leader", rd.SoftState.Lead, "commit", st.Commit)
+	}
+}
