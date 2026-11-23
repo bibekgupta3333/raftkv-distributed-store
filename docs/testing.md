@@ -141,6 +141,13 @@ Using `pgregory.net/rapid` (D-43), which shrinks failing inputs automatically.
 - kind runs on one machine, so chaos runs give correctness evidence only, never timing numbers.
 - Kubernetes-specific checks: a killed pod comes back with the same identity and PVC, peers re-resolve its DNS name,
   and readiness probes (D-46) don't flap during elections.
+- Pieces: `make kind-up` / `make kind-down` (cluster `raftkv`, image `raftkvd:kind`, overlay
+  `deploy/k8s/overlays/kind`), `make chaos-up` (kind-up plus the pinned Chaos Mesh chart), `make chaos-apply
+  FAULT=<name>` for one manifest from `test/chaos/manifests/` (`pod-kill`, `pod-kill-two`, `network-partition`,
+  `network-delay`, `network-loss`), `make chaos-clear`, and `make chaos-down` (deletes the cluster).
+- The node ID is 1 + the pod ordinal (`--node-id-from-ordinal=$(POD_NAME)`), so a restarted pod keeps its ID and PVC.
+  A pod whose PVC is lost must not come back under the same ID (D-32); replacing a disk waits for membership
+  changes (M6).
 
 ---
 
