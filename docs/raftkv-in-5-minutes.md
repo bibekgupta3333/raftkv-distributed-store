@@ -200,6 +200,12 @@ Events
 - **Read-only, polling only.** The observer calls nothing except `Cluster.Status`, polling at a fixed 500 ms (flag-configurable), and needs no server changes. Events are inferred by diffing polls, so very short blips (< 500 ms) can be missed. Grafana keeps metrics history and alerting; the observer gives a live, per-node picture of Raft state that dashboards built on scraped metrics show poorly.
 - **One Go binary, no build step.** It embeds the page with `embed` and pushes snapshots over SSE. It runs as a 1-replica k8s Deployment and as a docker-compose service in the e2e stack.
 - **No auth in v1.** It binds to localhost; reach it in k8s with `kubectl port-forward`.
+- **Running it.** `make cluster-up` starts it with the compose cluster at http://127.0.0.1:18080 (Grafana, with
+  the provisioned "RaftKV overview" dashboard, at http://127.0.0.1:13000). Against any cluster:
+  `raftkv-observer --endpoints=name=host:port,... --listen=127.0.0.1:18080 --interval=500ms`. `/api/state` returns
+  the current view as JSON.
+- **Lag and writes/s.** A node's lag is the leader's last log index minus that node's `match_index`. Writes/s is the
+  leader's applied-index delta, so it also counts no-op entries and (until ReadIndex, M4) linearizable reads.
 
 
 ---

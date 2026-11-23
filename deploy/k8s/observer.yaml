@@ -1,0 +1,49 @@
+# raftkv-observer as a 1-replica Deployment (D-48, WBS 7.2.3). Read-only, no
+# auth: there is deliberately no Service of type NodePort/LoadBalancer and no
+# Ingress. Reach it with
+#   kubectl port-forward deploy/raftkv-observer 18080:8080
+# and open http://127.0.0.1:18080.
+#
+# Assumes the StatefulSet from D-16: pods raftkv-0..4 behind the headless
+# Service raftkv-peer, serving gRPC (the client API shares the peer listener
+# until M4) on port 7000, built from the same image, which also carries the
+# raftkv-observer binary. Adjust --endpoints and the image if the StatefulSet
+# uses other names or ports.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: raftkv-observer
+  labels: {app.kubernetes.io/name: raftkv-observer, app.kubernetes.io/part-of: raftkv}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: raftkv-observer}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: raftkv-observer, app.kubernetes.io/part-of: raftkv}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
+      containers:
+        - name: observer
+          image: raftkvd:e2e
+          imagePullPolicy: IfNotPresent
+          command: [/usr/local/bin/raftkv-observer]
+          args:
+            - --listen=:8080
+            - --interval=500ms
+            - --endpoints=raftkv-0=raftkv-0.raftkv-peer:7000,raftkv-1=raftkv-1.raftkv-peer:7000,raftkv-2=raftkv-2.raftkv-peer:7000,raftkv-3=raftkv-3.raftkv-peer:7000,raftkv-4=raftkv-4.raftkv-peer:7000
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
