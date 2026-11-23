@@ -18,12 +18,15 @@
 //	node.Tick()                  // on a timer, or Step/Propose on input
 //	if node.HasReady() {
 //	    rd := node.Ready()
+//	    // 0. install rd.Snapshot, if any (D-14)
 //	    // 1. persist rd.Entries and rd.HardState (fsync if rd.MustSync)
 //	    // 2. only then send rd.Messages
 //	    // 3. apply rd.CommittedEntries in order
 //	    // 4. hand rd.ReadStates to waiting reads (D-05)
 //	    node.Advance(rd)
 //	}
+//	// for each MsgSnap sent: stream the snapshot, then
+//	node.ReportSnapshot(to, failed)
 //
 // A node must never acknowledge state it has not made durable, so step 2 comes
 // after step 1. No other mutating RawNode method may be called between Ready
@@ -34,8 +37,8 @@
 //
 // The API leaves room for later milestones without changing its shape:
 // ReadIndex (M4, D-05) added [RawNode.ReadIndex] and Ready.ReadStates, with
-// the round context carried by heartbeats (see read.go); snapshots (M5)
-// populate Ready.Snapshot, add a Snapshot progress state and a real
-// [Storage.Snapshot]; membership changes (M6) use [EntryConfChange] and
+// the round context carried by heartbeats (see read.go); snapshots (M5, D-14)
+// added [MsgSnap], Ready.Snapshot, the Snapshot progress state and
+// [RawNode.ReportSnapshot]; membership changes (M6) use [EntryConfChange] and
 // per-node voter/learner sets next to Config.Peers.
 package raft

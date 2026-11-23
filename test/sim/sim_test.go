@@ -22,7 +22,7 @@ import (
 var (
 	flagSeeds    = flag.Int("seeds", 25, "number of seeds to run")
 	flagStart    = flag.Uint64("start", 1, "first seed")
-	flagFaults   = flag.String("faults", "full", "fault profile: none, lossy, partition, crash, full")
+	flagFaults   = flag.String("faults", "full", "fault profile: none, lossy, partition, crash, full, lease, snapshot")
 	flagTraceDir = flag.String("tracedir", "", "directory for failing-seed traces (default: temp dir)")
 )
 

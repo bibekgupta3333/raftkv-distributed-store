@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 )
@@ -303,8 +304,10 @@ func (r *raft) sendAppend(to uint64, sendIfEmpty bool) bool {
 		ents, err = r.log.entries(pr.Next, r.cfg.MaxMsgBytes)
 	}
 	if err != nil {
-		// The needed prefix is compacted. Sending a snapshot arrives with
-		// M5 (D-14); until then the follower simply cannot be served.
+		if errors.Is(err, ErrCompacted) {
+			// The follower needs entries we compacted away (D-14).
+			return r.sendSnapshot(to, pr)
+		}
 		return false
 	}
 	if len(ents) == 0 && !sendIfEmpty {
@@ -323,6 +326,49 @@ func (r *raft) sendAppend(to uint64, sendIfEmpty bool) bool {
 	}
 	r.send(m)
 	return true
+}
+
+// sendSnapshot asks the driver to send the newest local snapshot to a follower
+// whose next index was compacted away (D-14) and pauses appends to it until
+// the transfer is reported (ReportSnapshot) or acknowledged. It reports whether
+// a message was sent.
+func (r *raft) sendSnapshot(to uint64, pr *Progress) bool {
+	snap, err := r.log.snapshot()
+	if err != nil {
+		if errors.Is(err, ErrSnapshotTemporarilyUnavailable) {
+			return false
+		}
+		panic(fmt.Sprintf("raft: reading snapshot: %v", err))
+	}
+	if snap.IsEmpty() || snap.Index+1 < r.log.firstIndex() {
+		// The snapshot does not cover the compacted prefix: the driver
+		// broke the D-30 rule. Nothing can be sent; the driver must create
+		// a newer snapshot.
+		return false
+	}
+	m := r.newMsg(MsgSnap, to)
+	m.Snapshot = &snap
+	pr.becomeSnapshot(snap.Index)
+	r.send(m)
+	return true
+}
+
+// reportSnapshot implements RawNode.ReportSnapshot.
+func (r *raft) reportSnapshot(id uint64, failed bool) {
+	if r.state != StateLeader {
+		return
+	}
+	pr, ok := r.prs[id]
+	if !ok || id == r.id || pr.State != ProgressSnapshot {
+		return
+	}
+	if failed {
+		pr.PendingSnapshot = 0 // D-14: no resume; the next attempt starts over
+	}
+	pr.becomeProbe()
+	// Wait for the next heartbeat response before probing, so a follower
+	// that is still installing is not flooded.
+	pr.probeSent = true
 }
 
 // ---- proposals ----
@@ -394,7 +440,7 @@ func (r *raft) step(m Message) {
 		case m.Type == MsgPreVoteResp && !m.Reject:
 			// A grant carries the prospective term; we adopt it only when
 			// the pre-candidate converts to a real candidate.
-		case m.Type == MsgApp || m.Type == MsgHeartbeat:
+		case m.Type == MsgApp || m.Type == MsgHeartbeat || m.Type == MsgSnap:
 			r.becomeFollower(m.Term, m.From) // T1
 		default:
 			r.becomeFollower(m.Term, None) // T1
@@ -402,7 +448,7 @@ func (r *raft) step(m Message) {
 	case m.Term < r.term:
 		// T2: drop, but let a stale leader (or pre-candidate) learn our term.
 		switch {
-		case (r.cfg.CheckQuorum || r.cfg.PreVote) && (m.Type == MsgApp || m.Type == MsgHeartbeat):
+		case (r.cfg.CheckQuorum || r.cfg.PreVote) && (m.Type == MsgApp || m.Type == MsgHeartbeat || m.Type == MsgSnap):
 			r.send(r.newMsg(MsgAppResp, m.From))
 		case m.Type == MsgPreVote:
 			resp := r.newMsg(MsgPreVoteResp, m.From)
@@ -466,9 +512,17 @@ func (r *raft) stepLeader(m Message) {
 		if !pr.maybeUpdate(m.Index) {
 			return
 		}
-		if pr.State == ProgressProbe {
+		switch pr.State {
+		case ProgressProbe:
 			pr.becomeReplicate()
-		} else {
+		case ProgressSnapshot:
+			// The follower installed the snapshot (or already had what it
+			// covers). Once the log can serve it again, replicate (D-14).
+			if pr.Match+1 >= r.log.firstIndex() {
+				pr.becomeProbe()
+				pr.becomeReplicate()
+			}
+		default:
 			pr.inflights.freeLE(m.Index)
 		}
 		if r.maybeCommit() {
@@ -506,6 +560,19 @@ func (r *raft) handleAppendReject(pr *Progress, m Message) {
 	if m.LogTerm > 0 {
 		next, _ = r.log.findConflictByTerm(m.RejectHint, m.LogTerm)
 	}
+	if pr.State != ProgressSnapshot && pr.Match > 0 && m.Index == pr.Match && m.RejectHint < pr.Match {
+		// The follower rejects an append right at the index it already
+		// acknowledged (responses arrive in order, so this is not an old
+		// rejection): it lost entries it had made durable, i.e. its disk
+		// was wiped. Forget its match so it is probed (and sent a
+		// snapshot) from scratch. Lowering Match never uncommits anything;
+		// it only stops counting this follower until it catches up again.
+		pr.Match = 0
+		pr.becomeProbe()
+		pr.Next = max(next+1, 1)
+		r.sendAppend(m.From, true)
+		return
+	}
 	if !pr.maybeDecrTo(m.Index, next) {
 		return // stale rejection
 	}
@@ -531,7 +598,7 @@ func (r *raft) stepCandidate(m Message) {
 		want = MsgPreVoteResp
 	}
 	switch m.Type {
-	case MsgApp, MsgHeartbeat:
+	case MsgApp, MsgHeartbeat, MsgSnap:
 		// A leader exists at our term (or higher, handled in step).
 		r.becomeFollower(r.term, m.From)
 		r.stepFollower(m)
@@ -550,11 +617,53 @@ func (r *raft) stepFollower(m Message) {
 	case MsgHeartbeat:
 		r.electionElapsed = 0
 		r.lead = m.From
-		r.log.commitTo(m.Commit)
+		if m.Commit <= r.log.lastIndex() {
+			r.log.commitTo(m.Commit)
+		}
+		// Otherwise the leader believes we hold entries we do not (our disk
+		// was wiped); keep our commit until appends repair the log.
 		resp := r.newMsg(MsgHeartbeatResp, m.From)
 		resp.Context = m.Context
 		r.send(resp)
+	case MsgSnap:
+		r.electionElapsed = 0
+		r.lead = m.From
+		r.handleSnapshot(m)
 	}
+}
+
+// handleSnapshot is the follower side of InstallSnapshot (D-14,
+// system-design 5.2). It answers with a MsgAppResp carrying the follower's new
+// match index: the snapshot index if it was accepted, else the commit index.
+func (r *raft) handleSnapshot(m Message) {
+	if m.Snapshot == nil {
+		return
+	}
+	resp := r.newMsg(MsgAppResp, m.From)
+	if r.restore(*m.Snapshot) {
+		resp.Index = r.log.lastIndex()
+	} else {
+		resp.Index = r.log.committed
+	}
+	r.send(resp)
+}
+
+// restore decides whether to install s. A snapshot at or below the commit
+// index is stale and ignored: installing it would roll the state machine
+// back. If the log already holds the snapshot's last entry (same index and
+// term), the log matches up to there (Log Matching), so it is kept and only
+// the commit index moves (Raft section 7). Otherwise the whole log is
+// replaced and the driver installs the snapshot from the next Ready.
+func (r *raft) restore(s Snapshot) bool {
+	if s.Index <= r.log.committed {
+		return false
+	}
+	if r.log.matchTerm(s.Index, s.Term) {
+		r.log.commitTo(s.Index)
+		return false
+	}
+	r.log.installSnapshot(s)
+	return true
 }
 
 // handleAppendEntries is the follower side of AppendEntries (system-design 2.2).
@@ -583,6 +692,9 @@ func (r *raft) handleAppendEntries(m Message) {
 
 // advance is called after the driver fully handled rd.
 func (r *raft) advance(rd Ready) {
+	if rd.Snapshot != nil {
+		r.log.stableSnapTo(rd.Snapshot.Index)
+	}
 	if n := len(rd.Entries); n > 0 {
 		last := rd.Entries[n-1]
 		r.log.stableTo(last.Index, last.Term)

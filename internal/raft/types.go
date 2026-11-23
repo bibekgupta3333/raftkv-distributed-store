@@ -95,8 +95,7 @@ type SoftState struct {
 
 // MessageType is the kind of a peer message.
 //
-// Types for snapshots (M5) and leadership transfer (M6) will be appended after
-// the existing ones.
+// Types for leadership transfer (M6) will be appended after the existing ones.
 type MessageType uint8
 
 const (
@@ -129,6 +128,12 @@ const (
 	// leader (or lost leadership before confirming). It never changes the
 	// receiver's term or role.
 	MsgReadIndexResp
+	// MsgSnap is InstallSnapshot (D-14): the leader tells a follower whose
+	// next index was compacted away to replace its state with Snapshot. The
+	// core carries only the metadata; the driver streams the snapshot files
+	// out of band and reports the outcome with [RawNode.ReportSnapshot]. The
+	// follower answers with a MsgAppResp whose Index is its new match index.
+	MsgSnap
 )
 
 func (t MessageType) String() string {
@@ -138,6 +143,7 @@ func (t MessageType) String() string {
 		MsgVote: "MsgVote", MsgVoteResp: "MsgVoteResp",
 		MsgPreVote: "MsgPreVote", MsgPreVoteResp: "MsgPreVoteResp",
 		MsgReadIndex: "MsgReadIndex", MsgReadIndexResp: "MsgReadIndexResp",
+		MsgSnap: "MsgSnap",
 	}
 	if int(t) < len(names) && names[t] != "" {
 		return names[t]
@@ -145,7 +151,7 @@ func (t MessageType) String() string {
 	return fmt.Sprintf("MessageType(%d)", uint8(t))
 }
 
-func (t MessageType) valid() bool { return t >= MsgApp && t <= MsgReadIndexResp }
+func (t MessageType) valid() bool { return t >= MsgApp && t <= MsgSnap }
 
 // Message is a peer-to-peer message. It is a plain Go value; the transport
 // (M2) is responsible for encoding it. Fields not used by a given Type are
@@ -176,14 +182,23 @@ type Message struct {
 	// confirmed and is echoed by MsgHeartbeatResp; on MsgReadIndex and
 	// MsgReadIndexResp it is the caller's request context (D-05).
 	Context []byte
+
+	// Snapshot is the snapshot a MsgSnap asks the receiver to install
+	// (D-14). Nil on every other type.
+	Snapshot *Snapshot
 }
 
-// Snapshot describes a compacted prefix of the log. Only the metadata exists
-// until M5 (D-14); the payload is handled outside the core.
+// Snapshot describes the state machine as of log index Index, whose entry has
+// term Term (D-14). The core handles only this metadata; the state itself (a
+// Pebble checkpoint in the real node) lives outside the core, which stays free
+// of I/O (D-01). Membership joins the metadata with M6.
 type Snapshot struct {
 	Index uint64
 	Term  uint64
 }
+
+// IsEmpty reports whether s is the zero Snapshot (no snapshot).
+func (s Snapshot) IsEmpty() bool { return s.Index == 0 }
 
 // Ready is everything the driver must handle after the last Advance. Slices
 // are owned by the core's view of the log and must not be modified.
@@ -208,9 +223,14 @@ type Ready struct {
 	// a successful one once the applied index reaches its Index; it needs
 	// nothing persisted first.
 	ReadStates []ReadState
-	// MustSync is true when Term/Vote changed or Entries is non-empty.
+	// MustSync is true when Term/Vote changed, Entries is non-empty or a
+	// Snapshot must be installed.
 	MustSync bool
-	// Snapshot is reserved for M5 and is always nil today.
+	// Snapshot, when non-nil, is a snapshot received from the leader that
+	// the driver must install before persisting Entries (D-14,
+	// storage-design 4.4): replace the state machine with it, reset the
+	// stable log so it starts after Snapshot.Index, and make both durable.
+	// CommittedEntries never include entries at or below it.
 	Snapshot *Snapshot
 }
 
@@ -231,6 +251,12 @@ var (
 	ErrCompacted = errors.New("raft: requested index is unavailable due to compaction")
 	// ErrUnavailable means the requested index is beyond the stored entries.
 	ErrUnavailable = errors.New("raft: requested entry at index is unavailable")
+	// ErrSnapOutOfDate means a snapshot is not newer than the one the
+	// storage already holds.
+	ErrSnapOutOfDate = errors.New("raft: requested snapshot is older than the existing snapshot")
+	// ErrSnapshotTemporarilyUnavailable means the storage has no snapshot
+	// to send right now; the leader tries again later.
+	ErrSnapshotTemporarilyUnavailable = errors.New("raft: snapshot is temporarily unavailable")
 )
 
 // NotLeaderError is returned by Propose on a follower that knows the leader.

@@ -56,6 +56,7 @@ type Cluster struct {
 	Faults  *FaultLog
 	conns   map[int]*grpc.ClientConn
 	http    *http.Client
+	env     []string // extra compose environment (StartEnv)
 }
 
 // repoRoot finds the directory holding go.mod.
@@ -100,6 +101,13 @@ func ContainerName(id int) string { return fmt.Sprintf("raftkv-node%d", id) }
 // (`make e2e-image`).
 func Start(t testing.TB, name string) *Cluster {
 	t.Helper()
+	return StartEnv(t, name)
+}
+
+// StartEnv is Start with extra compose environment ("KEY=value"), e.g. a low
+// RAFTKV_SNAPSHOT_ENTRIES for the snapshot tests.
+func StartEnv(t testing.TB, name string, env ...string) *Cluster {
+	t.Helper()
 	root := repoRoot()
 	c := &Cluster{
 		t:       t,
@@ -109,6 +117,7 @@ func Start(t testing.TB, name string) *Cluster {
 		OutDir:  filepath.Join(envOr("E2E_OUT", filepath.Join(root, "out", "e2e")), name),
 		conns:   map[int]*grpc.ClientConn{},
 		http:    &http.Client{Timeout: 2 * time.Second},
+		env:     env,
 	}
 	if err := os.MkdirAll(c.OutDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -126,7 +135,7 @@ func Start(t testing.TB, name string) *Cluster {
 
 func (c *Cluster) composeCmd(args ...string) (string, error) {
 	cmd := exec.Command("docker", append([]string{"compose", "-f", c.compose}, args...)...)
-	cmd.Env = append(os.Environ(), "IMAGE="+c.image)
+	cmd.Env = append(append(os.Environ(), "IMAGE="+c.image), c.env...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -397,6 +406,42 @@ func (c *Cluster) MustPropose(data string, ids ...int) uint64 {
 		c.t.Fatal(err)
 	}
 	return idx
+}
+
+// Metric scrapes one numeric metric (without labels) from node id's /metrics.
+func (c *Cluster) Metric(id int, name string) (float64, error) {
+	resp, err := c.http.Get(metricsURL(id))
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) == 2 && f[0] == name {
+			return strconv.ParseFloat(f[1], 64)
+		}
+	}
+	return 0, fmt.Errorf("node %d: metric %s not found", id, name)
+}
+
+// StateHashes runs `raftkvctl debug state-hash` against each node's volume
+// (WBS 3.1.8) and returns its output line ("applied_index=N state_hash=H").
+// The cluster must be stopped (StopAll).
+func (c *Cluster) StateHashes() map[int]string {
+	c.t.Helper()
+	out := map[int]string{}
+	for id := 1; id <= NumNodes; id++ {
+		b, err := exec.Command("docker", "run", "--rm",
+			"-v", fmt.Sprintf("raftkv_data%d:/data", id),
+			"--entrypoint", "/usr/local/bin/raftkvctl", c.image,
+			"debug", "state-hash", "-data-dir", "/data").CombinedOutput()
+		if err != nil {
+			c.t.Fatalf("state-hash node %d: %v\n%s", id, err, b)
+		}
+		out[id] = strings.TrimSpace(string(b))
+	}
+	return out
 }
 
 // --- WAL inspection -------------------------------------------------------

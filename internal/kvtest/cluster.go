@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -48,6 +49,12 @@ type Options struct {
 	// LeaseReads turns on lease reads (D-25). With the fixed 100 ms margin
 	// the lease is only positive for a Tick above about 13 ms; use 50 ms.
 	LeaseReads bool
+	// SnapshotEntries, SnapshotRetainEntries and WALSegmentBytes override
+	// the snapshot policy (D-14, D-30) when non-zero; tests use small
+	// values so snapshots and WAL trimming happen within seconds.
+	SnapshotEntries       uint64
+	SnapshotRetainEntries uint64
+	WALSegmentBytes       int64
 }
 
 // New starts n nodes (IDs 1..n) and registers cleanup with tb.
@@ -89,6 +96,11 @@ func New(tb testing.TB, n int, o Options) *Cluster {
 		cfg.DataDir = filepath.Join(dir, fmt.Sprint("n", id))
 		cfg.TickInterval = o.Tick
 		cfg.LeaseReads = o.LeaseReads
+		if o.SnapshotEntries > 0 {
+			cfg.SnapshotEntries = o.SnapshotEntries
+			cfg.SnapshotRetainEntries = o.SnapshotRetainEntries
+		}
+		cfg.WALSegmentBytes = o.WALSegmentBytes
 		for _, to := range c.ids {
 			addr := c.real[to]
 			if to != id {
@@ -168,6 +180,20 @@ func (c *Cluster) Stop(id uint64) {
 		}
 	case <-time.After(20 * time.Second):
 		c.tb.Fatalf("node %d did not stop", id)
+	}
+}
+
+// Wipe deletes a stopped node's whole data directory, as if its disk were
+// replaced. Restarted, it comes back empty under the same ID and catches up
+// from the leader (by snapshot once the log is compacted, D-14). Real
+// clusters re-add such a node as a learner with a new ID (D-32, M6).
+func (c *Cluster) Wipe(id uint64) {
+	c.tb.Helper()
+	if c.Node(id) != nil {
+		c.tb.Fatalf("Wipe(%d): node is running", id)
+	}
+	if err := os.RemoveAll(c.cfgs[id].DataDir); err != nil {
+		c.tb.Fatal(err)
 	}
 }
 

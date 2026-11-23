@@ -23,6 +23,7 @@ import (
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/lease"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/observability"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/snapshot"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/transport"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/wal"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/walstore"
@@ -72,6 +73,17 @@ type Options struct {
 	// WALFS and OnFatal are passed to the WAL (fault injection in tests, D-33).
 	WALFS   wal.FS
 	OnFatal func(error)
+	// Snapshots enables snapshots and log compaction (D-14, D-30). It must
+	// manage the same state machine as Applier. nil (the default, and the
+	// only choice with a MemoryApplier) keeps the whole log.
+	Snapshots *snapshot.Manager
+}
+
+// AppliedTermer is implemented by appliers that know the term of the entry at
+// their applied index (the Pebble applier). Recovery uses it to detect a
+// snapshot install that crashed before its WAL marker (storage-design 5).
+type AppliedTermer interface {
+	AppliedTerm() uint64
 }
 
 // Observer watches the node from the driver loop. Methods run on the loop
@@ -103,12 +115,20 @@ type Node struct {
 	metricsLis net.Listener
 	srv        *grpc.Server
 
-	inbox    chan raft.Message
-	propCh   chan *proposal
-	readCh   chan readRequest
-	unreach  chan uint64
-	pingCh   chan chan struct{} // /livez pings (D-46)
-	stopping chan struct{}
+	inbox  chan raft.Message
+	propCh chan *proposal
+	readCh chan readRequest
+
+	// Snapshots (snapshot.go, D-14).
+	snaps          *snapshot.Manager
+	installCh      chan *installReq
+	snapReportCh   chan snapReport
+	pendingInstall *installReq // stepped, waiting for its Ready
+	installed      *installReq // installed in the current Ready
+	needSnapshot   bool        // take a local snapshot at the next chance
+	unreach        chan uint64
+	pingCh         chan chan struct{} // /livez pings (D-46)
+	stopping       chan struct{}
 
 	observer Observer
 	services []func(grpc.ServiceRegistrar)
@@ -161,21 +181,24 @@ func New(cfg Config, opts Options) (*Node, error) {
 	}
 
 	n := &Node{
-		cfg:       cfg,
-		inbox:     make(chan raft.Message, inboxSize),
-		propCh:    make(chan *proposal, inboxSize),
-		readCh:    make(chan readRequest, inboxSize),
-		readWait:  make(map[string]chan readResult),
-		appliedCh: make(chan struct{}),
-		epoch:     time.Now(),
-		unreach:   make(chan uint64, 64),
-		pingCh:    make(chan chan struct{}),
-		stopping:  make(chan struct{}),
-		started:   make(chan struct{}),
-		waiters:   make(map[uint64]*waiter),
-		applier:   opts.Applier,
-		observer:  opts.Observer,
-		metrics:   opts.Metrics,
+		cfg:          cfg,
+		inbox:        make(chan raft.Message, inboxSize),
+		propCh:       make(chan *proposal, inboxSize),
+		readCh:       make(chan readRequest, inboxSize),
+		readWait:     make(map[string]chan readResult),
+		appliedCh:    make(chan struct{}),
+		epoch:        time.Now(),
+		unreach:      make(chan uint64, 64),
+		pingCh:       make(chan chan struct{}),
+		snaps:        opts.Snapshots,
+		installCh:    make(chan *installReq),
+		snapReportCh: make(chan snapReport, 64),
+		stopping:     make(chan struct{}),
+		started:      make(chan struct{}),
+		waiters:      make(map[uint64]*waiter),
+		applier:      opts.Applier,
+		observer:     opts.Observer,
+		metrics:      opts.Metrics,
 	}
 	if n.applier == nil {
 		n.applier = NewMemoryApplier()
@@ -207,16 +230,26 @@ func New(cfg Config, opts Options) (*Node, error) {
 
 	store, err := walstore.Open(filepath.Join(cfg.DataDir, WALDir), wal.Options{
 		FS: opts.WALFS, ClusterID: cfg.ClusterID, MemberID: cfg.NodeID, OnFatal: opts.OnFatal,
+		SegmentSize: cfg.WALSegmentBytes,
 	})
 	if err != nil {
 		return nil, err
 	}
 	n.store = store
+	if n.snaps != nil {
+		if l := n.snaps.Latest(); l != nil {
+			store.SetSnapshot(raft.Snapshot{Index: l.GetLastIncludedIndex(), Term: l.GetLastIncludedTerm()})
+		}
+	}
 	if store.TruncatedBytes > 0 {
 		n.log.Warn("cut a torn WAL tail", "component", "wal", "bytes", store.TruncatedBytes) // D-33
 	}
 
 	if err := n.reconcileApplied(); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	if err := n.ensureSnapshotCoversLog(); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
@@ -240,6 +273,7 @@ func New(cfg Config, opts Options) (*Node, error) {
 		Logger:   observability.Component(n.log, "transport"),
 		Observer: n.metrics, MaxMsgBytes: cfg.MaxMsgBytes,
 		OnUnreachable: n.reportUnreachable,
+		Snapshots:     n.snapshotHandler(),
 	}); err != nil {
 		_ = store.Close()
 		return nil, err
@@ -288,12 +322,36 @@ func (n *Node) reconcileApplied() error {
 	if applied+1 < first {
 		return fmt.Errorf("%w: applied %d but the WAL starts at %d (D-30 violated)", ErrAppliedOutsideLog, applied, first)
 	}
-	if applied > last {
-		return fmt.Errorf("%w: applied %d but the WAL ends at %d (committed entries lost)", ErrAppliedOutsideLog, applied, last)
-	}
 	hs, err := n.store.InitialState()
 	if err != nil {
 		return err
+	}
+	if at, ok := n.applier.(AppliedTermer); ok && n.snaps != nil {
+		// storage-design 5 step 6: a snapshot was installed (sm/CURRENT
+		// swapped) but the crash came before its WAL marker. The state
+		// machine is ahead of the log, or disagrees with it at A: the log
+		// must restart after (A, At), Raft section 7.
+		term, terr := n.store.Term(applied)
+		if applied > last || terr != nil || term != at.AppliedTerm() {
+			s := raft.Snapshot{Index: applied, Term: at.AppliedTerm()}
+			n.log.Warn("snapshot install finished by recovery: writing the missing WAL marker",
+				"component", "snapshot", "index", s.Index, "term", s.Term)
+			if err := n.store.ApplySnapshot(s); err != nil {
+				return err
+			}
+			if s.Term > hs.Term {
+				// Never hold entries newer than the current term.
+				hs.Term, hs.Vote = s.Term, raft.None
+			}
+			hs.Commit = max(hs.Commit, applied)
+			if err := n.store.SetHardState(hs); err != nil {
+				return err
+			}
+			return n.store.Sync()
+		}
+	}
+	if applied > last {
+		return fmt.Errorf("%w: applied %d but the WAL ends at %d (committed entries lost)", ErrAppliedOutsideLog, applied, last)
 	}
 	if hs.Commit < applied {
 		hs.Commit = applied
@@ -303,6 +361,38 @@ func (n *Node) reconcileApplied() error {
 		return n.store.Sync()
 	}
 	return nil
+}
+
+// ensureSnapshotCoversLog takes a local snapshot at start-up if the newest one
+// does not cover the log's compaction point, so this node can always serve a
+// follower that needs compacted entries (raft.Storage.Snapshot contract). That
+// happens after recovery finished an install (the received copy became the
+// live database) or if snap/ was lost.
+func (n *Node) ensureSnapshotCoversLog() error {
+	if n.snaps == nil {
+		return nil
+	}
+	first, err := n.store.FirstIndex()
+	if err != nil {
+		return err
+	}
+	if first <= 1 {
+		return nil
+	}
+	if s, _ := n.store.Snapshot(); s.Index+1 >= first {
+		return nil
+	}
+	n.needSnapshot = true
+	return n.maybeSnapshot()
+}
+
+// snapshotHandler is the transport's snapshot handler, or nil when snapshots
+// are off.
+func (n *Node) snapshotHandler() transport.SnapshotHandler {
+	if n.snaps == nil {
+		return nil
+	}
+	return n
 }
 
 // RegisterService lets a service (the KV API) register on the node's gRPC
@@ -350,6 +440,10 @@ func (n *Node) Status() raft.Status {
 // Step implements [transport.Handler]: it queues an inbound peer message for
 // the driver loop.
 func (n *Node) Step(ctx context.Context, m raft.Message) error {
+	if m.Type == raft.MsgSnap {
+		// Snapshots arrive only through ReceiveSnapshot, with their files.
+		return fmt.Errorf("node: MsgSnap without a snapshot stream")
+	}
 	select {
 	case n.inbox <- m:
 		return nil
@@ -522,10 +616,20 @@ func (n *Node) loop(ctx context.Context) error {
 			continue
 		case rq := <-n.readCh:
 			n.handleRead(rq)
+		case req := <-n.installCh:
+			n.handleInstall(req)
+		case r := <-n.snapReportCh:
+			n.rn.ReportSnapshot(r.to, r.failed)
 		}
 		n.absorb()
 		if err := n.processReady(); err != nil {
 			return err
+		}
+		if n.snaps != nil {
+			n.finishInstall()
+			if err := n.maybeSnapshot(); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -549,6 +653,8 @@ func (n *Node) absorb() {
 			n.handleRead(rq)
 		case id := <-n.unreach:
 			n.rn.ReportUnreachable(id)
+		case r := <-n.snapReportCh:
+			n.rn.ReportSnapshot(r.to, r.failed)
 		default:
 			return
 		}
@@ -591,6 +697,11 @@ func (n *Node) processReady() error {
 
 // persist appends entries and HardState, then fsyncs once if rd.MustSync.
 func (n *Node) persist(rd raft.Ready) error {
+	if rd.Snapshot != nil {
+		if err := n.installSnapshot(*rd.Snapshot); err != nil {
+			return err
+		}
+	}
 	if err := n.store.Append(rd.Entries); err != nil {
 		return err
 	}

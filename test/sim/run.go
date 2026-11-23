@@ -26,6 +26,9 @@ func (r Result) String() string {
 		r.Stats.Committed, r.Stats.Acked, r.Stats.Accepted, r.Stats.ReadsServed, r.Stats.Reads,
 		r.Stats.ReadsRejected, r.Stats.LeaseReads, r.Stats.Crashes, r.Stats.Partitions,
 		r.Stats.LeaderAfterMs, r.Stats.CommitAfterMs)
+	if r.Stats.Snapshots > 0 {
+		s += fmt.Sprintf(" snapshots=%d sent=%d installed=%d", r.Stats.Snapshots, r.Stats.SnapsSent, r.Stats.SnapsInstalled)
+	}
 	if r.Violation != nil {
 		s += " FAIL: " + r.Violation.Error()
 	}

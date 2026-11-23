@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -34,6 +35,15 @@ type Metrics struct {
 
 	rpcRequests *prometheus.CounterVec
 	rpcDuration *prometheus.HistogramVec
+
+	// Snapshots (D-14, WBS 5.9.1).
+	snapIndex     prometheus.Gauge
+	snapSize      prometheus.Gauge
+	snapDuration  *prometheus.HistogramVec // op: create, install
+	snapInstalls  prometheus.Counter
+	snapTransfers *prometheus.CounterVec // result: ok, failed
+	walTrimmed    prometheus.Gauge
+	installCount  atomic.Uint64
 
 	mu       sync.Mutex
 	lastLead uint64
@@ -72,10 +82,21 @@ func NewMetrics() *Metrics {
 		rpcDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "raftkv_grpc_request_duration_seconds", Help: "Unary gRPC request latency, by full method.",
 			Buckets: prometheus.ExponentialBuckets(0.0005, 2, 14)}, []string{"method"}),
+		snapIndex: g("raftkv_snapshot_index", "Log index of the newest local snapshot."),
+		snapSize:  g("raftkv_snapshot_size_bytes", "Total file size of the newest local snapshot."),
+		snapDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "raftkv_snapshot_duration_seconds", Help: "Time to create or install a snapshot, by op.",
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 16)}, []string{"op"}),
+		snapInstalls: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "raftkv_snapshot_installs_total", Help: "Snapshots installed from the leader."}),
+		snapTransfers: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "raftkv_snapshot_transfers_total", Help: "Snapshot transfers sent to followers, by result."}, []string{"result"}),
+		walTrimmed: g("raftkv_wal_first_index", "First index still in the WAL (moves up when the log is trimmed, D-30)."),
 	}
 	m.reg.MustRegister(m.term, m.state, m.commit, m.applied, m.lastIndex, m.leaderChanges,
 		m.walFsync, m.walFsyncErrors, m.msgSent, m.sendFailures, m.reconnects, m.dropped,
-		m.rpcRequests, m.rpcDuration)
+		m.rpcRequests, m.rpcDuration,
+		m.snapIndex, m.snapSize, m.snapDuration, m.snapInstalls, m.snapTransfers, m.walTrimmed)
 	return m
 }
 
@@ -112,6 +133,36 @@ func (m *Metrics) ObserveFsync(d time.Duration, err error) {
 		m.walFsyncErrors.Inc()
 	}
 }
+
+// SnapshotCreated records a local snapshot at index with total file size
+// bytes, taken in d.
+func (m *Metrics) SnapshotCreated(index, bytes uint64, d time.Duration) {
+	m.snapIndex.Set(float64(index))
+	m.snapSize.Set(float64(bytes))
+	m.snapDuration.WithLabelValues("create").Observe(d.Seconds())
+}
+
+// SnapshotInstalled records a snapshot installed from the leader in d.
+func (m *Metrics) SnapshotInstalled(d time.Duration) {
+	m.snapInstalls.Inc()
+	m.installCount.Add(1)
+	m.snapDuration.WithLabelValues("install").Observe(d.Seconds())
+}
+
+// SnapshotInstalls is how many snapshots this node installed.
+func (m *Metrics) SnapshotInstalls() uint64 { return m.installCount.Load() }
+
+// SnapshotSent records the outcome of a snapshot transfer to a follower.
+func (m *Metrics) SnapshotSent(failed bool) {
+	r := "ok"
+	if failed {
+		r = "failed"
+	}
+	m.snapTransfers.WithLabelValues(r).Inc()
+}
+
+// WALFirstIndex records the first index still in the WAL.
+func (m *Metrics) WALFirstIndex(i uint64) { m.walTrimmed.Set(float64(i)) }
 
 // MessageSent implements transport.Observer.
 func (m *Metrics) MessageSent(_ uint64, t raft.MessageType) {

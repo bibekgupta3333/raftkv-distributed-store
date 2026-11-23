@@ -205,3 +205,46 @@ func TestSimPlantedRegressionReplay(t *testing.T) {
 		t.Fatalf("repro command lacks the seed: %s", got)
 	}
 }
+
+// A snapshot transfer that corrupts one entry of the state it carries: the
+// follower installs state that differs from what the others applied (WBS
+// 5.1.4). The checker compares every installed snapshot with the model.
+func TestSimPlantedCorruptSnapshot(t *testing.T) {
+	planted(t, "snapshot", 20, KindStateMachineSafety, func() Hooks {
+		done := false
+		return Hooks{Install: func(_ uint64, ents []raft.Entry) []raft.Entry {
+			if done {
+				return ents
+			}
+			for i := len(ents) - 1; i >= 0; i-- {
+				if len(ents[i].Data) >= 8 {
+					out := slices.Clone(ents)
+					out[i].Data = flip(out[i].Data)
+					done = true
+					return out
+				}
+			}
+			return ents
+		}}
+	})
+}
+
+// The snapshot profile must actually exercise snapshots: they are taken,
+// sent, and installed (WBS 5.1.4).
+func TestSimSnapshotProfileExercisesInstalls(t *testing.T) {
+	var taken, sent, installed int
+	for _, r := range runSeeds(1, 20, mustProfile(t, "snapshot")) {
+		if !r.OK() {
+			t.Fatalf("seed %d: %v", r.Seed, r.Violation)
+		}
+		taken += r.Stats.Snapshots
+		sent += r.Stats.SnapsSent
+		installed += r.Stats.SnapsInstalled
+	}
+	if taken == 0 || sent == 0 || installed == 0 {
+		t.Fatalf("snapshots taken=%d sent=%d installed=%d; want all > 0", taken, sent, installed)
+	}
+	if installed >= sent {
+		t.Logf("note: every transfer completed (sent=%d installed=%d)", sent, installed)
+	}
+}

@@ -86,6 +86,25 @@ func (c *Cluster) Restart(id int) {
 	c.fault("restart", id, "", err)
 }
 
+// Wipe destroys node id's data volume, as if its disk had been replaced, and
+// starts it again empty under the same ID (WBS 5.5.2). It catches up from the
+// leader, by InstallSnapshot once the log is compacted (D-14). The container
+// is removed first (a volume in use cannot be deleted).
+func (c *Cluster) Wipe(id int) {
+	c.t.Helper()
+	svc := fmt.Sprintf("node%d", id)
+	if out, err := c.composeCmd("rm", "-s", "-f", svc); err != nil {
+		c.fault("wipe", id, "rm", fmt.Errorf("%w: %s", err, out))
+	}
+	if _, err := c.docker("volume", "rm", fmt.Sprintf("raftkv_data%d", id)); err != nil {
+		c.fault("wipe", id, "volume rm", err)
+	}
+	if out, err := c.composeCmd("up", "-d", "--no-build", svc); err != nil {
+		c.fault("wipe", id, "up", fmt.Errorf("%w: %s", err, out))
+	}
+	c.fault("wipe", id, "data volume deleted, restarted empty", nil)
+}
+
 // Pause sends SIGSTOP to node id's container (the node freezes but its sockets stay open).
 func (c *Cluster) Pause(id int) {
 	_, err := c.docker("kill", "-s", "STOP", ContainerName(id))
@@ -178,6 +197,14 @@ const (
 	FaultPartition    FaultKind = "partition-minority"
 	FaultDelay        FaultKind = "netem-delay"
 	FaultLoss         FaultKind = "netem-loss"
+	FaultWipeFollower FaultKind = "wipe-follower" // kill, delete the data volume, restart empty
+)
+
+// DefaultKinds are the faults of the PR schedule; NightlyKinds add
+// follower wipes (WBS 5.5.2).
+var (
+	DefaultKinds = []FaultKind{FaultKillFollower, FaultKillLeader, FaultPause, FaultPartition, FaultDelay, FaultLoss}
+	NightlyKinds = append(append([]FaultKind(nil), DefaultKinds...), FaultWipeFollower)
 )
 
 // Step is one fault of a schedule. Targets are resolved when the step runs
@@ -195,9 +222,11 @@ type Step struct {
 
 // Schedule returns n steps derived only from seed: the same seed always gives
 // the same plan (real timing still varies between runs).
-func Schedule(seed uint64, n int) []Step {
+func Schedule(seed uint64, n int) []Step { return ScheduleKinds(seed, n, DefaultKinds) }
+
+// ScheduleKinds is Schedule drawing from the given fault kinds.
+func ScheduleKinds(seed uint64, n int, kinds []FaultKind) []Step {
 	r := rand.New(rand.NewPCG(seed, 0x9e3779b97f4a7c15))
-	kinds := []FaultKind{FaultKillFollower, FaultKillLeader, FaultPause, FaultPartition, FaultDelay, FaultLoss}
 	steps := make([]Step, n)
 	for i := range steps {
 		steps[i] = Step{
@@ -256,6 +285,10 @@ func (c *Cluster) Run(s Step) {
 		c.NetemLoss(f, s.LossPct)
 		time.Sleep(s.Hold)
 		c.NetemClear(f)
+	case FaultWipeFollower:
+		c.Kill(f)
+		time.Sleep(s.Hold)
+		c.Wipe(f)
 	}
 	time.Sleep(s.Gap)
 }

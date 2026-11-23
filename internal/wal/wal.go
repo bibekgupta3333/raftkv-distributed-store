@@ -73,6 +73,7 @@ type WAL struct {
 	lastIndex uint64
 	hs        HardState
 	hasHS     bool
+	start     Start // current log start, repeated in every segment preamble
 
 	failed error
 	closed bool
@@ -89,7 +90,8 @@ func Open(dir string, opts Options) (*WAL, *Recovered, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	w := &WAL{dir: dir, opts: opts, segs: segs, hs: rec.HardState, hasHS: !rec.HardState.IsEmpty()}
+	w := &WAL{dir: dir, opts: opts, segs: segs, hs: rec.HardState, hasHS: !rec.HardState.IsEmpty(), start: rec.Start}
+	w.lastIndex = rec.Start.Index
 	if n := len(rec.Entries); n > 0 {
 		w.lastIndex = rec.Entries[n-1].Index
 	}
@@ -137,8 +139,9 @@ func (w *WAL) check() error {
 }
 
 // newSegment creates segment seq starting at lastIndex+1, writes its header and
-// preamble (the current HardState, so older segments can be deleted), fsyncs the
-// file and then the directory (§1.1). Errors are fatal.
+// preamble (the current log start and HardState, so older segments can be
+// deleted, §1.4), fsyncs the file and then the directory (§1.1). Errors are
+// fatal.
 func (w *WAL) newSegment(seq uint64) error {
 	first := w.lastIndex + 1
 	name := segmentName(seq, first)
@@ -147,6 +150,9 @@ func (w *WAL) newSegment(seq uint64) error {
 		return w.fatal(err)
 	}
 	buf := segmentHeader{Seq: seq, FirstIndex: first, ClusterID: w.opts.ClusterID, MemberID: w.opts.MemberID}.encode()
+	if w.start.Index > 0 {
+		buf = markerRecord(w.start, false).Encode(buf)
+	}
 	if w.hasHS {
 		buf = w.hs.record().Encode(buf)
 	}
@@ -206,7 +212,7 @@ func (w *WAL) AppendEntries(entries []Entry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	if w.lastIndex != 0 && entries[0].Index > w.lastIndex+1 {
+	if (w.lastIndex != 0 || w.start.Index != 0) && entries[0].Index > w.lastIndex+1 {
 		return fmt.Errorf("%w: entry %d after last index %d", ErrOutOfOrder, entries[0].Index, w.lastIndex)
 	}
 	var buf []byte
@@ -242,6 +248,50 @@ func (w *WAL) SetHardState(hs HardState) error {
 	}
 	w.hs, w.hasHS = hs, true
 	return nil
+}
+
+// MarkCompacted records that the log now starts after s (a SNAPSHOT_MARKER,
+// storage-design 1.8 step 2): replay drops entries <= s.Index. It is durable
+// after Sync; call it before [WAL.ReleaseTo] deletes segments. s.Index must not
+// be beyond the last entry and s.Term must be that entry's term. D-30: the
+// caller must not pass an index above min(snapshotIndex, durableAppliedIndex).
+func (w *WAL) MarkCompacted(s Start) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.check(); err != nil {
+		return err
+	}
+	if s.Index > w.lastIndex || s.Index < w.start.Index {
+		return fmt.Errorf("%w: compaction point %d outside the log (%d, %d]", ErrOutOfOrder, s.Index, w.start.Index, w.lastIndex)
+	}
+	if err := w.write(markerRecord(s, false).Encode(nil)); err != nil {
+		return err
+	}
+	w.start = s
+	return nil
+}
+
+// ResetTo records that a snapshot at s replaced the whole log (a reset
+// SNAPSHOT_MARKER, storage-design 4.4 step 6): replay drops every earlier
+// entry, and the next entry appended must be s.Index+1. Durable after Sync.
+func (w *WAL) ResetTo(s Start) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.check(); err != nil {
+		return err
+	}
+	if err := w.write(markerRecord(s, true).Encode(nil)); err != nil {
+		return err
+	}
+	w.start, w.lastIndex = s, s.Index
+	return nil
+}
+
+// Start returns the current log start (zero if the log was never compacted).
+func (w *WAL) Start() Start {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.start
 }
 
 // Sync fsyncs the active segment. An error is fatal and is never retried (D-33).

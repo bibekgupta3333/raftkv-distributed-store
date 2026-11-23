@@ -32,6 +32,82 @@ func TestClusterIsLinearizableUnderFaults(t *testing.T) {
 		t.Skip("multi-second fault run")
 	}
 	c := kvtest.New(t, 5, kvtest.Options{})
+	checkUnderFaults(t, c, nemesis)
+}
+
+// WBS 5.5.2 (M5 exit criterion 5): the same check with a very low snapshot
+// threshold while a nemesis wipes followers' data directories and partitions
+// a follower until the log is compacted past it. Wiped and lagging followers
+// come back through InstallSnapshot (D-14) while clients keep going: 0
+// violations, and every replica ends with the same state.
+func TestClusterIsLinearizableWithFollowerWipes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("multi-second fault run")
+	}
+	c := kvtest.New(t, 5, kvtest.Options{SnapshotEntries: 30, SnapshotRetainEntries: 5, WALSegmentBytes: 16 << 10})
+	checkUnderFaults(t, c, wipeNemesis)
+	installs := uint64(0)
+	for _, id := range c.IDs() {
+		installs += c.Node(id).Metrics().SnapshotInstalls()
+	}
+	t.Logf("snapshots installed during the run: %d", installs)
+	if installs == 0 {
+		t.Fatal("no follower was brought back by a snapshot; the run proves little")
+	}
+}
+
+// wipeNemesis wipes a follower twice and partitions one past compaction.
+func wipeNemesis(t *testing.T, ctx context.Context, c *kvtest.Cluster) {
+	t.Helper()
+	step := func(d time.Duration) bool { return sleepCtx(ctx, d) }
+	follower := func(k int) uint64 {
+		lead := c.Leader(15 * time.Second)
+		var fs []uint64
+		for _, id := range c.IDs() {
+			if id != lead {
+				fs = append(fs, id)
+			}
+		}
+		return fs[k%len(fs)]
+	}
+	for k := range 2 {
+		if !step(600 * time.Millisecond) {
+			return
+		}
+		v := follower(k)
+		t.Logf("nemesis: wipe follower %d", v)
+		c.Stop(v)
+		c.Wipe(v)
+		if !step(1000 * time.Millisecond) {
+			c.Start(v)
+			return
+		}
+		c.Start(v)
+	}
+	if !step(600 * time.Millisecond) {
+		return
+	}
+	v := follower(2)
+	var rest []uint64
+	for _, id := range c.IDs() {
+		if id != v {
+			rest = append(rest, id)
+		}
+	}
+	t.Logf("nemesis: partition follower %d past compaction", v)
+	c.Partition([]uint64{v}, rest)
+	if !step(2000 * time.Millisecond) {
+		c.Heal()
+		return
+	}
+	c.Heal()
+	step(1500 * time.Millisecond)
+}
+
+// checkUnderFaults runs the recorded workload against c while nem injects
+// faults, then checks the history and the replicas' state hashes.
+func checkUnderFaults(t *testing.T, c *kvtest.Cluster, nem func(*testing.T, context.Context, *kvtest.Cluster)) {
+	t.Helper()
 	c.Leader(15 * time.Second)
 
 	rec := NewRecorder()
@@ -44,7 +120,7 @@ func TestClusterIsLinearizableUnderFaults(t *testing.T) {
 	go func() {
 		defer close(nemesisDone)
 		defer stop()
-		nemesis(t, runCtx, c)
+		nem(t, runCtx, c)
 	}()
 
 	newClient := func(endpoints []string, noSessions bool) *client.Client {

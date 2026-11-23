@@ -15,8 +15,11 @@ const (
 	ProgressProbe ProgressState = iota
 	// ProgressReplicate streams entries optimistically up to MaxInflight.
 	ProgressReplicate
-	// A ProgressSnapshot state is added in M5 (D-14) for followers whose next
-	// index has been compacted away.
+	// ProgressSnapshot means the follower needs entries the leader has
+	// compacted away, so a snapshot is being sent (D-14, system-design 2.1).
+	// No appends are sent until the driver reports the transfer's outcome
+	// ([RawNode.ReportSnapshot]) or the follower acknowledges the snapshot.
+	ProgressSnapshot
 )
 
 func (s ProgressState) String() string {
@@ -25,6 +28,8 @@ func (s ProgressState) String() string {
 		return "Probe"
 	case ProgressReplicate:
 		return "Replicate"
+	case ProgressSnapshot:
+		return "Snapshot"
 	default:
 		return fmt.Sprintf("ProgressState(%d)", uint8(s))
 	}
@@ -42,6 +47,10 @@ type Progress struct {
 	// round (D-08).
 	RecentActive bool
 
+	// PendingSnapshot is the index of the snapshot being sent while State
+	// is ProgressSnapshot (D-14); 0 otherwise.
+	PendingSnapshot uint64
+
 	probeSent bool
 	inflights inflights
 }
@@ -51,8 +60,15 @@ func newProgress(next uint64, maxInflight int) *Progress {
 }
 
 func (p *Progress) becomeProbe() {
-	if p.State == ProgressReplicate {
+	switch p.State {
+	case ProgressReplicate:
 		p.Next = p.Match + 1
+	case ProgressSnapshot:
+		// If the snapshot was installed the follower holds everything up to
+		// it; if it failed, PendingSnapshot was cleared and we probe from
+		// Match (D-14: an interrupted transfer starts over).
+		p.Next = max(p.Match+1, p.PendingSnapshot+1)
+		p.PendingSnapshot = 0
 	}
 	p.State = ProgressProbe
 	p.probeSent = false
@@ -62,6 +78,17 @@ func (p *Progress) becomeProbe() {
 func (p *Progress) becomeReplicate() {
 	p.State = ProgressReplicate
 	p.Next = p.Match + 1
+	p.PendingSnapshot = 0
+	p.probeSent = false
+	p.inflights.reset()
+}
+
+// becomeSnapshot starts sending the snapshot at index snap (D-14). Appends
+// pause until the transfer is reported or acknowledged.
+func (p *Progress) becomeSnapshot(snap uint64) {
+	p.State = ProgressSnapshot
+	p.PendingSnapshot = snap
+	p.Next = snap + 1
 	p.probeSent = false
 	p.inflights.reset()
 }
@@ -82,6 +109,11 @@ func (p *Progress) maybeUpdate(n uint64) bool {
 // given the follower's hint (the last index it believes could match). It
 // reports whether the rejection was current (not stale).
 func (p *Progress) maybeDecrTo(rejected, hint uint64) bool {
+	if p.State == ProgressSnapshot {
+		// No append is outstanding while a snapshot is in flight, so any
+		// rejection answers an older probe.
+		return false
+	}
 	if p.State == ProgressReplicate {
 		if rejected <= p.Match {
 			return false // stale: already matched past this
@@ -102,6 +134,8 @@ func (p *Progress) isPaused() bool {
 	switch p.State {
 	case ProgressProbe:
 		return p.probeSent
+	case ProgressSnapshot:
+		return true
 	default:
 		return p.inflights.full()
 	}

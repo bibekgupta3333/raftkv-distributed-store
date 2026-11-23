@@ -66,11 +66,11 @@ The CRC covers `length`, so a flipped length bit is caught. `term` and `index` a
 |--------|------|------------------|---------|--------------|
 | 1 | `ENTRY` | entry term / index | `raftkv.v1.Entry` ([api-design.md](api-design.md) §8.1) | Each appended log entry |
 | 2 | `HARD_STATE` | term / commit | `HardState{term, voted_for, commit}` | When term or vote changes, and with any Ready that advanced commit |
-| 3 | `SNAPSHOT_MARKER` | snapshot term / index | `{index, term, config}` | After a snapshot is installed or the log is trimmed |
+| 3 | `SNAPSHOT_MARKER` | snapshot term / index | 8-byte flags: bit 0 = reset (install). `config` joins with M6 | After a snapshot is installed (reset: drop every entry) or the log is trimmed (drop entries ≤ index) |
 | 4 | `MEMBERSHIP` | config entry's term / index | `ClusterConfig` | In every segment preamble, so deleting old segments never loses the config |
 | 5–255 | reserved | | | Unknown type is corruption, never skipped |
 
-**Segment preamble.** Every new segment starts with `SNAPSHOT_MARKER` (current log start), `MEMBERSHIP` (latest config), and `HARD_STATE`, written and fsynced together. Each segment describes itself, so older ones can be deleted.
+**Segment preamble.** Every new segment starts with `SNAPSHOT_MARKER` (current log start), `MEMBERSHIP` (latest config, M6), and `HARD_STATE`, written and fsynced together. Each segment describes itself, so older ones can be deleted. A preamble's log start may lie below the segment's first entry (the entries between were in segments since deleted); the trim marker written before that deletion closes the gap, and replay checks that the surviving log starts right after the final log start.
 
 ### 1.5 Writing a Ready
 
@@ -272,10 +272,13 @@ After the `last=true` chunk with every file verified:
 
 **Crash windows:** before step 4 the old db is still live. Between steps 4 and 6, recovery sees `appliedIndex` ahead of the WAL's log start and writes the missing marker (§5 step 6). After step 6, done.
 
+**As built (M5).** The core only asks for an install when the snapshot is above its commit index and its last entry is not in the log (otherwise it just moves commit, Raft §7), so step 7 always discards the whole log: the marker is written with the reset flag. Steps 3-5 and 8 are `snapshot.Manager.Install`; step 6 is `walstore.ApplySnapshot` followed by the Ready's single fsync, before the `MsgAppResp` acknowledging the snapshot is sent. The installed directory becomes the live database, so the node immediately takes a local snapshot (hard links) to serve others if it becomes leader. If recovery finishes an install (§5 step 6) it also raises the persisted term to the snapshot's term, clearing the vote, so the log never holds a term newer than `currentTerm`. Tests: `internal/snapshot` kills the install after each step and checks the restarted state is old or new; `internal/server` restarts a node whose `CURRENT` was swapped without a WAL marker.
+
 ### 4.5 Retention
 
 - Keep the **2 newest** snapshots, unless an outgoing transfer holds a reference.
 - On startup delete `snap/tmp-*`, `snap/incoming/*`, and any `sm/db-*` not named in `sm/CURRENT`.
+- A fresh `sm/` starts as `sm/db-0000000000000000` with `CURRENT` pointing at it. A pre-M5 data directory (Pebble directly in `sm/`) is refused (`ErrLegacyStateDir`); wipe it and let the member catch up.
 
 ---
 
