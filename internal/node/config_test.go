@@ -172,3 +172,36 @@ func TestNewRefusesIdentityMismatch(t *testing.T) {
 		t.Fatalf("node.New with a foreign data dir = %v, want ErrIdentityMismatch", err)
 	}
 }
+
+// WBS 7.1.3: the node ID comes from the StatefulSet pod ordinal (ordinal + 1).
+func TestNodeIDFromOrdinal(t *testing.T) {
+	for name, want := range map[string]uint64{"raftkv-0": 1, "raftkv-4": 5, "my-set-12": 13} {
+		got, err := node.NodeIDFromOrdinal(name)
+		if err != nil || got != want {
+			t.Errorf("NodeIDFromOrdinal(%q) = %d, %v; want %d", name, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "raftkv", "raftkv-", "-3", "raftkv-x", "raftkv-+1", "raftkv-18446744073709551615"} {
+		if _, err := node.NodeIDFromOrdinal(bad); err == nil {
+			t.Errorf("NodeIDFromOrdinal(%q) succeeded, want an error", bad)
+		}
+	}
+}
+
+func TestLoadConfigNodeIDFromOrdinal(t *testing.T) {
+	path := writeFile(t, strings.Replace(goodYAML, "node_id: 2\n", "", 1))
+	cfg, err := node.LoadConfig([]string{"-config", path, "-node-id-from-ordinal", "raftkv-2"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NodeID != 3 {
+		t.Errorf("NodeID = %d, want 3", cfg.NodeID)
+	}
+	_, err = node.LoadConfig([]string{"-config", path, "-node-id", "1", "-node-id-from-ordinal", "raftkv-2"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("both -node-id and -node-id-from-ordinal: err = %v, want mutually exclusive", err)
+	}
+	if _, err := node.LoadConfig([]string{"-config", path, "-node-id-from-ordinal", "raftkv"}, io.Discard); err == nil {
+		t.Error("a pod name without an ordinal must be refused")
+	}
+}

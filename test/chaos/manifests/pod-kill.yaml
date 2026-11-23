@@ -1,0 +1,17 @@
+# PodChaos pod-kill (D-47, WBS 7.4.2): kill one random RaftKV pod. The
+# StatefulSet recreates it with the same name, node ID and PVC, so it rejoins
+# and catches up from its WAL (docs/testing.md fault catalogue: kill -9
+# follower/leader, node restart). gracePeriod 0 makes it a hard kill.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: raftkv-pod-kill
+  namespace: raftkv
+spec:
+  action: pod-kill
+  mode: one
+  gracePeriod: 0
+  selector:
+    namespaces: [raftkv]
+    labelSelectors:
+      app.kubernetes.io/name: raftkv

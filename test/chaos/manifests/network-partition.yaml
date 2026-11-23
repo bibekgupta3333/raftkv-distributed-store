@@ -1,0 +1,23 @@
+# NetworkChaos partition (D-47, WBS 7.4.3; system-design F-03): cut one random
+# pod off from the other four in both directions for 30 s. If it was the
+# leader, CheckQuorum steps it down and the majority elects a new one.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: raftkv-partition
+  namespace: raftkv
+spec:
+  action: partition
+  mode: one
+  selector:
+    namespaces: [raftkv]
+    labelSelectors:
+      app.kubernetes.io/name: raftkv
+  direction: both
+  target:
+    mode: all
+    selector:
+      namespaces: [raftkv]
+      labelSelectors:
+        app.kubernetes.io/name: raftkv
+  duration: 30s

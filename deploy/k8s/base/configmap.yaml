@@ -1,0 +1,21 @@
+# Shared node configuration (WBS 7.1.3). node_id is not here: each pod derives
+# it from its ordinal with --node-id-from-ordinal (raftkv-0 -> 1 ... raftkv-4 -> 5).
+# The membership is static until M6 (D-06): scaling the StatefulSet also needs
+# this list changed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: raftkv-config
+data:
+  raftkv.yaml: |
+    cluster_id: 1
+    data_dir: /data
+    listen_addr: ":7000"
+    metrics_addr: ":9100"
+    log_level: info
+    peers:
+      - {id: 1, addr: "raftkv-0.raftkv-peer:7000"}
+      - {id: 2, addr: "raftkv-1.raftkv-peer:7000"}
+      - {id: 3, addr: "raftkv-2.raftkv-peer:7000"}
+      - {id: 4, addr: "raftkv-3.raftkv-peer:7000"}
+      - {id: 5, addr: "raftkv-4.raftkv-peer:7000"}

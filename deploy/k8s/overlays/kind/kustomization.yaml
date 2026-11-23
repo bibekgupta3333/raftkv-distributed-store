@@ -1,0 +1,30 @@
+# kind overlay (WBS 7.1.6): `make kind-up` builds raftkvd:kind, loads it into
+# the kind cluster and applies this. kind's default local-path StorageClass
+# backs the PVCs.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: raftkv
+
+resources:
+  - namespace.yaml
+  - ../../base
+  - ../../observer # observer UI (D-48); reach it with kubectl port-forward
+
+# Retags both raftkvd (StatefulSet) and the observer, which runs from the same image.
+images:
+  - name: raftkvd
+    newTag: kind
+
+patches:
+  # The image only exists inside the kind nodes (kind load); never pull it.
+  - target: {kind: StatefulSet, name: raftkv}
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+  - target: {kind: Deployment, name: raftkv-observer}
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

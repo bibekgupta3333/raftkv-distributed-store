@@ -1,0 +1,20 @@
+# NetworkChaos delay (D-47, WBS 7.4.3): 50 ms +/- 20 ms on every RaftKV pod
+# for 60 s, the same shape as the compose e2e netem fault. Elections must stay
+# stable (heartbeat 100 ms, election timeout 1-2 s, D-08).
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: raftkv-delay
+  namespace: raftkv
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces: [raftkv]
+    labelSelectors:
+      app.kubernetes.io/name: raftkv
+  delay:
+    latency: 50ms
+    jitter: 20ms
+    correlation: "25"
+  duration: 60s

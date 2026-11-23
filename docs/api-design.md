@@ -346,7 +346,10 @@ message FollowerProgress {
 }
 ```
 
-`Status` feeds the Kubernetes probes (D-46) and the observer UI (D-48).
+`Status` feeds the observer UI (D-48). The Kubernetes probes (D-46) are plain HTTP on the metrics listener (`:9100`),
+next to `/metrics`, so kubelet needs no gRPC client: `GET /livez` is 200 when the driver loop answers a ping within
+1 s, and `GET /readyz` is 200 when the node knows a leader and has applied everything it knows is committed. Both
+return 503 with the reason otherwise.
 
 ### 4.1 Admin RPC semantics
 
