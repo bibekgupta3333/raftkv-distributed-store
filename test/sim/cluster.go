@@ -41,6 +41,10 @@ type Stats struct {
 	Accepted       int
 	Acked          int
 	Committed      int
+	Reads          int // issued
+	ReadsServed    int
+	ReadsRejected  int
+	LeaseReads     int   // served from a lease
 	LeaderAfterMs  int64 // heal to stable leader, -1 if never
 	CommitAfterMs  int64 // heal to marker applied on all nodes, -1 if never
 	Net            NetStats
@@ -71,6 +75,14 @@ type Cluster struct {
 	pending map[uint64]pendingCmd
 	stats   Stats
 
+	// reads (reads.go)
+	nextRead    uint64
+	reads       map[uint64]*simRead // awaiting a ReadState
+	outcomes    map[uint64]ReadOutcome
+	maxCommit   uint64 // highest commit index any node has shown
+	readChecked map[uint64]bool
+	readSent    int64
+
 	// liveness
 	faultEnd      int64
 	leaderAt      int64
@@ -90,6 +102,7 @@ func NewCluster(seed uint64, p Profile, h Hooks, record bool) *Cluster {
 	c := &Cluster{
 		seed: seed, rng: rng, sched: &Scheduler{}, trace: NewTrace(record), hooks: h, profile: p,
 		pending: map[uint64]pendingCmd{}, markerApplied: map[uint64]bool{}, leaderAt: -1,
+		reads: map[uint64]*simRead{}, outcomes: map[uint64]ReadOutcome{}, readChecked: map[uint64]bool{},
 	}
 	size := p.Sizes[rng.IntN(len(p.Sizes))]
 	for i := 1; i <= size; i++ {
@@ -180,6 +193,7 @@ func (c *Cluster) observe() {
 			continue
 		}
 		v := n.view()
+		c.maxCommit = max(c.maxCommit, v.Commit) // READ-1 baseline, before any planted rewrite
 		if c.hooks.View != nil {
 			c.hooks.View(&v)
 		}
@@ -200,8 +214,11 @@ func (c *Cluster) Boot() {
 	}
 }
 
-// StartWorkload begins the client command generator.
-func (c *Cluster) StartWorkload() { c.sched.After(50, c.clientLoop) }
+// StartWorkload begins the client command and read generators.
+func (c *Cluster) StartWorkload() {
+	c.sched.After(50, c.clientLoop)
+	c.sched.After(70, c.readLoop)
+}
 
 // RunFor advances virtual time by d ms (or until an invariant fails),
 // checking invariants after every event.
@@ -481,8 +498,20 @@ func (c *Cluster) monitor() {
 	}
 	if c.leaderAt >= 0 {
 		if len(c.markerApplied) == len(c.nodes) {
-			c.stats.CommitAfterMs = now - healAt
-			c.done = true
+			if c.stats.CommitAfterMs < 0 {
+				c.stats.CommitAfterMs = now - healAt
+			}
+			// Then a linearizable read must complete on every node.
+			if c.readLiveness(now) {
+				c.done = true
+				return
+			}
+			if now-c.leaderAt > livenessMs {
+				c.fail(&Violation{Kind: KindLiveness, At: now,
+					Detail: "linearizable reads did not complete on all nodes " + itoa(uint64(now-c.leaderAt)) + "ms after a leader was elected"})
+				return
+			}
+			c.sched.After(100, c.monitor)
 			return
 		}
 		if now-c.leaderAt > livenessMs {

@@ -53,7 +53,7 @@ func TestValidateSession(t *testing.T) {
 			t.Errorf("%s: err = %v, want %v", name, err, tc.want)
 		}
 	}
-	for _, c := range []*raftkvv1.Command{RegisterSession(1, 2), Barrier(3, 4)} {
+	for _, c := range []*raftkvv1.Command{RegisterSession(1, 2)} {
 		back, err := Unmarshal(mustMarshal(t, c))
 		if err != nil || KindOf(back) != KindOf(c) {
 			t.Fatalf("round trip of %v: %v", KindOf(c), err)

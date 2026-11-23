@@ -13,9 +13,9 @@ import (
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
 )
 
-// raftServer is the server side of the Raft peer service (WBS 2.2.1). Only
-// Replicate and RequestVote exist in M2; the other RPCs return Unimplemented
-// until their milestones (D-36).
+// raftServer is the server side of the Raft peer service (WBS 2.2.1).
+// Replicate and RequestVote exist since M2 and ReadIndex since M4; the other
+// RPCs return Unimplemented until their milestones (D-36).
 type raftServer struct {
 	raftkvv1.UnimplementedRaftServer
 	t *Transport
@@ -161,6 +161,36 @@ func (s *raftServer) RequestVote(ctx context.Context, req *raftkvv1.RequestVoteR
 	case m := <-ch:
 		t.cfg.Observer.MessageSent(req.GetCandidateId(), m.Type)
 		return VoteResponseToProto(m), nil
+	case <-ctx.Done():
+		return nil, status.FromContextError(ctx.Err()).Err()
+	}
+}
+
+// ReadIndex implements the follower-to-leader ReadIndex RPC (D-05, D-36). The
+// core answers through Ready.Messages with a MsgReadIndexResp, matched back to
+// this call by (follower, request context). A rejection (this node is not the
+// leader, or lost leadership before confirming) is returned as UNAVAILABLE; if
+// the leader cannot confirm within the timeout (no quorum) the call fails with
+// DEADLINE_EXCEEDED. Either way the follower retries.
+func (s *raftServer) ReadIndex(ctx context.Context, req *raftkvv1.ReadIndexRequest) (*raftkvv1.ReadIndexResponse, error) {
+	t := s.t
+	if err := t.checkSender(req.GetClusterId(), req.GetFrom()); err != nil {
+		return nil, status.Error(codes.PermissionDenied, err.Error())
+	}
+	ch, done := t.registerReadIndex(readKey{from: req.GetFrom(), ctx: string(req.GetRequestCtx())})
+	defer done()
+	ctx, cancel := context.WithTimeout(ctx, t.cfg.ReadIndexTimeout)
+	defer cancel()
+	if err := t.cfg.Handler.Step(ctx, ReadIndexRequestFromProto(req, t.cfg.ID)); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+	select {
+	case m := <-ch:
+		if m.Reject {
+			return nil, status.Error(codes.Unavailable, "not the leader")
+		}
+		t.cfg.Observer.MessageSent(req.GetFrom(), m.Type)
+		return ReadIndexResponseToProto(m), nil
 	case <-ctx.Done():
 		return nil, status.FromContextError(ctx.Err()).Err()
 	}

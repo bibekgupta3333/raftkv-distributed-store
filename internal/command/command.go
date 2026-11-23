@@ -106,14 +106,6 @@ func Get(id uint64, leaderTimeMs int64, key []byte) (*raftkvv1.Command, error) {
 		Op: &raftkvv1.Command_Get{Get: &raftkvv1.GetOp{Key: key}}}, nil
 }
 
-// Barrier builds a log read with no key: applying it reads nothing, and its
-// apply on the proposing node marks a linearizable read point for local reads
-// (Range in M4, until ReadIndex replaces log reads, D-05, D-34).
-func Barrier(id uint64, leaderTimeMs int64) *raftkvv1.Command {
-	return &raftkvv1.Command{RequestId: id, LeaderTimeUnixMs: leaderTimeMs,
-		Op: &raftkvv1.Command_Get{Get: &raftkvv1.GetOp{}}}
-}
-
 // RegisterSession builds a session registration (D-26). The applied entry's
 // log index becomes the client ID.
 func RegisterSession(id uint64, leaderTimeMs int64) *raftkvv1.Command {

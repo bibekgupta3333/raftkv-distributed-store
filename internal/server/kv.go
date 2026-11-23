@@ -1,11 +1,12 @@
 // Package server implements the client-facing KV gRPC service (api-design.md
-// sections 2 and 6). In M3 every operation goes through the Raft log: writes
-// and linearizable reads are proposed, and the handler waits for the command to
-// be applied on this node (WBS 3.2.3, 3.2.4). M4 adds sessions (D-09, D-26),
-// CompareAndSwap and Range (D-10, D-34), limits (D-11) and write forwarding
-// (D-28): a follower forwards writes to the leader unless the client asked for
-// REDIRECT, in which case it answers NOT_LEADER with a LeaderHint. Reads are
-// never forwarded.
+// sections 2 and 6). Writes go through the Raft log: they are proposed and the
+// handler waits for the command to be applied on this node (WBS 3.2.3). M4 adds
+// sessions (D-09, D-26), CompareAndSwap and Range (D-10, D-34), limits (D-11)
+// and write forwarding (D-28): a follower forwards writes to the leader unless
+// the client asked for REDIRECT, in which case it answers NOT_LEADER with a
+// LeaderHint. Reads never touch the log and are never forwarded: any member
+// serves a linearizable Get or Range page through ReadIndex (D-05, WBS 4.2.2)
+// and a STALE one from its local state.
 package server
 
 import (
@@ -27,6 +28,11 @@ import (
 type Member interface {
 	Propose(ctx context.Context, data []byte) (index, term uint64, err error)
 	Status() raft.Status
+	// LinearizableRead runs read once a linearizable read may be served
+	// from local state (ReadIndex or lease, D-05, D-25).
+	LinearizableRead(ctx context.Context, read func() error) error
+	// WaitApplied blocks until index is applied locally or ctx is done.
+	WaitApplied(ctx context.Context, index uint64) error
 	ID() uint64
 	ClusterID() uint64
 	PeerAddr(id uint64) string
@@ -219,52 +225,75 @@ func (s *KV) Delete(ctx context.Context, req *raftkvv1.DeleteRequest) (*raftkvv1
 	})
 }
 
-// Get implements raftkvv1.KVServer. LINEARIZABLE reads go through the log in M3
-// (WBS 3.2.4); ReadIndex replaces that in M4 (D-05). STALE reads are served
-// from local state.
+// Get implements raftkvv1.KVServer. LINEARIZABLE (the default) is served by
+// this member through ReadIndex, on the leader or a follower (D-05, WBS 4.2.2).
+// STALE reads local state at the current applied index, optionally after
+// waiting for min_revision (WBS 4.2.3). The header's revision is the applied
+// index the value was read at (or later).
 func (s *KV) Get(ctx context.Context, req *raftkvv1.GetRequest) (*raftkvv1.GetResponse, error) {
 	if err := s.checkCluster(req.GetHeader()); err != nil {
 		return nil, err
 	}
-	if req.GetConsistency() == raftkvv1.Consistency_STALE {
-		return s.staleGet(ctx, req)
-	}
-	if req.GetMinRevision() != 0 {
-		return nil, newError(codes.InvalidArgument, ReasonMalformed, "", "min_revision requires STALE consistency", nil)
-	}
-	cmd, err := command.Get(command.NewID(), s.stamp(), req.GetKey())
-	if err != nil {
+	if err := validateReadKey(req.GetKey()); err != nil {
 		return nil, mapValidation(err)
 	}
-	res, err := s.run(ctx, cmd)
-	if err != nil {
-		return nil, err
+	stale := req.GetConsistency() == raftkvv1.Consistency_STALE
+	if !stale && req.GetMinRevision() != 0 {
+		return nil, newError(codes.InvalidArgument, ReasonMalformed, "", "min_revision requires STALE consistency", nil)
 	}
-	resp := &raftkvv1.GetResponse{Header: s.header(), Found: res.Found}
-	if res.Found {
-		resp.Kv = toKeyValue(req.GetKey(), res.Value)
-	}
-	return resp, nil
-}
-
-func (s *KV) staleGet(ctx context.Context, req *raftkvv1.GetRequest) (*raftkvv1.GetResponse, error) {
-	if len(req.GetKey()) == 0 {
-		return nil, mapValidation(command.ErrEmptyKey)
-	}
-	for s.reader.Applied() < req.GetMinRevision() {
-		select {
-		case <-ctx.Done():
-			return nil, newError(codes.DeadlineExceeded, ReasonRevisionMissing, "", "revision not reached", nil)
-		case <-time.After(5 * time.Millisecond):
+	var (
+		rev   uint64
+		v     storage.Value
+		found bool
+	)
+	read := func() error {
+		rev = s.reader.Applied() // taken first: the value is at least this new
+		var err error
+		if v, found, err = s.reader.Get(req.GetKey()); err != nil {
+			return &storageErr{err}
 		}
+		return nil
 	}
-	v, found, err := s.reader.Get(req.GetKey())
-	if err != nil {
-		return nil, newError(codes.DataLoss, "STORAGE_CORRUPTION", "", err.Error(), nil)
+	ctx, cancel := replyBefore(ctx)
+	defer cancel()
+	if stale {
+		if err := s.member.WaitApplied(ctx, req.GetMinRevision()); err != nil {
+			return nil, mapStaleWaitError(err)
+		}
+		if err := read(); err != nil {
+			return nil, mapReadError(err)
+		}
+	} else if err := s.member.LinearizableRead(ctx, read); err != nil {
+		return nil, mapReadError(err)
 	}
 	resp := &raftkvv1.GetResponse{Header: s.header(), Found: found}
+	resp.Header.Revision = rev
 	if found {
 		resp.Kv = toKeyValue(req.GetKey(), v)
 	}
 	return resp, nil
+}
+
+// replyMargin is how long before the caller's deadline a waiting read gives
+// up, so that our own status (with its reason) reaches the caller instead of
+// a bare client-side DEADLINE_EXCEEDED.
+const replyMargin = 20 * time.Millisecond
+
+func replyBefore(ctx context.Context) (context.Context, context.CancelFunc) {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	margin := min(replyMargin, time.Until(dl)/10)
+	return context.WithDeadline(ctx, dl.Add(-margin))
+}
+
+func validateReadKey(key []byte) error {
+	switch {
+	case len(key) == 0:
+		return command.ErrEmptyKey
+	case len(key) > command.MaxKeySize:
+		return command.ErrKeyTooLarge
+	}
+	return nil
 }

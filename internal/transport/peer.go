@@ -234,3 +234,38 @@ func (p *peer) sendVote(m raft.Message) {
 		cfg.OnUnreachable(p.id)
 	}()
 }
+
+// sendReadIndex asks this peer (the leader) for a read index on its own
+// goroutine (D-05, D-36) and feeds the answer back as a MsgReadIndexResp. Any
+// failure (refused because the peer is not the leader, timeout, unreachable)
+// comes back as a rejected response, so the requester retries at once
+// instead of waiting for its deadline.
+func (p *peer) sendReadIndex(m raft.Message) {
+	cfg := &p.t.cfg
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.ReadIndexTimeout)
+		defer cancel()
+		resp, err := p.readIndex(ctx, m)
+		if err != nil {
+			cfg.Observer.SendFailure(p.id)
+			resp = raft.Message{Type: raft.MsgReadIndexResp, To: cfg.ID, From: p.id, Context: m.Context, Reject: true}
+		}
+		sctx, scancel := context.WithTimeout(context.Background(), cfg.ReadIndexTimeout)
+		defer scancel()
+		_ = cfg.Handler.Step(sctx, resp)
+	}()
+}
+
+func (p *peer) readIndex(ctx context.Context, m raft.Message) (raft.Message, error) {
+	cfg := &p.t.cfg
+	conn, err := p.getConn(ctx)
+	if err != nil {
+		return raft.Message{}, err
+	}
+	resp, err := raftkvv1.NewRaftClient(conn).ReadIndex(ctx, ReadIndexRequestToProto(cfg.ClusterID, m))
+	if err != nil {
+		return raft.Message{}, err
+	}
+	cfg.Observer.MessageSent(p.id, m.Type)
+	return ReadIndexResponseFromProto(resp, p.id, cfg.ID), nil
+}

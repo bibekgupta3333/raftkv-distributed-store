@@ -272,9 +272,6 @@ func execute(b *ApplyBatch, index uint64, cmd *raftkvv1.Command) (Result, error)
 		}
 		res.Previous, res.Found = prev, existed
 	case *raftkvv1.Command_Get:
-		if len(op.Get.GetKey()) == 0 {
-			return res, nil // a read barrier (command.Barrier): reads nothing
-		}
 		v, found, err := b.Get(op.Get.GetKey())
 		if err != nil {
 			return Result{}, err

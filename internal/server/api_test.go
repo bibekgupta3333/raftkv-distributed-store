@@ -85,6 +85,12 @@ func TestFollowerForwardsWrites(t *testing.T) {
 	if _, err := cl.Put(ctx5(t), []byte("lib"), []byte("x")); err != nil {
 		t.Fatalf("client Put through a single follower endpoint: %v", err)
 	}
+	// Reads are not forwarded: a follower serves a linearizable Range page
+	// itself through ReadIndex (D-05, D-34) and sees the write just acked.
+	rp, err := kv.Range(ctx5(t), &raftkvv1.RangeRequest{Prefix: []byte("lib")})
+	if err != nil || len(rp.GetKvs()) != 1 || string(rp.GetKvs()[0].GetValue()) != "x" || rp.GetHeader().GetMemberId() != f {
+		t.Fatalf("linearizable Range on a follower = %v, %v", rp, err)
+	}
 	// With REDIRECT and a single follower endpoint the hint cannot be followed.
 	rcl, err := client.New(client.Config{Endpoints: []string{c.Addr(f)}, Redirect: true, DefaultTimeout: time.Second})
 	if err != nil {

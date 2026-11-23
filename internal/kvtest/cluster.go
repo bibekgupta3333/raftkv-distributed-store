@@ -45,6 +45,9 @@ type Options struct {
 	// Now, if set, replaces the wall clock every node stamps into commands
 	// (D-27), so tests can move session time without waiting.
 	Now func() time.Time
+	// LeaseReads turns on lease reads (D-25). With the fixed 100 ms margin
+	// the lease is only positive for a Tick above about 13 ms; use 50 ms.
+	LeaseReads bool
 }
 
 // New starts n nodes (IDs 1..n) and registers cleanup with tb.
@@ -85,6 +88,7 @@ func New(tb testing.TB, n int, o Options) *Cluster {
 		cfg.NodeID = id
 		cfg.DataDir = filepath.Join(dir, fmt.Sprint("n", id))
 		cfg.TickInterval = o.Tick
+		cfg.LeaseReads = o.LeaseReads
 		for _, to := range c.ids {
 			addr := c.real[to]
 			if to != id {

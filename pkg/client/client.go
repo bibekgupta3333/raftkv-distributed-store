@@ -279,10 +279,13 @@ func (c *Client) call(ctx context.Context, write, retrySafe bool, f func(ctx con
 			ep.memberID.Store(m)
 		}
 		if err == nil {
-			// A forwarded write was served by the leader: cache it if known.
-			if l := c.resolve(&raftkvv1.LeaderHint{LeaderId: hdr.GetLeaderId()}); write && l >= 0 {
-				c.setLeader(l)
-			} else {
+			if write {
+				// Only a write proves leadership: any member serves
+				// reads (D-05), so a read must not pin a follower. A
+				// forwarded write names the leader in its header (D-28).
+				if l := c.resolve(&raftkvv1.LeaderHint{LeaderId: hdr.GetLeaderId()}); l >= 0 {
+					cur = l
+				}
 				c.setLeader(cur)
 			}
 			return nil
@@ -435,10 +438,13 @@ func (c *Client) Delete(ctx context.Context, key []byte, os ...Option) (*DeleteR
 	return &DeleteResult{Revision: resp.GetRevision(), Deleted: resp.GetDeleted(), Previous: fromKV(resp.GetPrevious())}, nil
 }
 
-// Get reads key. By default the read is linearizable.
+// Get reads key. By default the read is linearizable (ReadIndex, D-05) and may
+// be served by any member, leader or follower; [WithStale] trades that for a
+// purely local read. The result's Revision is the serving member's applied
+// index.
 func (c *Client) Get(ctx context.Context, key []byte, os ...Option) (*GetResult, error) {
 	o := collect(os)
-	req := &raftkvv1.GetRequest{Header: c.header(), Key: key}
+	req := &raftkvv1.GetRequest{Header: c.header(), Key: key, Consistency: raftkvv1.Consistency_LINEARIZABLE}
 	if o.stale {
 		req.Consistency, req.MinRevision = raftkvv1.Consistency_STALE, o.minRevision
 	}

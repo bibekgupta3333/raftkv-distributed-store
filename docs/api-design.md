@@ -207,13 +207,13 @@ Writes go to the leader. Any member accepts them and forwards by default (D-28).
 - On mismatch: gRPC `OK`, `succeeded=false`, and `current` holds the key's current state, so the caller can retry a read-modify-write loop without a separate `Get`.
 - The evaluating entry always advances the revision, even when nothing changed.
 
-**Range pages are not a snapshot** (D-34). Each page is linearizable on its own; writes between pages can appear in later pages. `next_page_token` encodes the next start key plus a checksum of the original range parameters: `version (1 byte) | CRC-32C of start_key, end_key, prefix, keys_only, reverse (4 bytes LE) | resume key`. Forward scans resume at the key just after the last one returned; reverse scans use the last key returned as the new exclusive end. `prefix` and `start_key`/`end_key` together are `MALFORMED_REQUEST`. Until ReadIndex lands (WBS 4.1–4.2), a LINEARIZABLE page waits for a keyless read-barrier entry through the log, the same mechanism `Get` uses, and is therefore served by the leader only (`NOT_LEADER` with a hint elsewhere).
+**Range pages are not a snapshot** (D-34). Each page is linearizable on its own; writes between pages can appear in later pages. `next_page_token` encodes the next start key plus a checksum of the original range parameters: `version (1 byte) | CRC-32C of start_key, end_key, prefix, keys_only, reverse (4 bytes LE) | resume key`. Forward scans resume at the key just after the last one returned; reverse scans use the last key returned as the new exclusive end. `prefix` and `start_key`/`end_key` together are `MALFORMED_REQUEST`. A LINEARIZABLE page uses the same ReadIndex read point as `Get` (any member, D-05): the whole page is read by one Pebble iterator inside that read, so the page is linearizable; the header `revision` is the applied index it was read at.
 
 **Forwarded replies.** A follower that forwards a write relays the leader's reply unchanged except `header.member_id`, which names the follower (the member the client talked to); `leader_id`, `raft_term` and `revision` are the leader's.
 
 **Write acknowledgement.** `OK` means the entry is committed (fsynced on a quorum) and applied on the leader. A `STALE` read with `min_revision = revision` sees that write.
 
-**Linearizable reads (D-05).** See [system-design.md §3](system-design.md#3-linearizable-reads). A new leader serves no linearizable reads until its no-op commits; until then it returns `UNAVAILABLE / LEADER_NOT_READY`.
+**Linearizable reads (D-05).** See [system-design.md §3](system-design.md#3-linearizable-reads). Any member serves them: a follower asks the leader for a read index and reads locally. A new leader queues linearizable reads until its no-op commits (they are answered then, or time out with `DEADLINE_EXCEEDED / READ_INDEX_TIMEOUT`).
 
 ### 3.2 Limits (D-11)
 
@@ -410,6 +410,7 @@ Errors use `google.rpc.Status` with a `google.rpc.ErrorInfo` detail (`domain = "
 | Flow-control limit hit (D-29) | `RESOURCE_EXHAUSTED` | `OVERLOADED` | Yes, with backoff | DEFINITE |
 | Bad key, value, limit, or `oneof`; `min_revision` with LINEARIZABLE | `INVALID_ARGUMENT` | `EMPTY_KEY` / `KEY_TOO_LARGE` / `VALUE_TOO_LARGE` / `LIMIT_TOO_LARGE` / `MALFORMED_REQUEST` | No | DEFINITE |
 | Bad `page_token` | `INVALID_ARGUMENT` | `INVALID_PAGE_TOKEN` | No | n/a |
+| Linearizable read not confirmed in time (no quorum, leader not ready) | `DEADLINE_EXCEEDED` | `READ_INDEX_TIMEOUT` | Yes, other member | n/a |
 | STALE `min_revision` not reached in time | `DEADLINE_EXCEEDED` | `REVISION_NOT_REACHED` | Yes, other member | n/a |
 | **CAS compare failed** | **`OK`** | none | n/a (normal result) | DEFINITE (no change) |
 | Session unknown or expired | `FAILED_PRECONDITION` | `SESSION_EXPIRED` | No (new session) | DEFINITE for this request |
@@ -665,7 +666,7 @@ service Raft {
 | `RequestVote` (`pre_vote=true`) | PreCandidate → voters | Same checks. Does **not** change the receiver's term or vote | Nothing |
 | `InstallSnapshot` | Leader → lagging follower/learner | Metadata, then chunks in order. Receiver checks each chunk's CRC and offset, stages to a temp dir, then installs atomically. Snapshot at or below the receiver's commit index → acked without install. If the stream breaks, the leader starts over (D-14) | Snapshot files, the dir swap, and the WAL marker + hard state, before `installed=true` |
 | `TimeoutNow` | Leader → transfer target | Target starts an election at `term+1` at once, skipping PreVote, with `leadership_transfer=true`. Ignored if stale or a learner | Nothing until the election |
-| `ReadIndex` | Follower → leader | Leader runs ReadIndex and returns `read_index`. `NOT_LEADER` on a non-leader; `LEADER_NOT_READY` before the no-op commits | Nothing |
+| `ReadIndex` | Follower → leader | Leader runs ReadIndex and returns `read_index` (queued until its no-op commits). `UNAVAILABLE` on a non-leader or if it loses leadership first; `DEADLINE_EXCEEDED` if it cannot confirm within 1 s. The follower retries either way | Nothing |
 
 ---
 

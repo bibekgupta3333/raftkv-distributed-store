@@ -3,7 +3,6 @@ package server_test
 import (
 	"bytes"
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -135,9 +134,10 @@ func TestFollowerReturnsNotLeaderWithHint(t *testing.T) {
 		if hint == nil || hint.GetLeaderId() != lead || hint.GetLeaderClientUrl() == "" {
 			t.Fatalf("follower %d: hint = %v, want leader %d", id, hint, lead)
 		}
-		// Reads through the log are leader-only too.
-		if _, err := kv.Get(ctx5(t), &raftkvv1.GetRequest{Key: []byte("k")}); !strings.Contains(err.Error(), "not the leader") {
-			t.Fatalf("follower Get err = %v", err)
+		// Reads are not redirected: a follower serves them itself through
+		// ReadIndex (D-05, WBS 4.2.2).
+		if g, err := kv.Get(ctx5(t), &raftkvv1.GetRequest{Key: []byte("k")}); err != nil || g.GetHeader().GetMemberId() != id {
+			t.Fatalf("follower Get = %v, %v", g, err)
 		}
 	}
 	// The same request on the leader works, with a populated header.

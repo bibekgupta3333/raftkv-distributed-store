@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/binary"
 	"hash/crc32"
-	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
@@ -89,32 +88,9 @@ func (s *KV) CompareAndSwap(ctx context.Context, req *raftkvv1.CompareAndSwapReq
 	})
 }
 
-// linearizableReadPoint returns once this node's applied state is at least as
-// new as a linearizable read point (D-05). Until ReadIndex lands it uses the
-// same mechanism as Get: a read through the log (a keyless barrier entry),
-// proposed and awaited with s.run, so it is leader-only and answers NOT_LEADER
-// with a hint elsewhere. Range calls only this, so switching it to ReadIndex
-// switches Range too.
-func (s *KV) linearizableReadPoint(ctx context.Context) error {
-	_, err := s.run(ctx, command.Barrier(command.NewID(), s.stamp()))
-	return err
-}
-
-// waitApplied waits until this node has applied index (STALE min_revision).
-func (s *KV) waitApplied(ctx context.Context, index uint64) error {
-	for s.reader.Applied() < index {
-		select {
-		case <-ctx.Done():
-			return newError(codes.DeadlineExceeded, ReasonRevisionMissing, "", "revision not reached", nil)
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
-	return nil
-}
-
 // Range implements raftkvv1.KVServer (WBS 4.4.3, D-34). Each page is read with
-// one iterator after its own read point, so a page is linearizable; a
-// multi-page scan is not one snapshot.
+// one iterator after its own read point (ReadIndex on any member, like Get),
+// so a page is linearizable; a multi-page scan is not one snapshot.
 func (s *KV) Range(ctx context.Context, req *raftkvv1.RangeRequest) (*raftkvv1.RangeResponse, error) {
 	if err := s.checkCluster(req.GetHeader()); err != nil {
 		return nil, err
@@ -123,23 +99,39 @@ func (s *KV) Range(ctx context.Context, req *raftkvv1.RangeRequest) (*raftkvv1.R
 	if err != nil {
 		return nil, err
 	}
-	if req.GetConsistency() == raftkvv1.Consistency_STALE {
-		if err := s.waitApplied(ctx, req.GetMinRevision()); err != nil {
-			return nil, err
-		}
-	} else {
-		if req.GetMinRevision() != 0 {
-			return nil, newError(codes.InvalidArgument, ReasonMalformed, "", "min_revision requires STALE consistency", nil)
-		}
-		if err := s.linearizableReadPoint(ctx); err != nil {
-			return nil, err
-		}
+	stale := req.GetConsistency() == raftkvv1.Consistency_STALE
+	if !stale && req.GetMinRevision() != 0 {
+		return nil, newError(codes.InvalidArgument, ReasonMalformed, "", "min_revision requires STALE consistency", nil)
 	}
-	kvs, more, err := s.reader.Range(opts)
-	if err != nil {
-		return nil, newError(codes.DataLoss, ReasonStorage, "", err.Error(), nil)
+	var (
+		rev  uint64
+		kvs  []storage.KV
+		more bool
+	)
+	// The page is read by one iterator inside the read callback, so it is a
+	// snapshot at or after the read point: each page is linearizable (D-34).
+	read := func() error {
+		rev = s.reader.Applied()
+		var err error
+		if kvs, more, err = s.reader.Range(opts); err != nil {
+			return &storageErr{err}
+		}
+		return nil
+	}
+	ctx, cancel := replyBefore(ctx)
+	defer cancel()
+	if stale {
+		if err := s.member.WaitApplied(ctx, req.GetMinRevision()); err != nil {
+			return nil, mapStaleWaitError(err)
+		}
+		if err := read(); err != nil {
+			return nil, mapReadError(err)
+		}
+	} else if err := s.member.LinearizableRead(ctx, read); err != nil { // same ReadIndex path as Get (D-05)
+		return nil, mapReadError(err)
 	}
 	resp := &raftkvv1.RangeResponse{Header: s.header(), More: more}
+	resp.Header.Revision = rev
 	for _, kv := range kvs {
 		resp.Kvs = append(resp.Kvs, toKeyValue(kv.Key, kv.Value))
 	}

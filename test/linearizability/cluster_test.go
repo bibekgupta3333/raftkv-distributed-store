@@ -22,7 +22,9 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 
 // WBS 3.4.3: concurrent clients hammer a real 5-node cluster (real gRPC on
 // localhost) while a nemesis kills the leader, kills a follower, and
-// partitions the leader and then a minority away. Every operation is recorded
+// partitions the leader and then a minority away. Since M4 reads use ReadIndex
+// and half the workers read from a fixed member, so followers and partitioned
+// old leaders serve (or refuse) linearizable reads too. Every operation is recorded
 // and the history must check as linearizable: 0 violations. The checker's
 // timeout counts as failure.
 func TestClusterIsLinearizableUnderFaults(t *testing.T) {
@@ -33,7 +35,8 @@ func TestClusterIsLinearizableUnderFaults(t *testing.T) {
 	c.Leader(15 * time.Second)
 
 	rec := NewRecorder()
-	wl := NewWorkload(rec, WorkloadConfig{Workers: 6, Keys: 4, OpTime: 4 * time.Second, Seed: 1})
+	const workers = 6
+	wl := NewWorkload(rec, WorkloadConfig{Workers: workers, Keys: 4, OpTime: 4 * time.Second, Seed: 1})
 
 	runCtx, stop := context.WithCancel(context.Background())
 	defer stop()
@@ -44,16 +47,28 @@ func TestClusterIsLinearizableUnderFaults(t *testing.T) {
 		nemesis(t, runCtx, c)
 	}()
 
-	wl.Run(runCtx, func(int) KV {
-		cl, err := client.New(client.Config{Endpoints: c.Endpoints(), AttemptTimeout: 1500 * time.Millisecond,
+	newClient := func(endpoints []string) *client.Client {
+		cl, err := client.New(client.Config{Endpoints: endpoints, AttemptTimeout: 1500 * time.Millisecond,
 			ConnectTimeout: 200 * time.Millisecond})
 		if err != nil {
-			t.Error(err)
-			return nil
+			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = cl.Close() })
 		return cl
-	})
+	}
+	eps := c.Endpoints()
+	kvs := make([]KV, workers)
+	for i := range kvs {
+		cl := newClient(eps)
+		kvs[i] = cl
+		if i%2 == 0 {
+			// WBS 4.2.2: half the workers read from one fixed member,
+			// so linearizable reads are served by followers as well as
+			// the leader (ReadIndex via the leader, D-05).
+			kvs[i] = pinnedReads{KV: cl, reads: newClient([]string{eps[(i/2)%len(eps)]})}
+		}
+	}
+	wl.Run(runCtx, func(worker int) KV { return kvs[worker] })
 	<-nemesisDone
 
 	// Everything is healed; the cluster must still serve and converge.
@@ -96,6 +111,16 @@ func TestClusterIsLinearizableUnderFaults(t *testing.T) {
 			t.Fatalf("node %d state differs after the run: %x", id, hashes)
 		}
 	}
+}
+
+// pinnedReads sends writes through a normal client and reads to one member.
+type pinnedReads struct {
+	KV
+	reads *client.Client
+}
+
+func (p pinnedReads) Get(ctx context.Context, key []byte, opts ...client.Option) (*client.GetResult, error) {
+	return p.reads.Get(ctx, key, opts...)
 }
 
 // nemesis injects the faults of WBS 3.4.3, one at a time, with quiet gaps.

@@ -29,10 +29,14 @@ type fakeMember struct {
 }
 
 func (m *fakeMember) Propose(context.Context, []byte) (uint64, uint64, error) { return 0, 0, m.err }
-func (m *fakeMember) Status() raft.Status                                     { return m.st }
-func (m *fakeMember) ID() uint64                                              { return m.st.ID }
-func (m *fakeMember) ClusterID() uint64                                       { return 1 }
-func (m *fakeMember) PeerAddr(id uint64) string                               { return m.addrs[id] }
+func (m *fakeMember) LinearizableRead(_ context.Context, read func() error) error {
+	return read()
+}
+func (m *fakeMember) WaitApplied(context.Context, uint64) error { return nil }
+func (m *fakeMember) Status() raft.Status                       { return m.st }
+func (m *fakeMember) ID() uint64                                { return m.st.ID }
+func (m *fakeMember) ClusterID() uint64                         { return 1 }
+func (m *fakeMember) PeerAddr(id uint64) string                 { return m.addrs[id] }
 
 type fakeReader struct{}
 
