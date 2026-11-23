@@ -2,7 +2,9 @@
 
 A replicated key-value store built on the Raft consensus algorithm, written from scratch in Go as a learning project.
 
-> **Status:** design phase. No code yet. See the [roadmap](docs/implementation-roadmap.md).
+> **Status:** in development. Milestones M0–M3 are done: Raft core, deterministic simulator, write-ahead log,
+> gRPC transport, a 5-node cluster, and a basic KV API (`Put`, `Get`, `Delete`). M4–M7 are in progress. See the
+> [roadmap](docs/implementation-roadmap.md) and [WBS](WBS.md).
 
 ## Overview
 
@@ -10,6 +12,8 @@ RaftKV runs as a 5-node cluster. The nodes elect a leader, replicate every write
 it, and keep serving as long as any 3 nodes are up. Reads are linearizable.
 
 ## Features
+
+The v1.0 feature set. The status note above says which parts are built.
 
 - Leader election with PreVote and CheckQuorum
 - Log replication with majority commit
@@ -27,13 +31,26 @@ Go · gRPC · Protocol Buffers · Pebble · Docker · Kubernetes (kind) · Prome
 
 ## Getting started
 
-Not available yet. The first runnable cluster arrives in milestone M2. The planned commands are:
+Requires Go (the toolchain in `go.mod` is fetched automatically) and Docker for the cluster.
 
 ```sh
-make test   # unit and simulator tests
-make e2e    # 5-node cluster in docker-compose with fault injection
-make chaos  # Chaos Mesh tests on a local kind cluster
+make build         # build raftkvd and raftkvctl into bin/
+make test          # unit tests
+make sim           # deterministic simulator (SEEDS=500 FAULTS=full)
+make cluster-up    # 5-node cluster plus Prometheus (localhost:19090) in docker-compose
+make e2e           # e2e tests against the docker-compose cluster with fault injection
+make cluster-down  # stop the cluster and delete its data
 ```
+
+With the cluster up, try the CLI:
+
+```sh
+EP=127.0.0.1:17001,127.0.0.1:17002,127.0.0.1:17003,127.0.0.1:17004,127.0.0.1:17005
+bin/raftkvctl put --endpoints=$EP color blue
+bin/raftkvctl get --endpoints=$EP color
+```
+
+Run `make help` for all targets.
 
 ## Documentation
 
@@ -50,4 +67,4 @@ See [Agent.md](Agent.md) for project conventions. Log notable changes in [CHANGE
 
 ## License
 
-Not chosen yet. Apache-2.0 is planned ([D-22](docs/design-decisions.md)).
+[Apache-2.0](LICENSE).

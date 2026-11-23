@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 ## [Unreleased]
 
 ### Changed
+- 2026-11-23: Brought `WBS.md` (100/201 leaves ticked with PR links), `README.md`, `Agent.md` and `memory.md` up
+  to date with the merged M0–M3 code.
+- 2026-11-22: `raft.proto`: `AppendEntries` request/response gained a `heartbeat` flag (#6); `Command` gained
+  `request_id` and a `GetOp` (#9).
 - 2026-11-22: Rewrote `README.md` with standard sections: overview, features, tech stack, getting started,
   documentation, contributing, license.
 - 2026-11-21: **Re-scoped as a learning project.** Speed is no longer a goal. Milestones are now M0–M7: the old M7
@@ -23,6 +27,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   Decisions D-13, D-15, D-20, D-37, D-39–D-42, D-44, D-45 removed; their IDs are not reused.
 
 ### Added
+- 2026-11-22: M3 Pebble state machine (`internal/storage`): Pebble WAL off, `appliedIndex` in the apply batch,
+  durable applied index, D-30 truncation bound, recovery by WAL replay, 500-round `kill -9` crash suite (#9).
+- 2026-11-22: M3 command envelope (`internal/command`) and KV service (`internal/server`): `Put`, `Delete`, `Get`
+  through the log, proposal tracker, `NOT_LEADER` with leader hint (#9).
+- 2026-11-22: M3 client library (`pkg/client`) with leader cache, hint following and deadline-bounded retries;
+  `raftkvctl put/get/del` and `raftkvctl debug state-hash` (#9).
+- 2026-11-22: M3 linearizability harness (`test/linearizability`): history recorder, per-key Porcupine model, fault
+  run on an in-process 5-node cluster (#9).
+- 2026-11-22: M2 multi-stage Dockerfile, 5-node docker-compose cluster with Prometheus, `make cluster-up/down/logs`,
+  and the `test/e2e` harness with a seeded fault driver; `e2e-short` (PR) and `e2e-long` (nightly) CI jobs (#8).
+- 2026-11-22: M1 deterministic simulator (`test/sim`) with fault profiles, invariant checker, JSONL traces,
+  regression seeds, `make sim`, a 500-seed PR job and a nightly 100,000-seed job (#7).
+- 2026-11-22: M2 WAL-backed `raft.Storage` (`internal/walstore`), gRPC peer transport, node driver loop, YAML config,
+  node identity file, `raftkvd` wired up, `raftkvctl debug wal-dump`, slog logs, Prometheus metrics, OTel spans (#6).
+- 2026-11-22: M1 Raft core (`internal/raft`): `RawNode`, elections with PreVote and CheckQuorum, log replication
+  with fast backtracking, proposal limits, Figure 7/8 scenario tests (#5).
+- 2026-11-22: M2 segmented WAL (`internal/wal`): CRC32C records, segment rollover, replay with torn-tail repair,
+  fault-injecting FS shim, crash matrix, fatal-on-fsync-error, `ReleaseTo` (#4).
+- 2026-11-22: M0 protobuf API (`api/raftkv/v1`: kv, cluster, raft) with committed generated code (#3).
+- 2026-11-22: M0 repo skeleton, Apache-2.0 license, Makefile, pinned `go tool` directives, golangci-lint with the
+  D-24 `time.Now` ban in `internal/raft`, buf config, version-stamped `raftkvd`/`raftkvctl`, PR CI workflow (#2).
 - 2026-11-21: Initial design-phase documentation: `README.md`, `docs/design-decisions.md` (decisions D-01–D-24,
   performance targets, open questions), `docs/architecture.md`, `docs/system-design.md`, `docs/api-design.md`,
   `docs/storage-design.md`, `docs/testing-benchmarks.md`, `docs/ci-e2e.md`, `docs/implementation-roadmap.md`.
