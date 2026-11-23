@@ -26,6 +26,7 @@ import (
 // nodes' real addresses and are never partitioned.
 type Cluster struct {
 	tb  testing.TB
+	now func() time.Time
 	ids []uint64
 
 	mu      sync.Mutex
@@ -41,6 +42,9 @@ type Cluster struct {
 type Options struct {
 	// Tick is the Raft tick (default 10 ms: elections in 100-200 ms).
 	Tick time.Duration
+	// Now, if set, replaces the wall clock every node stamps into commands
+	// (D-27), so tests can move session time without waiting.
+	Now func() time.Time
 	// LeaseReads turns on lease reads (D-25). With the fixed 100 ms margin
 	// the lease is only positive for a Tick above about 13 ms; use 50 ms.
 	LeaseReads bool
@@ -52,7 +56,7 @@ func New(tb testing.TB, n int, o Options) *Cluster {
 	if o.Tick == 0 {
 		o.Tick = 10 * time.Millisecond
 	}
-	c := &Cluster{tb: tb, real: map[uint64]string{}, cfgs: map[uint64]node.Config{},
+	c := &Cluster{tb: tb, now: o.Now, real: map[uint64]string{}, cfgs: map[uint64]node.Config{},
 		proxies: map[[2]uint64]*proxy{}, nodes: map[uint64]*server.KVNode{},
 		cancels: map[uint64]context.CancelFunc{}, dones: map[uint64]chan error{}}
 	lises := map[uint64]net.Listener{}
@@ -106,6 +110,9 @@ func (c *Cluster) startWith(id uint64, lis net.Listener) {
 	kn, err := server.OpenKVNode(c.cfgs[id], node.Options{Listener: lis, LogWriter: io.Discard})
 	if err != nil {
 		c.tb.Fatalf("OpenKVNode(%d): %v", id, err)
+	}
+	if c.now != nil {
+		kn.KV.SetClock(c.now)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -288,4 +295,28 @@ func (c *Cluster) StateHashes(timeout time.Duration) map[uint64][sha256.Size]byt
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// SessionHashes waits until every running node has applied the same index and
+// returns each node's session table hash and session count (WBS 4.3.3).
+func (c *Cluster) SessionHashes(timeout time.Duration) map[uint64]SessionTable {
+	c.tb.Helper()
+	c.StateHashes(timeout) // converge first
+	out := map[uint64]SessionTable{}
+	for _, id := range c.ids {
+		if n := c.Node(id); n != nil {
+			cnt, h, err := n.Store.SessionHash()
+			if err != nil {
+				c.tb.Fatal(err)
+			}
+			out[id] = SessionTable{Sessions: cnt, Hash: h}
+		}
+	}
+	return out
+}
+
+// SessionTable summarizes one replica's session table.
+type SessionTable struct {
+	Sessions int
+	Hash     [sha256.Size]byte
 }

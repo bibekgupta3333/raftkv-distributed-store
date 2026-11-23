@@ -2,6 +2,28 @@
 
 Context and reasoning that isn't obvious from the docs or git history. Newest first.
 
+## 2026-11-23 — M4 reads, observer, Kubernetes (PRs #11–#14)
+
+- **Never put raw bytes in the log.** Since M3 an entry that doesn't decode as a `Command` is fatal on every replica
+  (D-33). Anything that bypasses the KV service (debug RPC, test harnesses) must propose an encoded `Command`. This
+  is what broke e2e after M3 (#11).
+- **Only one docker-compose e2e run per Docker host.** Container names, ports and volume names are hard-coded, so
+  `COMPOSE_PROJECT_NAME` can't isolate parallel runs.
+- **ReadIndex messages carry no term on purpose.** The leader confirmed leadership *after* the request arrived, so
+  the answer stays valid even if the follower's term moved on. A read must never join a heartbeat round already in
+  flight: that round's index can miss a write acked in between (`TestReadIndexLaterRequestGetsLaterIndex`).
+- **Lease reads are fragile.** The lease uses `ElectionTick-1` ticks because a follower can tick right after
+  resetting its timer, and a lease does not survive a voter restart (a restarted node votes immediately). That is
+  why lease reads stay off by default and the `lease` sim profile has no crashes.
+- **Kubernetes bootstrap.** The headless peer Service needs `publishNotReadyAddresses: true` and the StatefulSet
+  `podManagementPolicy: Parallel`; otherwise readiness (which needs a leader) deadlocks. Liveness must never depend
+  on leadership, because a node in a minority partition is healthy.
+- **Pebble's file lock is the only guard against two processes sharing a data dir** (pod-kill can start the
+  replacement before the old container dies). The WAL has no lock of its own.
+- **An ordinal-derived node ID is safe only while the PVC survives** (D-32). Disk replacement needs M6.
+- **Observer gotchas.** Dial with `MaxDelay: 1s` or a restarted node shows DOWN for minutes (gRPC backoff). 64-bit
+  IDs go to the page as JSON strings because JS numbers lose precision above 2^53.
+
 ## 2026-11-23 — M0–M3 built (PRs #2–#9)
 
 - **Sim false positive, seed 9940 (0e3f6b1).** The Leader Completeness check first compared the *entry's* term

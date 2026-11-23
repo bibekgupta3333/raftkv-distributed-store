@@ -27,11 +27,11 @@ tasks, and every task aims at a working, tested feature.
 | M1 | Raft core + deterministic simulator | 36/39 | 5 | In progress |
 | M2 | WAL + gRPC transport + real 5-process cluster | 33/38 | 4 | In progress |
 | M3 | Pebble state machine + basic KV | 17/20 | 2.5 | In progress |
-| M4 | Linearizable reads, client sessions, full KV API | 0/25 | 3.5 | Not started |
+| M4 | Linearizable reads, client sessions, full KV API | 9/25 | 3.5 | In progress |
 | M5 | Snapshots + follower catch-up | 0/18 | 2.5 | Not started |
 | M6 | Membership changes + leadership transfer | 0/21 | 3 | Not started |
-| M7 | Kubernetes, observer UI, chaos tests, v1.0 | 0/25 | 3.5 | Not started |
-| **Total** | | **100/201** | **25** | |
+| M7 | Kubernetes, observer UI, chaos tests, v1.0 | 12/25 | 3.5 | In progress |
+| **Total** | | **121/201** | **25** | |
 
 M0–M3 are "In progress" only because their exit reviews (release tags, linked evidence) and a few e2e leaves are
 still open; all their feature work is merged (#2–#9).
@@ -200,17 +200,17 @@ still open; all their feature work is merged (#2–#9).
 
 ## 4. M4 — Linearizable reads, client sessions, full KV API
 
-- [ ] **4.1 ReadIndex (Raft core)**
-  - [ ] 4.1.1 `ReadIndex` request: record commit index, require a current-term commit first → unit test
-  - [ ] 4.1.2 Confirm leadership with a heartbeat quorum, batching concurrent requests → test: many readers share one round
-  - [ ] 4.1.3 `ReadStates` in `Ready`, and follower ReadIndex via the leader (D-36) → unit and sim tests
-  - [ ] 4.1.4 Sim: a partitioned old leader never completes a ReadIndex after a new leader exists; a read right after election waits for the no-op → 10,000 seeds pass
-- [ ] **4.2 Read path**
-  - [ ] 4.2.1 Wait until `appliedIndex ≥ readIndex`, deadline-aware → unit test
-  - [ ] 4.2.2 `Get` via ReadIndex on the leader and on followers (D-05) → e2e tests
-  - [ ] 4.2.3 Opt-in stale reads that return the applied index → test
-  - [ ] 4.2.4 Optional lease reads behind a flag, off by default (D-25) → unit tests
-  - [ ] 4.2.5 Lease sim: violation found when drift is beyond the bound, none within it → both asserted
+- [x] **4.1 ReadIndex (Raft core)**
+  - [x] 4.1.1 `ReadIndex` request: record commit index, require a current-term commit first → unit test (#14)
+  - [x] 4.1.2 Confirm leadership with a heartbeat quorum, batching concurrent requests → test: many readers share one round (#14)
+  - [x] 4.1.3 `ReadStates` in `Ready`, and follower ReadIndex via the leader (D-36) → unit and sim tests (#14)
+  - [x] 4.1.4 Sim: a partitioned old leader never completes a ReadIndex after a new leader exists; a read right after election waits for the no-op → 10,000 seeds pass (#14)
+- [x] **4.2 Read path**
+  - [x] 4.2.1 Wait until `appliedIndex ≥ readIndex`, deadline-aware → unit test (#14)
+  - [x] 4.2.2 `Get` via ReadIndex on the leader and on followers (D-05) → e2e tests (#14)
+  - [x] 4.2.3 Opt-in stale reads that return the applied index → test (#14)
+  - [x] 4.2.4 Optional lease reads behind a flag, off by default (D-25) → unit tests (#14)
+  - [x] 4.2.5 Lease sim: violation found when drift is beyond the bound, none within it → both asserted (#14)
 - [ ] **4.3 Client sessions (D-09, D-26, D-27)**
   - [ ] 4.3.1 `RegisterSession` through the log, server assigns the ID, stored under the session prefix → integration test
   - [ ] 4.3.2 Dedup on apply: `(client_id, seq)` check, cached response, update in the same batch → unit test
@@ -299,22 +299,22 @@ still open; all their feature work is merged (#2–#9).
 ## 7. M7 — Kubernetes, observer UI, chaos tests, v1.0
 
 - [ ] **7.1 Kubernetes on kind (deploy/k8s, D-16)**
-  - [ ] 7.1.1 Kustomize base: StatefulSet (5 replicas, PVC template, non-root) → `kubectl apply --dry-run=server` passes
-  - [ ] 7.1.2 Headless Service for peer DNS and a client Service → DNS resolves in kind
-  - [ ] 7.1.3 Node ID from the pod ordinal, stable across restarts; config from a ConfigMap → restart keeps the ID
-  - [ ] 7.1.4 Readiness (knows leader, caught up) and liveness (driver loop responds) probes (D-46) → probe behavior checked in kind
-  - [ ] 7.1.5 `preStop` hook that transfers leadership, grace period sized for it → rolling restart test
-  - [ ] 7.1.6 `kind` overlay and `make kind-up` script → 5-node cluster passes the e2e smoke test
-- [ ] **7.2 Observer UI (D-48)**
-  - [ ] 7.2.1 `cmd/raftkv-observer`: polls `Cluster.Status` on all nodes every 500 ms and serves an embedded HTML page over SSE → page shows 5 node cards against the compose cluster
-  - [ ] 7.2.2 Event timeline (term, leader, snapshot changes, node down) inferred by diffing polls → leader kill appears in the timeline within 1 s
-  - [ ] 7.2.3 Observer added to the docker-compose stack and as a 1-replica k8s Deployment (localhost / port-forward, no auth) → reachable in both
-- [ ] **7.3 Metrics dashboard**
-  - [ ] 7.3.1 One Grafana dashboard (leader, term, commit/applied index, request rate and errors, fsync timing) in compose → JSON committed, imports cleanly
+  - [x] 7.1.1 Kustomize base: StatefulSet (5 replicas, PVC template, non-root) → `kubectl apply --dry-run=server` passes (#13)
+  - [x] 7.1.2 Headless Service for peer DNS and a client Service → DNS resolves in kind (#13)
+  - [x] 7.1.3 Node ID from the pod ordinal, stable across restarts; config from a ConfigMap → restart keeps the ID (#13)
+  - [x] 7.1.4 Readiness (knows leader, caught up) and liveness (driver loop responds) probes (D-46) → probe behavior checked in kind (#13)
+  - [ ] 7.1.5 `preStop` hook that transfers leadership, grace period sized for it → rolling restart test (partial #13: preStop sleep + grace period; leadership transfer waits for M6)
+  - [x] 7.1.6 `kind` overlay and `make kind-up` script → 5-node cluster passes the e2e smoke test (#13)
+- [x] **7.2 Observer UI (D-48)**
+  - [x] 7.2.1 `cmd/raftkv-observer`: polls `Cluster.Status` on all nodes every 500 ms and serves an embedded HTML page over SSE → page shows 5 node cards against the compose cluster (#12)
+  - [x] 7.2.2 Event timeline (term, leader, snapshot changes, node down) inferred by diffing polls → leader kill appears in the timeline within 1 s (#12)
+  - [x] 7.2.3 Observer added to the docker-compose stack and as a 1-replica k8s Deployment (localhost / port-forward, no auth) → reachable in both (#12)
+- [x] **7.3 Metrics dashboard**
+  - [x] 7.3.1 One Grafana dashboard (leader, term, commit/applied index, request rate and errors, fsync timing) in compose → JSON committed, imports cleanly (#12)
 - [ ] **7.4 Chaos tests (test/chaos, D-47)**
-  - [ ] 7.4.1 Install Chaos Mesh on kind (`make chaos-up`) → Chaos Mesh pods running
-  - [ ] 7.4.2 `PodChaos` pod-kill manifests → applied in kind
-  - [ ] 7.4.3 `NetworkChaos` partition, delay, and loss manifests → applied in kind
+  - [x] 7.4.1 Install Chaos Mesh on kind (`make chaos-up`) → Chaos Mesh pods running (#13)
+  - [x] 7.4.2 `PodChaos` pod-kill manifests → applied in kind (#13)
+  - [x] 7.4.3 `NetworkChaos` partition, delay, and loss manifests → applied in kind (#13)
   - [ ] 7.4.4 Chaos driver: run a fault schedule while recording histories, then run Porcupine → one automated run, 0 violations
   - [ ] 7.4.5 Rolling restart of the StatefulSet under load → 0 violations, each pod hands off leadership
   - [ ] 7.4.6 Add the kind + Chaos Mesh job to `nightly.yml` → 3 green nights in a row

@@ -2,9 +2,14 @@
 //
 // It connects to every endpoint, caches the leader, follows NOT_LEADER hints,
 // and retries with jittered exponential backoff inside the caller's deadline.
-// Without sessions (M4, D-09) a write whose outcome is unknown (timeout,
-// connection reset, leadership lost after proposing) is NOT retried by default,
-// because a retry could apply it twice; the caller gets an indeterminate [Error].
+//
+// Writes are exactly-once (D-09, D-26): the client registers a session on its
+// first write, gives every logical write the next sequence number, and reuses
+// that number on every retry, so a write whose outcome was unknown (timeout,
+// connection reset, leadership lost after proposing) is retried safely and
+// applied at most once. With [Config.DisableSessions] such a write is NOT
+// retried by default, because a retry could apply it twice; the caller gets
+// an indeterminate [Error].
 package client
 
 import (
@@ -42,9 +47,15 @@ type Config struct {
 	ConnectTimeout time.Duration
 	// MaxRedirects bounds consecutive hint redirects before backing off (3).
 	MaxRedirects int
-	// RetryIndeterminate retries writes whose outcome is unknown. Only safe for
-	// idempotent use until sessions exist (M4); default false.
+	// RetryIndeterminate retries writes whose outcome is unknown even without a
+	// session. Only safe for idempotent use; default false. Writes with a
+	// session always retry with the same sequence.
 	RetryIndeterminate bool
+	// DisableSessions sends writes without a session (at-least-once on retry).
+	DisableSessions bool
+	// Redirect asks followers to answer writes with NOT_LEADER and a leader
+	// hint instead of forwarding them to the leader (D-28; default: forward).
+	Redirect bool
 	// Backoff returns the sleep before retry number attempt (0-based). The
 	// default is rand(0, min(1 s, 25 ms * 2^attempt)) (api-design 6.2).
 	Backoff func(attempt int) time.Duration
@@ -69,7 +80,11 @@ func (c *Config) setDefaults() {
 	if len(c.DialOptions) == 0 {
 		c.DialOptions = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 	}
+	// A Range page is up to 4 MiB of keys and values (D-11) plus framing.
+	c.DialOptions = append(c.DialOptions, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxRecvBytes)))
 }
+
+const maxRecvBytes = 8 << 20
 
 func defaultBackoff(attempt int) time.Duration {
 	limit := time.Second
@@ -94,6 +109,8 @@ type Client struct {
 	mu     sync.Mutex
 	leader int // index of the cached leader endpoint, -1 if unknown
 	next   int // round-robin start when there is no cached leader
+
+	sess sessionState
 }
 
 // New connects (lazily, all endpoints) and returns a Client.
@@ -206,8 +223,11 @@ func (ep *endpoint) ready(ctx context.Context, timeout time.Duration) bool {
 }
 
 // call runs one logical request with leader following and retries. f performs
-// one RPC and returns the responding member's ID (0 if unknown).
-func (c *Client) call(ctx context.Context, write bool, f func(ctx context.Context, kv raftkvv1.KVClient) (member uint64, err error)) error {
+// one RPC and returns the response header (nil on error). A write is retried
+// after an indeterminate failure only if retrySafe (it carries a session) or
+// RetryIndeterminate is set; once any attempt was indeterminate, the final
+// error is indeterminate too, whatever the last attempt said.
+func (c *Client) call(ctx context.Context, write, retrySafe bool, f func(ctx context.Context, kv raftkvv1.KVClient) (*raftkvv1.ResponseHeader, error)) error {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.cfg.DefaultTimeout)
@@ -228,8 +248,13 @@ func (c *Client) call(ctx context.Context, write bool, f func(ctx context.Contex
 			return false
 		}
 	}
+	maybeApplied := false // some attempt of this write may have been applied
+	sent := 0             // RPCs actually sent
 	finish := func(e *Error) error {
-		e.Attempts = attempt + 1
+		e.Attempts = sent
+		if write && maybeApplied {
+			e.Outcome = OutcomeIndeterminate
+		}
 		return e
 	}
 	for tries := 1; ; tries++ {
@@ -247,20 +272,28 @@ func (c *Client) call(ctx context.Context, write bool, f func(ctx context.Contex
 			continue
 		}
 		actx, cancel := context.WithTimeout(ctx, c.cfg.AttemptTimeout)
-		member, err := f(actx, ep.kv)
+		sent++
+		hdr, err := f(actx, ep.kv)
 		cancel()
-		if member != 0 {
-			ep.memberID.Store(member)
+		if m := hdr.GetMemberId(); m != 0 {
+			ep.memberID.Store(m)
 		}
 		if err == nil {
 			if write {
 				// Only a write proves leadership: any member serves
-				// reads (D-05), so a read must not pin a follower.
+				// reads (D-05), so a read must not pin a follower. A
+				// forwarded write names the leader in its header (D-28).
+				if l := c.resolve(&raftkvv1.LeaderHint{LeaderId: hdr.GetLeaderId()}); l >= 0 {
+					cur = l
+				}
 				c.setLeader(cur)
 			}
 			return nil
 		}
 		last = fromRPC(err)
+		if last.Indeterminate() {
+			maybeApplied = true
+		}
 		switch {
 		case last.Reason == reasonNotLeader && last.Hint != nil && c.resolve(last.Hint) >= 0 && redirects < c.cfg.MaxRedirects:
 			c.forget(cur)
@@ -281,7 +314,7 @@ func (c *Client) call(ctx context.Context, write bool, f func(ctx context.Contex
 			// OUTCOME_UNKNOWN, or no status at all (reset, attempt deadline).
 			// A write may have been applied: never resend it unless asked.
 			c.forget(cur)
-			if write && last.Indeterminate() && !c.cfg.RetryIndeterminate {
+			if write && last.Indeterminate() && !retrySafe && !c.cfg.RetryIndeterminate {
 				return finish(last)
 			}
 			cur = (cur + 1) % len(c.eps)
@@ -306,7 +339,11 @@ func (c *Client) expired(ctx context.Context, last *Error) *Error {
 }
 
 func (c *Client) header() *raftkvv1.RequestHeader {
-	return &raftkvv1.RequestHeader{ClusterId: c.cfg.ClusterID, WriteRouting: raftkvv1.WriteRouting_REDIRECT}
+	h := &raftkvv1.RequestHeader{ClusterId: c.cfg.ClusterID, WriteRouting: raftkvv1.WriteRouting_FORWARD}
+	if c.cfg.Redirect {
+		h.WriteRouting = raftkvv1.WriteRouting_REDIRECT
+	}
+	return h
 }
 
 // KeyValue is a stored value with its revisions.
@@ -375,10 +412,10 @@ func collect(os []Option) opts {
 func (c *Client) Put(ctx context.Context, key, value []byte, os ...Option) (*PutResult, error) {
 	o := collect(os)
 	var resp *raftkvv1.PutResponse
-	err := c.call(ctx, true, func(ctx context.Context, kv raftkvv1.KVClient) (uint64, error) {
+	err := c.write(ctx, func(ctx context.Context, kv raftkvv1.KVClient, ws *raftkvv1.WriteSession) (*raftkvv1.ResponseHeader, error) {
 		var err error
-		resp, err = kv.Put(ctx, &raftkvv1.PutRequest{Header: c.header(), Key: key, Value: value, ReturnPrevious: o.previous})
-		return resp.GetHeader().GetMemberId(), err
+		resp, err = kv.Put(ctx, &raftkvv1.PutRequest{Header: c.header(), Key: key, Value: value, ReturnPrevious: o.previous, Session: ws})
+		return resp.GetHeader(), err
 	})
 	if err != nil {
 		return nil, err
@@ -390,10 +427,10 @@ func (c *Client) Put(ctx context.Context, key, value []byte, os ...Option) (*Put
 func (c *Client) Delete(ctx context.Context, key []byte, os ...Option) (*DeleteResult, error) {
 	o := collect(os)
 	var resp *raftkvv1.DeleteResponse
-	err := c.call(ctx, true, func(ctx context.Context, kv raftkvv1.KVClient) (uint64, error) {
+	err := c.write(ctx, func(ctx context.Context, kv raftkvv1.KVClient, ws *raftkvv1.WriteSession) (*raftkvv1.ResponseHeader, error) {
 		var err error
-		resp, err = kv.Delete(ctx, &raftkvv1.DeleteRequest{Header: c.header(), Key: key, ReturnPrevious: o.previous})
-		return resp.GetHeader().GetMemberId(), err
+		resp, err = kv.Delete(ctx, &raftkvv1.DeleteRequest{Header: c.header(), Key: key, ReturnPrevious: o.previous, Session: ws})
+		return resp.GetHeader(), err
 	})
 	if err != nil {
 		return nil, err
@@ -412,10 +449,10 @@ func (c *Client) Get(ctx context.Context, key []byte, os ...Option) (*GetResult,
 		req.Consistency, req.MinRevision = raftkvv1.Consistency_STALE, o.minRevision
 	}
 	var resp *raftkvv1.GetResponse
-	err := c.call(ctx, false, func(ctx context.Context, kv raftkvv1.KVClient) (uint64, error) {
+	err := c.call(ctx, false, false, func(ctx context.Context, kv raftkvv1.KVClient) (*raftkvv1.ResponseHeader, error) {
 		var err error
 		resp, err = kv.Get(ctx, req)
-		return resp.GetHeader().GetMemberId(), err
+		return resp.GetHeader(), err
 	})
 	if err != nil {
 		return nil, err

@@ -5,7 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Added
+- 2026-11-23: ReadIndex in the Raft core: waits for the leader's no-op, batches concurrent reads into one heartbeat
+  round, and lets followers ask the leader through the new `ReadIndex` peer RPC (D-05, D-36) (#14).
+- 2026-11-23: STALE `Get` reports the applied index it read at. Optional lease reads (`--lease-reads`) are off by
+  default (D-25). New error reason `READ_INDEX_TIMEOUT`. The simulator gained a read workload, READ-1/READ-2 checks
+  and a `lease` profile (#14).
+- 2026-11-23: `Cluster.Status`, the `raftkv-observer` live UI (D-48), Grafana with a provisioned dashboard in
+  compose, and `raftkv_grpc_requests_total` / `raftkv_grpc_request_duration_seconds` metrics (#12).
+- 2026-11-23: Kubernetes on kind: Kustomize base and overlay, `/livez` and `/readyz` probes (D-46),
+  `-node-id-from-ordinal`, `make kind-up/kind-down`, `make chaos-up/chaos-apply/chaos-clear/chaos-down`, and Chaos
+  Mesh PodChaos/NetworkChaos manifests (D-47) (#13).
+
 ### Changed
+- 2026-11-23: Linearizable `Get` is served by any member through ReadIndex instead of through the log. Followers no
+  longer answer `Get` with NOT_LEADER. D-25 lease is now `(ElectionTick-1)*tick*(1-drift)-margin` = 710 ms (#14).
 - 2026-11-23: Brought `WBS.md` (100/201 leaves ticked with PR links), `README.md`, `Agent.md` and `memory.md` up
   to date with the merged M0–M3 code.
 - 2026-11-22: `raft.proto`: `AppendEntries` request/response gained a `heartbeat` flag (#6); `Command` gained
@@ -59,4 +73,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   invariant) is Decided. D-25 to D-47 amend D-11, D-12, D-23, and D-24.
 
 ### Fixed
+- 2026-11-23: docker-compose e2e, broken since M3. The harness now proposes encoded Put commands, and the debug
+  Propose RPC rejects payloads the state machine cannot apply instead of committing a poison pill (#11).
+- 2026-11-23: Flaky `TestRetryBoundedByDeadline` (#11).
 - 2026-11-21: Aligned CI job and make-target names across `implementation-roadmap.md`, `WBS.md`, and `ci-e2e.md`.

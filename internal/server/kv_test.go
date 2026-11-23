@@ -106,7 +106,9 @@ func details(err error) (info *errdetails.ErrorInfo, hint *raftkvv1.LeaderHint) 
 	return
 }
 
-// WBS 3.2.4: a follower answers NOT_LEADER, DEFINITE, with a LeaderHint.
+// WBS 3.2.4 / 4.4.1: with REDIRECT routing a follower answers NOT_LEADER,
+// DEFINITE, with a LeaderHint (forwarding is the default, see
+// TestFollowerForwardsWrites).
 func TestFollowerReturnsNotLeaderWithHint(t *testing.T) {
 	c := kvtest.New(t, 3, kvtest.Options{})
 	lead := c.Leader(15 * time.Second)
@@ -122,7 +124,8 @@ func TestFollowerReturnsNotLeaderWithHint(t *testing.T) {
 			continue
 		}
 		kv := rawClient(t, c.Addr(id))
-		_, err := kv.Put(ctx5(t), &raftkvv1.PutRequest{Key: []byte("k"), Value: []byte("v")})
+		_, err := kv.Put(ctx5(t), &raftkvv1.PutRequest{Key: []byte("k"), Value: []byte("v"),
+			Header: &raftkvv1.RequestHeader{WriteRouting: raftkvv1.WriteRouting_REDIRECT}})
 		info, hint := details(err)
 		if status.Code(err) != codes.Unavailable || info == nil || info.GetReason() != "NOT_LEADER" ||
 			info.GetMetadata()["outcome"] != "DEFINITE" {
@@ -169,9 +172,6 @@ func TestValidationAndClusterID(t *testing.T) {
 	if _, err := kv.Get(ctx5(t), &raftkvv1.GetRequest{Key: []byte("k"), MinRevision: 5}); status.Code(err) != codes.InvalidArgument {
 		t.Errorf("min_revision on a LINEARIZABLE get: %v", err)
 	}
-	if _, err := kv.Range(ctx5(t), &raftkvv1.RangeRequest{}); status.Code(err) != codes.Unimplemented {
-		t.Errorf("Range = %v, want Unimplemented until M4", err)
-	}
 }
 
 // Data written through the cluster survives a full restart (WAL + Pebble
@@ -201,16 +201,18 @@ func TestRestartRecoversState(t *testing.T) {
 		c.Start(id)
 	}
 	c.Leader(20 * time.Second)
-	for k, want := range map[string]string{"a": "val-a", "b": "", "c": "val-c"} {
-		g, err := cl.Get(ctx, []byte(k))
-		if err != nil || g.Found != (want != "") || (want != "" && string(g.KV.Value) != want) {
-			t.Fatalf("after restart Get(%s) = %+v, %v", k, g, err)
-		}
-	}
+	// Compare before any new command: reads through the log stamp a new
+	// leader time into the session clock (D-27), which is replicated state.
 	after := c.StateHashes(10 * time.Second)
 	for id, h := range after {
 		if h != wantHash { // a new leader's no-op changes appliedIndex, which is not hashed
 			t.Fatalf("node %d state hash changed across a restart", id)
+		}
+	}
+	for k, want := range map[string]string{"a": "val-a", "b": "", "c": "val-c"} {
+		g, err := cl.Get(ctx, []byte(k))
+		if err != nil || g.Found != (want != "") || (want != "" && string(g.KV.Value) != want) {
+			t.Fatalf("after restart Get(%s) = %+v, %v", k, g, err)
 		}
 	}
 }
