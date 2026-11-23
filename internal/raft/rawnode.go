@@ -1,0 +1,161 @@
+package raft
+
+import "fmt"
+
+// Status is a read-only snapshot of a node, for observers and invariant
+// checkers (the simulator, D-18). It is a copy; mutating it has no effect.
+type Status struct {
+	ID        uint64
+	Term      uint64
+	Vote      uint64
+	Lead      uint64
+	State     StateType
+	Commit    uint64
+	Applied   uint64
+	LastIndex uint64
+	// Progress is the replication state per voter; it is non-nil only on the
+	// leader.
+	Progress map[uint64]Progress
+}
+
+// RawNode is the public face of the Raft core (D-01). It wraps the state
+// machine with the Ready/Advance contract described in the package docs.
+//
+// A RawNode is not safe for concurrent use: exactly one goroutine (the driver,
+// D-35) may call it. Mutating methods panic if called while a Ready is
+// outstanding (between Ready and Advance); that is a driver bug.
+type RawNode struct {
+	raft        *raft
+	prevSoft    SoftState
+	prevHard    HardState
+	outstanding bool
+}
+
+// NewRawNode validates cfg and returns a node in the follower state with the
+// HardState and log found in cfg.Storage.
+func NewRawNode(cfg Config) (*RawNode, error) {
+	r, err := newRaft(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &RawNode{raft: r, prevSoft: r.softState(), prevHard: r.hardState()}, nil
+}
+
+func (n *RawNode) mustBeIdle(op string) {
+	if n.outstanding {
+		panic(fmt.Sprintf("raft: %s called while a Ready is outstanding; call Advance first", op))
+	}
+}
+
+// Tick advances logical time by one tick (D-24). Followers and candidates may
+// start an election; leaders heartbeat and run CheckQuorum.
+func (n *RawNode) Tick() {
+	n.mustBeIdle("Tick")
+	n.raft.tick()
+}
+
+// Campaign makes the node start an election immediately (with a PreVote round
+// when Config.PreVote is set) instead of waiting for the election timeout.
+// Useful for bootstrapping and deterministic tests.
+func (n *RawNode) Campaign() {
+	n.mustBeIdle("Campaign")
+	n.raft.campaign(n.raft.cfg.PreVote)
+}
+
+// Propose appends data to the log if this node is the leader and returns the
+// index and term the entry will have if it commits. The entry is committed
+// only once it appears in Ready.CommittedEntries; callers should match on
+// (index, term) because a leader change can replace the entry.
+//
+// Errors:
+//   - [ErrProposalDropped]: no known leader, or the uncommitted-size limit
+//     (D-29) was hit. Retry later.
+//   - *[NotLeaderError] (errors.Is ErrNotLeader): this node follows Leader.
+//     Forwarding arrives in M4 (D-28).
+func (n *RawNode) Propose(data []byte) (index, term uint64, err error) {
+	n.mustBeIdle("Propose")
+	return n.raft.propose(data)
+}
+
+// Step feeds one inbound peer message to the state machine. It returns
+// [ErrUnknownMessage] for an invalid message type. Messages from nodes outside
+// Config.Peers, and messages addressed to another node, are ignored.
+func (n *RawNode) Step(m Message) error {
+	n.mustBeIdle("Step")
+	if !m.Type.valid() {
+		return ErrUnknownMessage
+	}
+	if m.To != n.raft.id {
+		return nil
+	}
+	n.raft.step(m)
+	return nil
+}
+
+// HasReady reports whether Ready would return something to handle. It is
+// cheap and may be called while a Ready is outstanding.
+func (n *RawNode) HasReady() bool {
+	r := n.raft
+	return len(r.msgs) > 0 ||
+		len(r.log.unstable.entries) > 0 ||
+		r.log.hasNextCommittedEnts() ||
+		r.softState() != n.prevSoft ||
+		r.hardState() != n.prevHard
+}
+
+// Ready returns the pending output and marks it outstanding until Advance.
+// Call it only when HasReady is true. See [Ready] for the handling order.
+func (n *RawNode) Ready() Ready {
+	n.mustBeIdle("Ready")
+	r := n.raft
+	rd := Ready{
+		Entries:          r.log.unstableEntries(),
+		CommittedEntries: r.log.nextCommittedEnts(),
+		Messages:         r.msgs,
+	}
+	r.msgs = nil
+	if ss := r.softState(); ss != n.prevSoft {
+		rd.SoftState = &ss
+	}
+	if hs := r.hardState(); hs != n.prevHard {
+		rd.HardState = hs
+		rd.MustSync = hs.Term != n.prevHard.Term || hs.Vote != n.prevHard.Vote
+	}
+	rd.MustSync = rd.MustSync || len(rd.Entries) > 0
+	n.outstanding = true
+	return rd
+}
+
+// Advance tells the core that rd was fully handled: entries and HardState are
+// durable, messages were handed to the transport, committed entries were
+// applied (or queued for the applier in order). It may make a new Ready
+// available (for example a new commit index).
+func (n *RawNode) Advance(rd Ready) {
+	if !n.outstanding {
+		panic("raft: Advance called without an outstanding Ready")
+	}
+	n.outstanding = false
+	if !rd.HardState.IsEmpty() {
+		n.prevHard = rd.HardState
+	}
+	if rd.SoftState != nil {
+		n.prevSoft = *rd.SoftState
+	}
+	n.raft.advance(rd)
+}
+
+// Status returns a snapshot of the node's state.
+func (n *RawNode) Status() Status {
+	r := n.raft
+	s := Status{
+		ID: r.id, Term: r.term, Vote: r.vote, Lead: r.lead, State: r.state,
+		Commit: r.log.committed, Applied: r.log.applied, LastIndex: r.log.lastIndex(),
+	}
+	if r.state == StateLeader {
+		s.Progress = make(map[uint64]Progress, len(r.prs))
+		for id, pr := range r.prs {
+			s.Progress[id] = Progress{Match: pr.Match, Next: pr.Next, State: pr.State, RecentActive: pr.RecentActive}
+		}
+	}
+	return s
+}
