@@ -116,12 +116,25 @@ func (n *RawNode) ReportUnreachable(id uint64) {
 	n.raft.reportUnreachable(id)
 }
 
+// ReportSnapshot tells the core how a snapshot transfer to node id that a
+// MsgSnap asked for ended (D-14). failed means the transfer broke or the
+// follower refused it; there is no resume, so the next attempt starts over. On
+// success or failure the leader returns that follower to Probe and resumes
+// replication once it hears from it. It is a no-op on non-leaders and when no
+// snapshot is pending for id (the follower's acknowledgement may already have
+// moved it on).
+func (n *RawNode) ReportSnapshot(id uint64, failed bool) {
+	n.mustBeIdle("ReportSnapshot")
+	n.raft.reportSnapshot(id, failed)
+}
+
 // HasReady reports whether Ready would return something to handle. It is
 // cheap and may be called while a Ready is outstanding.
 func (n *RawNode) HasReady() bool {
 	r := n.raft
 	return len(r.msgs) > 0 ||
 		len(r.readStates) > 0 ||
+		r.log.hasPendingSnapshot() ||
 		len(r.log.unstable.entries) > 0 ||
 		r.log.hasNextCommittedEnts() ||
 		r.softState() != n.prevSoft ||
@@ -140,6 +153,10 @@ func (n *RawNode) Ready() Ready {
 		ReadStates:       r.readStates,
 	}
 	r.msgs, r.readStates = nil, nil
+	if s := r.log.unstable.snapshot; s != nil {
+		snap := *s
+		rd.Snapshot = &snap
+	}
 	if ss := r.softState(); ss != n.prevSoft {
 		rd.SoftState = &ss
 	}
@@ -147,7 +164,7 @@ func (n *RawNode) Ready() Ready {
 		rd.HardState = hs
 		rd.MustSync = hs.Term != n.prevHard.Term || hs.Vote != n.prevHard.Vote
 	}
-	rd.MustSync = rd.MustSync || len(rd.Entries) > 0
+	rd.MustSync = rd.MustSync || len(rd.Entries) > 0 || rd.Snapshot != nil
 	n.outstanding = true
 	return rd
 }
@@ -180,7 +197,10 @@ func (n *RawNode) Status() Status {
 	if r.state == StateLeader {
 		s.Progress = make(map[uint64]Progress, len(r.prs))
 		for id, pr := range r.prs {
-			s.Progress[id] = Progress{Match: pr.Match, Next: pr.Next, State: pr.State, RecentActive: pr.RecentActive}
+			s.Progress[id] = Progress{
+				Match: pr.Match, Next: pr.Next, State: pr.State,
+				RecentActive: pr.RecentActive, PendingSnapshot: pr.PendingSnapshot,
+			}
 		}
 	}
 	return s

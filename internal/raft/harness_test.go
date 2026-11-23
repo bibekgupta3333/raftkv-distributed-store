@@ -13,6 +13,7 @@ type testNode struct {
 	st      *MemoryStorage
 	applied []Entry
 	reads   []ReadState // every ReadState surfaced, in order
+	snaps   []Snapshot  // every snapshot installed from a Ready, in order
 }
 
 // network is a tiny deterministic in-test cluster: FIFO message queue, nodes
@@ -90,6 +91,12 @@ func (nw *network) node(id uint64) *testNode { return nw.nodes[id] }
 func (nw *network) drain(n *testNode) {
 	for n.rn.HasReady() {
 		rd := n.rn.Ready()
+		if rd.Snapshot != nil {
+			if err := n.st.ApplySnapshot(*rd.Snapshot); err != nil {
+				nw.t.Fatalf("node %d ApplySnapshot: %v", n.id, err)
+			}
+			n.snaps = append(n.snaps, *rd.Snapshot)
+		}
 		n.st.Append(rd.Entries)
 		if !rd.HardState.IsEmpty() {
 			n.st.SetHardState(rd.HardState)

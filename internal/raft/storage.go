@@ -25,8 +25,12 @@ type Storage interface {
 	FirstIndex() (uint64, error)
 	// LastIndex is the index of the last stored entry.
 	LastIndex() (uint64, error)
-	// Snapshot returns the metadata of the latest snapshot. It is a stub until
-	// M5 (D-14); a storage with no snapshot returns the zero value.
+	// Snapshot returns the metadata of the newest snapshot the node can send
+	// (D-14); a storage with no snapshot returns the zero value. A leader
+	// sends it to a follower whose next index was compacted away, so once
+	// the log is compacted it must cover the compaction point: Index >=
+	// FirstIndex-1 (D-30 guarantees this: the log is never trimmed past the
+	// snapshot index). It may return [ErrSnapshotTemporarilyUnavailable].
 	Snapshot() (Snapshot, error)
 }
 
@@ -86,10 +90,49 @@ func (m *MemoryStorage) lastIndex() uint64 { return m.ents[0].Index + uint64(len
 // Snapshot implements [Storage].
 func (m *MemoryStorage) Snapshot() (Snapshot, error) { return m.snapshot, nil }
 
-// ApplySnapshot replaces the whole log with a snapshot marker. Stub for M5.
-func (m *MemoryStorage) ApplySnapshot(s Snapshot) {
+// ApplySnapshot installs a snapshot received from the leader ([Ready.Snapshot]):
+// the whole log is replaced by the snapshot's compaction point (D-14). It
+// returns [ErrSnapOutOfDate] if s is not newer than the current snapshot.
+func (m *MemoryStorage) ApplySnapshot(s Snapshot) error {
+	if s.Index <= m.snapshot.Index {
+		return ErrSnapOutOfDate
+	}
 	m.snapshot = s
 	m.ents = []Entry{{Index: s.Index, Term: s.Term}}
+	return nil
+}
+
+// CreateSnapshot records that the state machine has been snapshotted at index
+// i (the applied index; D-14) and returns the snapshot's metadata. It does not
+// compact the log; call [MemoryStorage.Compact] separately (D-30). i must be in
+// the stored log and newer than the current snapshot.
+func (m *MemoryStorage) CreateSnapshot(i uint64) (Snapshot, error) {
+	if i <= m.snapshot.Index {
+		return Snapshot{}, ErrSnapOutOfDate
+	}
+	offset := m.ents[0].Index
+	if i < offset {
+		return Snapshot{}, ErrCompacted
+	}
+	if i > m.lastIndex() {
+		return Snapshot{}, fmt.Errorf("raft: snapshot %d is beyond last index %d", i, m.lastIndex())
+	}
+	m.snapshot = Snapshot{Index: i, Term: m.ents[i-offset].Term}
+	return m.snapshot, nil
+}
+
+// SetSnapshot records the metadata of a snapshot that already exists outside
+// the log (one found on disk at start-up). It does not touch the log.
+func (m *MemoryStorage) SetSnapshot(s Snapshot) { m.snapshot = s }
+
+// SetCompacted makes an empty storage start after (index, term): the log's
+// compaction point as recovered from disk (a WAL SNAPSHOT_MARKER). It panics if
+// entries are already stored, which would be a driver bug.
+func (m *MemoryStorage) SetCompacted(index, term uint64) {
+	if len(m.ents) != 1 {
+		panic("raft: MemoryStorage.SetCompacted on a non-empty log")
+	}
+	m.ents[0] = Entry{Index: index, Term: term}
 }
 
 // Append persists entries, truncating any stored suffix that conflicts with

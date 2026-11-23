@@ -162,7 +162,12 @@ func TestMemoryStorageHardStateAndSnapshot(t *testing.T) {
 	if hs, _ := st.InitialState(); hs != (HardState{Term: 2, Vote: 1}) {
 		t.Fatalf("hard state = %+v", hs)
 	}
-	st.ApplySnapshot(Snapshot{Index: 10, Term: 3})
+	if err := st.ApplySnapshot(Snapshot{Index: 10, Term: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ApplySnapshot(Snapshot{Index: 10, Term: 3}); !errors.Is(err, ErrSnapOutOfDate) {
+		t.Fatalf("re-applying the same snapshot: err = %v, want ErrSnapOutOfDate", err)
+	}
 	first, _ := st.FirstIndex()
 	last, _ := st.LastIndex()
 	if first != 11 || last != 10 {
