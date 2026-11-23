@@ -36,7 +36,7 @@ func TestClusterIsLinearizableUnderFaults(t *testing.T) {
 
 	rec := NewRecorder()
 	const workers = 6
-	wl := NewWorkload(rec, WorkloadConfig{Workers: workers, Keys: 4, OpTime: 4 * time.Second, Seed: 1})
+	wl := NewWorkload(rec, WorkloadConfig{Workers: workers, Groups: 2, Keys: 3, OpTime: 4 * time.Second, Seed: 1})
 
 	runCtx, stop := context.WithCancel(context.Background())
 	defer stop()
@@ -47,9 +47,9 @@ func TestClusterIsLinearizableUnderFaults(t *testing.T) {
 		nemesis(t, runCtx, c)
 	}()
 
-	newClient := func(endpoints []string) *client.Client {
+	newClient := func(endpoints []string, noSessions bool) *client.Client {
 		cl, err := client.New(client.Config{Endpoints: endpoints, AttemptTimeout: 1500 * time.Millisecond,
-			ConnectTimeout: 200 * time.Millisecond})
+			ConnectTimeout: 200 * time.Millisecond, DisableSessions: noSessions})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -59,13 +59,16 @@ func TestClusterIsLinearizableUnderFaults(t *testing.T) {
 	eps := c.Endpoints()
 	kvs := make([]KV, workers)
 	for i := range kvs {
-		cl := newClient(eps)
+		// Worker 1 writes without a session, so a write whose outcome is
+		// unknown surfaces as indeterminate ("info") instead of being
+		// retried; the others retry exactly-once (D-09).
+		cl := newClient(eps, i == 1)
 		kvs[i] = cl
 		if i%2 == 0 {
 			// WBS 4.2.2: half the workers read from one fixed member,
 			// so linearizable reads are served by followers as well as
 			// the leader (ReadIndex via the leader, D-05).
-			kvs[i] = pinnedReads{KV: cl, reads: newClient([]string{eps[(i/2)%len(eps)]})}
+			kvs[i] = PinnedReads{KV: cl, Reads: newClient([]string{eps[(i/2)%len(eps)]}, false)}
 		}
 	}
 	wl.Run(runCtx, func(worker int) KV { return kvs[worker] })
@@ -97,6 +100,14 @@ func TestClusterIsLinearizableUnderFaults(t *testing.T) {
 	if rep.Stats.OK < 100 {
 		t.Fatalf("only %d operations succeeded; the run proves little", rep.Stats.OK)
 	}
+	// WBS 4.6.1: every kind of operation took part in the checked history.
+	mix := Breakdown(rec.Events())
+	t.Logf("checked operations by kind: %v", mix)
+	for _, kind := range []string{FPut, FGet, FDelete, "cas-swapped", "cas-failed", "range-page"} {
+		if mix[kind] == 0 {
+			t.Errorf("no successful %s in the history", kind)
+		}
+	}
 	if rep.Stats.Info == 0 {
 		t.Log("note: no indeterminate operations occurred in this run")
 	}
@@ -111,16 +122,6 @@ func TestClusterIsLinearizableUnderFaults(t *testing.T) {
 			t.Fatalf("node %d state differs after the run: %x", id, hashes)
 		}
 	}
-}
-
-// pinnedReads sends writes through a normal client and reads to one member.
-type pinnedReads struct {
-	KV
-	reads *client.Client
-}
-
-func (p pinnedReads) Get(ctx context.Context, key []byte, opts ...client.Option) (*client.GetResult, error) {
-	return p.reads.Get(ctx, key, opts...)
 }
 
 // nemesis injects the faults of WBS 3.4.3, one at a time, with quiet gaps.
