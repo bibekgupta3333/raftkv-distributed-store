@@ -42,3 +42,20 @@ jobs:
         with:
           name: sim-long-failure-${{ matrix.faults }}
           path: out/sim/
+  # WBS 2.6.7: long docker-compose e2e (200 kill -9/restart rounds, 40-step seeded fault schedule).
+  e2e-long:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make e2e E2E_PROFILE=nightly E2E_SEED=${{ inputs.base_seed || github.run_id }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-long
+          path: out/e2e/
+          retention-days: 30
