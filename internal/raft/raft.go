@@ -445,6 +445,7 @@ func (r *raft) stepLeader(m Message) {
 			r.handleAppendReject(pr, m)
 			return
 		}
+		oldPaused := pr.isPaused()
 		if !pr.maybeUpdate(m.Index) {
 			return
 		}
@@ -456,6 +457,11 @@ func (r *raft) stepLeader(m Message) {
 		if r.maybeCommit() {
 			r.bcastAppend() // propagate the new commit index
 		} else {
+			if oldPaused {
+				// The follower was waiting on this reply; an empty append
+				// also tells it the current commit index.
+				r.sendAppend(m.From, true)
+			}
 			for r.sendAppend(m.From, false) {
 			}
 		}
