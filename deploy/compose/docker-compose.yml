@@ -1,0 +1,67 @@
+name: raftkv
+
+# 5-node RaftKV cluster plus Prometheus (WBS 2.5.2). The e2e harness drives it
+# from the host: peer gRPC on 127.0.0.1:17001-17005, /metrics on 19001-19005.
+# NET_ADMIN lets the fault driver run iptables / tc inside a node container.
+x-node: &node
+  image: ${IMAGE:-raftkvd:e2e}
+  build:
+    context: ../..
+    target: e2e
+    args:
+      GOFLAGS_TAGS: debugpropose
+  cap_add: [NET_ADMIN]
+  restart: "no"
+  stop_grace_period: 5s
+
+x-peers: &peers --peers=1=node1:7000,2=node2:7000,3=node3:7000,4=node4:7000,5=node5:7000
+
+services:
+  node1:
+    <<: *node
+    hostname: node1
+    container_name: raftkv-node1
+    command: [--data-dir=/data, --node-id=1, --cluster-id=1, --listen=:7000, --metrics-addr=:9100, *peers]
+    ports: ["127.0.0.1:17001:7000", "127.0.0.1:19001:9100"]
+    volumes: ["data1:/data"]
+  node2:
+    <<: *node
+    hostname: node2
+    container_name: raftkv-node2
+    command: [--data-dir=/data, --node-id=2, --cluster-id=1, --listen=:7000, --metrics-addr=:9100, *peers]
+    ports: ["127.0.0.1:17002:7000", "127.0.0.1:19002:9100"]
+    volumes: ["data2:/data"]
+  node3:
+    <<: *node
+    hostname: node3
+    container_name: raftkv-node3
+    command: [--data-dir=/data, --node-id=3, --cluster-id=1, --listen=:7000, --metrics-addr=:9100, *peers]
+    ports: ["127.0.0.1:17003:7000", "127.0.0.1:19003:9100"]
+    volumes: ["data3:/data"]
+  node4:
+    <<: *node
+    hostname: node4
+    container_name: raftkv-node4
+    command: [--data-dir=/data, --node-id=4, --cluster-id=1, --listen=:7000, --metrics-addr=:9100, *peers]
+    ports: ["127.0.0.1:17004:7000", "127.0.0.1:19004:9100"]
+    volumes: ["data4:/data"]
+  node5:
+    <<: *node
+    hostname: node5
+    container_name: raftkv-node5
+    command: [--data-dir=/data, --node-id=5, --cluster-id=1, --listen=:7000, --metrics-addr=:9100, *peers]
+    ports: ["127.0.0.1:17005:7000", "127.0.0.1:19005:9100"]
+    volumes: ["data5:/data"]
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["127.0.0.1:19090:9090"]
+    depends_on: [node1, node2, node3, node4, node5]
+
+volumes:
+  data1: {name: raftkv_data1}
+  data2: {name: raftkv_data2}
+  data3: {name: raftkv_data3}
+  data4: {name: raftkv_data4}
+  data5: {name: raftkv_data5}
