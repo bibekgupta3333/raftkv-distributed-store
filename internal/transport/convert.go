@@ -14,6 +14,8 @@ import (
 //	MsgHeartbeatResp  <-> AppendEntriesResponse (heartbeat=true)
 //	MsgVote/MsgPreVote         <-> RequestVoteRequest (pre_vote flag, D-36)
 //	MsgVoteResp/MsgPreVoteResp <-> RequestVoteResponse (pre_vote flag)
+//	MsgReadIndex               <-> ReadIndexRequest (D-05, term-less)
+//	MsgReadIndexResp           <-> ReadIndexResponse, or an RPC error if rejected
 //
 // The destination (Message.To) is not on the wire: it is the node that
 // receives the stream or RPC, and the receiver fills it in.
@@ -179,4 +181,34 @@ func VoteResponseFromProto(r *raftkvv1.RequestVoteResponse, to uint64) raft.Mess
 		typ = raft.MsgPreVoteResp
 	}
 	return raft.Message{Type: typ, To: to, From: r.GetFrom(), Term: r.GetTerm(), Reject: !r.GetVoteGranted()}
+}
+
+// IsReadIndexRequest reports whether m is carried by the ReadIndex RPC
+// (follower to leader, D-36).
+func IsReadIndexRequest(t raft.MessageType) bool { return t == raft.MsgReadIndex }
+
+// IsReadIndexResponse reports whether m answers a ReadIndex RPC.
+func IsReadIndexResponse(t raft.MessageType) bool { return t == raft.MsgReadIndexResp }
+
+// ReadIndexRequestToProto converts a MsgReadIndex. The message is term-less.
+func ReadIndexRequestToProto(clusterID uint64, m raft.Message) *raftkvv1.ReadIndexRequest {
+	return &raftkvv1.ReadIndexRequest{ClusterId: clusterID, From: m.From, RequestCtx: m.Context}
+}
+
+// ReadIndexRequestFromProto converts a wire request received by node `to`.
+func ReadIndexRequestFromProto(r *raftkvv1.ReadIndexRequest, to uint64) raft.Message {
+	return raft.Message{Type: raft.MsgReadIndex, To: to, From: r.GetFrom(), Context: r.GetRequestCtx()}
+}
+
+// ReadIndexResponseToProto converts a successful MsgReadIndexResp. A rejected
+// one has no wire form: the RPC fails with a status instead.
+func ReadIndexResponseToProto(m raft.Message) *raftkvv1.ReadIndexResponse {
+	return &raftkvv1.ReadIndexResponse{Term: m.Term, ReadIndex: m.Index, RequestCtx: m.Context}
+}
+
+// ReadIndexResponseFromProto converts a wire response from leader, received by
+// node `to`.
+func ReadIndexResponseFromProto(r *raftkvv1.ReadIndexResponse, leader, to uint64) raft.Message {
+	return raft.Message{Type: raft.MsgReadIndexResp, To: to, From: leader, Term: r.GetTerm(),
+		Index: r.GetReadIndex(), Context: r.GetRequestCtx()}
 }
