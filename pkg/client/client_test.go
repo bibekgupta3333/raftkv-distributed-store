@@ -252,8 +252,15 @@ func TestRetryBoundedByDeadline(t *testing.T) {
 	start := time.Now()
 	_, err := cl.Put(ctx, []byte("k"), []byte("v"))
 	var ce *Error
-	if !errors.As(err, &ce) || ce.Reason != "NO_LEADER" || ce.Attempts < 3 {
+	// The deadline either lands in a backoff (the last error is the server's
+	// NO_LEADER) or cuts off an in-flight Put (DeadlineExceeded, and correctly
+	// INDETERMINATE: that write may have been applied). Both are bounded.
+	if !errors.As(err, &ce) || ce.Attempts < 3 {
 		t.Fatalf("err = %v", err)
+	}
+	cutOff := ce.Code == codes.DeadlineExceeded && ce.Indeterminate()
+	if ce.Reason != "NO_LEADER" && !cutOff {
+		t.Fatalf("err = %v, want the last NO_LEADER or an in-flight DeadlineExceeded", err)
 	}
 	if el := time.Since(start); el > time.Second {
 		t.Fatalf("took %v with a 150ms deadline", el)
