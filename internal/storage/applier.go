@@ -98,6 +98,27 @@ func (a *Applier) Apply(entries []raft.Entry) error {
 	return nil
 }
 
+// CheckProposal reports whether data is a command Apply accepts, so a raw
+// payload can be refused before it is proposed instead of becoming a poison
+// pill in the log (node.ProposalChecker; used by the debug Propose RPC).
+func (a *Applier) CheckProposal(data []byte) error {
+	cmd, err := command.Unmarshal(data)
+	if err != nil {
+		return err
+	}
+	switch op := cmd.GetOp().(type) {
+	case *raftkvv1.Command_Put:
+		_, err = command.Put(0, 0, op.Put.GetKey(), op.Put.GetValue())
+	case *raftkvv1.Command_Delete:
+		_, err = command.Delete(0, 0, op.Delete.GetKey())
+	case *raftkvv1.Command_Get:
+		_, err = command.Get(0, 0, op.Get.GetKey())
+	default:
+		err = command.ErrNoOp
+	}
+	return err
+}
+
 func (a *Applier) applyOne(b *ApplyBatch, e raft.Entry) (pendingResult, bool, error) {
 	cmd, err := command.Unmarshal(e.Data)
 	if err != nil {
