@@ -20,6 +20,12 @@ commands:
       exit 3 if the key does not exist
   del [--endpoints a,b,c] [--timeout 10s] [--prev] KEY
       exit 7 if a write's outcome is unknown (it may have been applied)
+  cas [--endpoints a,b,c] (--expect-value V | --expect-revision N | --expect-absent)
+      (--new-value V | --delete) KEY
+      exit 4 if the compare failed (the current value is printed)
+  range [--endpoints a,b,c] [--limit N] [--keys-only] [--reverse] [--all]
+      [--stale [--min-revision N]] [--page-token HEX] (START [END] | --prefix PREFIX)
+      without --all, prints one page and a "more=true next=HEX" line if more remain
   debug state-hash -data-dir DIR
       print a stopped node's applied index and state hash; equal hashes at the
       same applied index mean equal state machines
@@ -41,6 +47,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "put", "get", "del":
 		return runKV(args[0], args[1:], stdout, stderr)
+	case "cas":
+		return runCAS(args[1:], stdout, stderr)
+	case "range":
+		return runRange(args[1:], stdout, stderr)
 	case "debug":
 		return runDebug(args[1:], stdout, stderr)
 	default:
