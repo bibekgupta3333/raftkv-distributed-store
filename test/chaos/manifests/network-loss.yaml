@@ -1,0 +1,18 @@
+# NetworkChaos loss (D-47, WBS 7.4.3): drop 10% of packets on every RaftKV pod
+# for 60 s. gRPC streams must reconnect and replication must recover.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: raftkv-loss
+  namespace: raftkv
+spec:
+  action: loss
+  mode: all
+  selector:
+    namespaces: [raftkv]
+    labelSelectors:
+      app.kubernetes.io/name: raftkv
+  loss:
+    loss: "10"
+    correlation: "25"
+  duration: 60s

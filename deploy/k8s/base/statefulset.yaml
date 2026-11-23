@@ -1,0 +1,92 @@
+# Five RaftKV members with one PVC each (D-16, WBS 7.1.1).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: raftkv
+spec:
+  serviceName: raftkv-peer
+  replicas: 5
+  # All members start together: a quorum (3) must be up before anyone can
+  # become ready, so OrderedReady would deadlock on raftkv-0's readiness.
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      # 7.1.5: SIGTERM already shuts the node down gracefully (WAL synced,
+      # gRPC drained). Leadership transfer before shutdown is M6 work; until
+      # then a killed leader costs one election timeout (1-2 s, D-08).
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: raftkvd
+          image: raftkvd:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config=/etc/raftkv/raftkv.yaml
+            # D-16, WBS 7.1.3: the node ID is 1 + the pod ordinal. The pod
+            # name, the ID and the PVC stay together across restarts, so the
+            # data directory's identity check (D-32) keeps passing.
+            - --node-id-from-ordinal=$(POD_NAME)
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef: {fieldPath: metadata.name}
+          ports:
+            - {name: grpc, containerPort: 7000}
+            - {name: metrics, containerPort: 9100}
+          # D-46. Startup covers WAL replay; liveness = the driver loop answers
+          # (never leadership: a partitioned node is healthy); readiness =
+          # knows the leader and has applied what it knows is committed. The
+          # readiness threshold (3 x 2 s) rides out a normal election (1-2 s).
+          startupProbe:
+            httpGet: {path: /livez, port: metrics}
+            periodSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: /livez, port: metrics}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: {path: /readyz, port: metrics}
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # WBS 7.1.5 (partial): give the endpoints controller a moment
+              # to take the pod out of the client Service before SIGTERM
+              # starts the graceful shutdown. The image is FROM scratch, so
+              # this uses the built-in sleep action, not a shell. M6 replaces
+              # it with a leadership transfer.
+              sleep: {seconds: 2}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /etc/raftkv, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: raftkv-config}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 1Gi}

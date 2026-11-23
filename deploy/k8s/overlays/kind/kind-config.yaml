@@ -1,0 +1,6 @@
+# kind cluster for RaftKV (WBS 7.1.6, 7.4). One node is enough: kind gives
+# correctness evidence only, never timing numbers (docs/testing.md 2.6).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane

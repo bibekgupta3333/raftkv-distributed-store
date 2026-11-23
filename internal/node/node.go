@@ -107,6 +107,7 @@ type Node struct {
 	propCh   chan *proposal
 	readCh   chan readRequest
 	unreach  chan uint64
+	pingCh   chan chan struct{} // /livez pings (D-46)
 	stopping chan struct{}
 
 	observer Observer
@@ -168,6 +169,7 @@ func New(cfg Config, opts Options) (*Node, error) {
 		appliedCh: make(chan struct{}),
 		epoch:     time.Now(),
 		unreach:   make(chan uint64, 64),
+		pingCh:    make(chan chan struct{}),
 		stopping:  make(chan struct{}),
 		started:   make(chan struct{}),
 		waiters:   make(map[uint64]*waiter),
@@ -316,7 +318,7 @@ func (n *Node) PeerAddr(id uint64) string { return n.cfg.PeerAddrs()[id] }
 // Addr is the peer gRPC address the node listens on.
 func (n *Node) Addr() string { return n.lis.Addr().String() }
 
-// MetricsAddr is the /metrics address, or "" if metrics are disabled.
+// MetricsAddr is the address serving /metrics, /livez and /readyz, or "" if metrics are disabled.
 func (n *Node) MetricsAddr() string {
 	if n.metricsLis == nil {
 		return ""
@@ -460,7 +462,7 @@ func (n *Node) Run(ctx context.Context) error {
 	go func() { _ = n.srv.Serve(n.lis) }()
 	var metricsSrv *http.Server
 	if n.metricsLis != nil {
-		metricsSrv = &http.Server{Handler: n.metrics.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		metricsSrv = &http.Server{Handler: n.httpHandler(), ReadHeaderTimeout: 5 * time.Second}
 		go func() { _ = metricsSrv.Serve(n.metricsLis) }()
 	}
 	n.tr.Start(ctx)
@@ -515,6 +517,9 @@ func (n *Node) loop(ctx context.Context) error {
 			n.rn.ReportUnreachable(id)
 		case p := <-n.propCh:
 			n.handleProposal(p)
+		case pong := <-n.pingCh:
+			close(pong) // D-46: alive = the loop answers; nothing to process
+			continue
 		case rq := <-n.readCh:
 			n.handleRead(rq)
 		}
