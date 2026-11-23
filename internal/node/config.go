@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"slices"
@@ -212,6 +213,28 @@ func ParsePeers(s string) ([]PeerConfig, error) {
 	return out, nil
 }
 
+// NodeIDFromOrdinal maps a StatefulSet pod name ("<set>-<ordinal>") to a node
+// ID: ordinal + 1, because ID 0 means "none" in Raft. The pod name, and so the
+// ID, is stable across restarts and rescheduling, and the pod keeps its PVC, so
+// the data directory's identity check (D-32) keeps passing (D-16, WBS 7.1.3).
+func NodeIDFromOrdinal(podName string) (uint64, error) {
+	i := strings.LastIndexByte(podName, '-')
+	if i <= 0 || i == len(podName)-1 {
+		return 0, fmt.Errorf("config: pod name %q has no -<ordinal> suffix", podName)
+	}
+	ord, err := strconv.ParseUint(podName[i+1:], 10, 64)
+	if err != nil || ord == math.MaxUint64 {
+		return 0, fmt.Errorf("config: pod name %q: bad ordinal %q", podName, podName[i+1:])
+	}
+	return ord + 1, nil
+}
+
+func isFlagSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) { set = set || f.Name == name })
+	return set
+}
+
 // LoadConfig builds a validated Config from command-line args: defaults, then
 // the YAML file named by -config, then any flag that was explicitly set.
 // Flag usage and parse errors go to out.
@@ -230,6 +253,8 @@ func LoadConfig(args []string, out io.Writer) (Config, error) {
 	electionTick := fs.Int("election-tick", 0, "election timeout base, in ticks")
 	heartbeatTick := fs.Int("heartbeat-tick", 0, "heartbeat interval, in ticks")
 	logLevel := fs.String("log-level", "", "debug, info, warn or error")
+	fromOrdinal := fs.String("node-id-from-ordinal", "",
+		"derive the node ID from a StatefulSet pod name: 1 + its ordinal (raftkv-2 -> 3)")
 	leaseReads := fs.Bool("lease-reads", false, "serve linearizable reads from a leader lease (D-25; off by default)")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -273,6 +298,17 @@ func LoadConfig(args []string, out io.Writer) (Config, error) {
 			cfg.HeartbeatTick = *heartbeatTick
 		case "log-level":
 			cfg.LogLevel = *logLevel
+		case "node-id-from-ordinal":
+			if isFlagSet(fs, "node-id") {
+				flagErr = errors.New("config: -node-id and -node-id-from-ordinal are mutually exclusive")
+				return
+			}
+			id, err := NodeIDFromOrdinal(*fromOrdinal)
+			if err != nil {
+				flagErr = err
+				return
+			}
+			cfg.NodeID = id
 		case "lease-reads":
 			cfg.LeaseReads = *leaseReads
 		}

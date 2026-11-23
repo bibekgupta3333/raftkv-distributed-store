@@ -1,0 +1,10 @@
+# Observer UI (D-48, WBS 7.2.3) as its own kustomization, so overlays can
+# include it (kustomize only loads files under a kustomization root) without
+# base/'s app.kubernetes.io/name=raftkv selector labels pulling the observer
+# pod into the raftkv and raftkv-peer Services. Its --endpoints
+# (raftkv-N.raftkv-peer:7000) match base/; overlays retag the image.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - observer.yaml

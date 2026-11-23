@@ -1,0 +1,16 @@
+# PodChaos pod-kill of two pods at once (D-47, WBS 7.4.2; system-design F-13):
+# three of five remain, which is still a quorum.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: raftkv-pod-kill-two
+  namespace: raftkv
+spec:
+  action: pod-kill
+  mode: fixed
+  value: "2"
+  gracePeriod: 0
+  selector:
+    namespaces: [raftkv]
+    labelSelectors:
+      app.kubernetes.io/name: raftkv
