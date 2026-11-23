@@ -92,6 +92,16 @@ func (n *RawNode) Step(m Message) error {
 	return nil
 }
 
+// ReportUnreachable tells the core that the transport failed to reach node id
+// (D-12). A leader drops that follower from Replicate back to Probe, so it
+// stops streaming optimistically into a dead link and probes with one append
+// per round trip until the follower answers again. It is a no-op on
+// non-leaders and for unknown nodes.
+func (n *RawNode) ReportUnreachable(id uint64) {
+	n.mustBeIdle("ReportUnreachable")
+	n.raft.reportUnreachable(id)
+}
+
 // HasReady reports whether Ready would return something to handle. It is
 // cheap and may be called while a Ready is outstanding.
 func (n *RawNode) HasReady() bool {
