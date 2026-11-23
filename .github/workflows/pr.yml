@@ -1,0 +1,27 @@
+name: pr
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make fmt-check lint build test race
+      - name: proto drift check
+        run: make proto && git diff --exit-code
+  sim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: |
+          if ls test/sim/*_test.go >/dev/null 2>&1; then make sim; else echo "no sim yet"; fi

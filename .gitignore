@@ -1,9 +1,6 @@
-.DS_Store
-*.swp
+/bin/
+*.test
+*.out
+/data/
 .idea/
 .vscode/
-/bin/
-/dist/
-coverage.out
-*.test
-.env

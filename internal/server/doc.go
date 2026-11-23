@@ -1,0 +1,2 @@
+// Package server is part of RaftKV; see docs/design-decisions.md.
+package server

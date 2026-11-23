@@ -23,7 +23,7 @@ tasks, and every task aims at a working, tested feature.
 
 | Milestone | Theme | Done / Leaves | Est. weeks | Status |
 |-----------|-------|---------------|------------|--------|
-| M0 | Repo setup, tooling, protos | 0/15 | 1 | Not started |
+| M0 | Repo setup, tooling, protos | 6/15 | 1 | Not started |
 | M1 | Raft core + deterministic simulator | 0/39 | 5 | Not started |
 | M2 | WAL + gRPC transport + real 5-process cluster | 0/38 | 4 | Not started |
 | M3 | Pebble state machine + basic KV | 0/20 | 2.5 | Not started |
@@ -38,12 +38,12 @@ tasks, and every task aims at a working, tested feature.
 ## 0. M0 — Repo setup, tooling, protos
 
 - [ ] **0.1 Repository skeleton**
-  - [ ] 0.1.1 Resolve D-22 (license, Apache-2.0 unless changed) and add LICENSE → design-decisions.md shows `Decided`
-  - [ ] 0.1.2 `go mod init` with the D-21 module path and current Go toolchain → `go build ./...` passes
-  - [ ] 0.1.3 Create the directory layout from design-decisions.md (a `doc.go` per package) → `go vet ./...` passes, tree matches layout
-  - [ ] 0.1.4 README (summary, links to docs) and CONTRIBUTING.md (branching, commit style, WBS ticking rule) → render on GitHub
-  - [ ] 0.1.5 Create `CHANGELOG.md` (Keep a Changelog, `Unreleased` section) and `memory.md` (decisions, gotchas, how-tos) → files exist with headings
-  - [ ] 0.1.6 `.gitignore`, `.editorconfig`, PR template with a "WBS items ticked" checklist → template shows on a test PR
+  - [x] 0.1.1 Resolve D-22 (license, Apache-2.0 unless changed) and add LICENSE → design-decisions.md shows `Decided`
+  - [x] 0.1.2 `go mod init` with the D-21 module path and current Go toolchain → `go build ./...` passes
+  - [x] 0.1.3 Create the directory layout from design-decisions.md (a `doc.go` per package) → `go vet ./...` passes, tree matches layout
+  - [x] 0.1.4 README (summary, links to docs) and CONTRIBUTING.md (branching, commit style, WBS ticking rule) → render on GitHub
+  - [x] 0.1.5 Create `CHANGELOG.md` (Keep a Changelog, `Unreleased` section) and `memory.md` (decisions, gotchas, how-tos) → files exist with headings
+  - [x] 0.1.6 `.gitignore`, `.editorconfig`, PR template with a "WBS items ticked" checklist → template shows on a test PR
 - [ ] **0.2 Tooling**
   - [ ] 0.2.1 Pin tool versions (golangci-lint, buf, protoc-gen-go, protoc-gen-go-grpc) via `go tool` directives → `make tools` installs exact versions
   - [ ] 0.2.2 Makefile targets `all fmt fmt-check lint build test race proto clean help` → `make help` lists each, `make all` passes
