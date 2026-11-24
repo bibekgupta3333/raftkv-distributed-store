@@ -40,7 +40,7 @@ A new push to the same PR cancels the old run (`concurrency` with `cancel-in-pro
 | Job | What it does | Timeout |
 |---|---|---|
 | `sim-long` | 4 shards of random seeds for ~2 h each, all profiles (`nightly`, `membership`, `disk`, `snapshot`). Base seed = run ID, logged | 150 min |
-| `fuzz-long` | Each fuzz target for 10 min; corpus cached | 120 min |
+| `fuzz-long` | `make fuzz FUZZTIME=3m`: each of the 13 fuzz targets for 3 min (WBS 7.5.1); crasher inputs uploaded as an artifact | 75 min |
 | `e2e-long` | 30 min docker-compose run with the full fault mix, then one run against the deliberately broken build, which **must** fail with a violation (`testing.md` §3.4) | 90 min |
 | `chaos` | Create kind, install Chaos Mesh (pinned chart), deploy `deploy/k8s/`, run `PodChaos` + `NetworkChaos` with the workload for ~2 h, check the history with Porcupine | 180 min |
 | `report-failures` | On failure: open or update a GitHub issue with the repro command | 10 min |

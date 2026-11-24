@@ -10,7 +10,7 @@ SEEDS   ?= 500
 FAULTS  ?= full
 TRACEDIR ?= out/sim
 
-.PHONY: all fmt fmt-check lint build test race proto clean help tools sim e2e e2e-image mutation cluster-up cluster-down cluster-logs
+.PHONY: all fmt fmt-check lint build test race proto clean help tools sim e2e e2e-image mutation cluster-up cluster-down cluster-logs fuzz docs-check
 
 all: fmt-check lint build test ## fmt-check, lint, build, test
 
@@ -62,6 +62,31 @@ cluster-logs: ## follow the compose cluster logs
 
 e2e: e2e-image ## docker-compose e2e (E2E_PROFILE=pr|nightly E2E_SEED=n E2E_ROUNDS=n)
 	IMAGE=$(IMAGE) E2E_PROFILE=$(E2E_PROFILE) go test -tags e2e -count=1 -timeout 120m -v ./test/e2e/...
+
+# WBS 7.5.1: native Go fuzz targets for every decoder of bytes from disk or the
+# network. `go test -fuzz` runs one target per invocation. Crashers are written
+# to <pkg>/testdata/fuzz/<Target>/ and must be committed as regression inputs.
+FUZZTIME ?= 60s
+FUZZ_TARGETS := \
+	./internal/wal:FuzzDecodeRecord ./internal/wal:FuzzDecodeSegmentHeader \
+	./internal/wal:FuzzParseSegmentName ./internal/wal:FuzzReplaySegment \
+	./internal/snapshot:FuzzDecodeMeta ./internal/snapshot:FuzzParseName \
+	./internal/command:FuzzUnmarshal ./internal/server:FuzzRangePageToken \
+	./internal/storage:FuzzDecodeValue ./internal/storage:FuzzDecodeSession \
+	./internal/storage:FuzzDecodeReply ./internal/node:FuzzParseConfigYAML \
+	./internal/node:FuzzParsePeers
+
+fuzz: ## run every fuzz target for FUZZTIME each (default 60s); FUZZ=<name> runs one
+	@failed=""; for t in $(FUZZ_TARGETS); do \
+		pkg=$${t%%:*}; name=$${t##*:}; \
+		if [ -n "$(FUZZ)" ] && [ "$(FUZZ)" != "$$name" ]; then continue; fi; \
+		echo "== $$pkg $$name ($(FUZZTIME))"; \
+		go test $$pkg -run '^$$' -fuzz "^$$name\$$" -fuzztime=$(FUZZTIME) || failed="$$failed $$name"; \
+	done; \
+	if [ -n "$$failed" ]; then echo "fuzz targets with crashers:$$failed"; exit 1; fi
+
+docs-check: ## fail if docs/configuration.md misses a flag or YAML key (WBS 7.6.1)
+	go test ./cmd/... -run 'TestConfigurationDoc' -count=1
 
 mutation: ## checker vs a deliberately broken read path (testing.md 3.4): must report a violation
 	go test -tags raftkv_mutation -count=1 -v -run TestCheckerCatchesBrokenReadPath ./test/linearizability/
