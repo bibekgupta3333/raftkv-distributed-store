@@ -17,7 +17,7 @@ It also covers errors, retries, leader discovery, and the `raftkvctl` CLI. The `
 | Topic | Rule |
 |-------|------|
 | Package | `raftkv.v1`. Go package `github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1;raftkvv1` (D-21) |
-| Transport | gRPC (D-12). Separate listeners: client `2379`, peer `2380` |
+| Transport | gRPC (D-12). As built, one listener per node (`--listen`; `:7000` in compose and kind) serves the KV, Cluster and Raft services. Metrics and probes are on a separate HTTP port (`--metrics-addr`). The separate client/peer listeners of the original design were not built |
 | Keys/values | `bytes`. Keys are non-empty and compared byte by byte |
 | Integers | Term, index, revision and member IDs are `uint64`. ID `0` means "none" |
 | Revision | A key's `mod_revision` is the log index of the entry that last changed it. The header `revision` is the serving node's `appliedIndex` (D-04) |
@@ -74,7 +74,7 @@ enum Consistency {
 // Carried in google.rpc.Status details on NOT_LEADER (§6).
 message LeaderHint {
   uint64 leader_id = 1;          // 0 if unknown
-  string leader_client_url = 2;  // e.g. "raftkv-2.raftkv-peer:2379"
+  string leader_client_url = 2;  // the leader's address from --peers, e.g. "raftkv-2.raftkv-peer:7000"
   uint64 term = 3;
 }
 
@@ -504,7 +504,8 @@ sequenceDiagram
 
 ## 8. Internal Raft peer service (D-36)
 
-Peer RPCs run only on the peer listener (`:2380`). This is not a public API.
+Peer RPCs share the node's single gRPC listener with the client services. They are not a public API: every peer RPC
+names its sender, and a sender that is not a known member is refused.
 
 ### 8.1 Messages and service
 
@@ -686,17 +687,22 @@ service Raft {
 
 ## 9. CLI: `raftkvctl`
 
-Global flags: `--endpoints` (default `localhost:2379`), `--timeout`, `--consistency linearizable|stale`, `--output table|json`, `--client-id-file` (keep the session across runs; default is a new session per run).
+The exact flags of every command are in [configuration.md](configuration.md#raftkvctl), which tests keep in sync with
+`--help`. Common flags: `--endpoints` (default `$RAFTKV_ENDPOINTS`, else `localhost:2379`), `--timeout` (default
+`10s`), `--cluster-id`. Reads are linearizable unless `--stale` is given. There is no `--output` or
+`--client-id-file` yet.
 
-Each write run registers a session (unless `--client-id-file` has one) and uses the next sequence, so a retry inside one run is exactly-once.
+Each write run registers a session and uses the next sequence, so a retry inside one run is exactly-once.
 
 | Command | RPC | Flags | Exit code |
 |---------|-----|-------|-----------|
 | `put <key> <value>` | `KV.Put` | `--value-file`, `--prev` | 0 |
-| `get <key>` | `KV.Get` | `--consistency`, `--min-revision`, `--hex` | 0 found, **3 not found** |
+| `get <key>` | `KV.Get` | `--stale`, `--min-revision`, `--hex` | 0 found, **3 not found** |
 | `del <key>` | `KV.Delete` | `--prev` | 0 |
 | `cas <key>` | `KV.CompareAndSwap` | one of `--expect-value` / `--expect-revision` / `--expect-absent`, plus `--new-value` or `--delete` | 0 succeeded, **4 compare failed** |
-| `range <start> [<end>]` | `KV.Range` | `--prefix`, `--limit`, `--keys-only`, `--reverse`, `--all` | 0 |
+| `range <start> [<end>]` | `KV.Range` | `--prefix`, `--limit`, `--keys-only`, `--reverse`, `--all`, `--stale`, `--min-revision`, `--page-token` | 0 |
+| `debug state-hash` | none (reads a stopped node's data dir) | `--data-dir` | 0 |
+| `debug wal-dump` | none (reads a stopped node's data dir) | `--data-dir`, `--from`, `--to`, `--max-data` | 0 |
 | `member list` | `Cluster.ListMembers` | `--consistency` | 0 |
 | `member add-learner <name>` | `Cluster.AddLearner` | `--peer-url` (required), `--client-url` | 0 |
 | `member promote <id>` | `Cluster.PromoteLearner` | `--wait` | 0; 5 if not caught up without `--wait` |

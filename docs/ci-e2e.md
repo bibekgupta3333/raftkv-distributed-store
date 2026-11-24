@@ -1,54 +1,68 @@
 # CI & End-to-End Testing (GitHub Actions)
 
-Status: **Draft design**. No files under `.github/workflows/` exist yet. The YAML below is a **sketch** to be turned
-into real workflow files during implementation.
+Status: **Implemented** (M0–M5, M7 chaos). The workflow files are the source of truth:
+[`.github/workflows/pr.yml`](../.github/workflows/pr.yml) and [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml).
+This document says how CI runs the tests; what the tests do is described in `testing.md`.
 
-Based on **D-19** (CI) and **D-18** (simulation + Porcupine + fault injection). What the tests do is described in
-`testing.md`; this document only says how CI runs them. Durations and counts are starting parameters.
+Based on **D-19** (CI) and **D-18** (simulation + Porcupine + fault injection).
 
 ---
 
 ## 1. Workflows
 
-There are two workflows. That's all.
+| Workflow | Trigger | What it runs |
+|---|---|---|
+| `pr.yml` | `pull_request`, and `push` to `main` | fmt-check, lint, build, unit tests, race, the broken-build check, the proto drift check, the simulator with 500 seeds per profile, and the short 5-node docker-compose e2e with faults + Porcupine |
+| `nightly.yml` | Daily `schedule` (`17 3 * * *`) + `workflow_dispatch` | Long simulator runs, a race-enabled simulator run, fuzzing, the long docker-compose e2e, and kind + Chaos Mesh |
 
-| Workflow | Trigger | What it runs | Blocks merge? |
-|---|---|---|---|
-| `pr.yml` | `pull_request` to `main` | Lint, proto checks, unit + race, simulator with fixed seeds, integration, short 5-node docker-compose e2e with faults + Porcupine | **Yes** (via `pr-gate`) |
-| `nightly.yml` | Daily `schedule` + `workflow_dispatch` | Long simulator run with random seeds, longer fuzzing, longer e2e + broken-build check, kind + Chaos Mesh; files an issue on failure | No |
-
-Both run on standard GitHub-hosted Linux runners. If kind + Chaos Mesh doesn't fit, the chaos job can move to a
-larger runner.
+Both run on standard GitHub-hosted `ubuntu-latest` runners. Jobs in a workflow run in parallel; there are no `needs`
+edges.
 
 ### 1.1 `pr.yml` jobs
 
-| Job | Needs | What it does | Timeout |
-|---|---|---|---|
-| `lint` | — | `golangci-lint` (incl. `forbidigo` banning `time.Now`, `time.Sleep` and global `math/rand` in `internal/raft`, to protect determinism, D-24) and a `go mod tidy` diff check | 10 min |
-| `proto` | — | `buf lint`, `buf format`, `buf breaking` against `main`; regenerate and `git diff --exit-code` (generated code is committed, D-43) | 5 min |
-| `build` | — | `go build ./...`, build the `raftkvd` image once and pass it to e2e as an artifact | 15 min |
-| `unit` | `build` | `make test`: `-race -shuffle=on -count=1`, short fuzz | 20 min |
-| `sim` | `build` | Fixed seed list (`test/sim/seeds/pr.txt`) + `regressions.txt`, split over 4 shards; one seed run twice to check determinism | 20 min |
-| `integration` | `build` | In-process multi-node tests | 20 min |
-| `e2e-short` | `build`, `unit` | `make e2e E2E_PROFILE=pr`: 5 nodes, ~10 min workload, at least one each of leader kill, follower kill, pause, partition and packet loss; Porcupine check; convergence check | 30 min |
-| `pr-gate` | all above | Fails if any job above failed. The **only required check** | 2 min |
+| Job | What it does |
+|---|---|
+| `check` | `make fmt-check lint build test race` (golangci-lint includes the `forbidigo` ban on `time.Now` in `internal/raft`, D-24); `make mutation` (the checker must catch a deliberately broken read path, testing.md 3.4); proto drift check `make proto && git diff --exit-code` (D-43) |
+| `sim` | `make sim SEEDS=500` with the `full`, `snapshot` and `membership` profiles. Every run also replays `test/sim/regressions/seeds.txt`. Failing-seed traces (`out/sim/`) are uploaded |
+| `e2e-short` | `make e2e E2E_PROFILE=pr E2E_SEED=<PR number>` (30 min timeout): the 5-node compose cluster and the `test/e2e` suite at PR sizes (table 1.3). `out/e2e/` is always uploaded (30 days) |
 
-A new push to the same PR cancels the old run (`concurrency` with `cancel-in-progress: true`).
+The proto drift check was proven once with a throwaway PR that hand-edited a generated file (M0 exit criterion 3;
+see the M0 exit evidence in implementation-roadmap.md).
 
 ### 1.2 `nightly.yml` jobs
 
+`workflow_dispatch` inputs: `seeds` (per profile, default 100,000), `base_seed` (default derived from the run ID),
+`jobs` (`all`, or a comma-separated subset of `sim-long,sim-race,fuzz-long,e2e-long,chaos`), `chaos_duration`
+(default `15m`). A scheduled run has no inputs, so every job runs.
+
 | Job | What it does | Timeout |
 |---|---|---|
-| `sim-long` | 4 shards of random seeds for ~2 h each, all profiles (`nightly`, `membership`, `disk`, `snapshot`). Base seed = run ID, logged | 150 min |
-| `fuzz-long` | `make fuzz FUZZTIME=3m`: each of the 13 fuzz targets for 3 min (WBS 7.5.1); crasher inputs uploaded as an artifact | 75 min |
-| `e2e-long` | 30 min docker-compose run with the full fault mix, then one run against the deliberately broken build, which **must** fail with a violation (`testing.md` §3.4) | 90 min |
-| `chaos` | Create kind (pinned), install Chaos Mesh (pinned chart), deploy `deploy/k8s/`, run a seeded `PodChaos` + `NetworkChaos` schedule for 15 min (`chaos_duration` input) under the workload, check the history with Porcupine; artifacts uploaded on failure | 60 min |
-| `report-failures` | On failure: open or update a GitHub issue with the repro command | 10 min |
+| `sim-long` | Matrix over the `full`, `lossy`, `partition`, `crash`, `snapshot` and `membership` profiles, 100,000 seeds each. First seed = `(run ID mod 10^6) × 10^6` (logged), so each night covers a new range | 120 min |
+| `sim-race` | 10,000 seeds of the `full` profile with `-race` (`make sim SIMRACE=-race`), WBS 1.9.1 | 90 min |
+| `fuzz-long` | `make fuzz FUZZTIME=3m`: every native fuzz target for 3 min (WBS 7.5.1); crashers uploaded | 75 min |
+| `e2e-long` | `make mutation`, then `make e2e E2E_PROFILE=nightly E2E_SEED=<run ID>` at nightly sizes (table 1.3). `out/e2e/` always uploaded | 90 min |
+| `chaos` | Pinned kind v0.30.0, `make chaos-up` (Chaos Mesh 2.8.8), `make chaos CHAOS_DURATION=15m CHAOS_SEED=<run ID>`: an in-cluster workload pod records a mixed KV history under a seeded PodChaos/NetworkChaos schedule, then Porcupine checks it. `out/chaos/` uploaded on failure; `make chaos-down` always | 60 min |
 
-Nightly jobs run in parallel and are never cancelled mid-run. The image is built locally and loaded into kind with `kind load docker-image`,
-so nothing is pushed to a registry.
+The e2e image is built locally on the runner; for kind it is loaded with `kind load docker-image`. Nothing is pushed
+to a registry.
 
-### 1.3 Membership in the compose e2e (M6)
+### 1.3 e2e profiles (`test/e2e`)
+
+| Test | pr | nightly | Override |
+|---|---|---|---|
+| `TestLeaderElectedOnStart`, `TestNewLeaderAfterLeaderKill`, `TestMinorityStopsCommittingAndLogsMatchAfterHeal` | once | once | — |
+| `TestKillRestartRoundsLoseNoCommittedEntry` (kill -9 a random node, often the leader; every acked entry in all 5 WALs) | 20 rounds | 200 rounds | `E2E_ROUNDS` |
+| `TestSeededFaultSchedule` (kill, SIGSTOP, partition, netem delay/loss; nightly adds follower wipe) | 6 steps | 40 steps | `E2E_STEPS` |
+| `TestWipedFollowerRejoinsAsNewLearner` (old ID refused, rejoin as a new learner via snapshot, state hashes equal) | 2 runs | 20 runs | `E2E_WIPE_RUNS` |
+| `TestSIGTERMLeaderHandsOver` | 2 rounds | 5 rounds | `E2E_SIGTERM_ROUNDS` |
+| `TestRaftkvctlMemberSmoke`, `TestReplaceNodeUnderLoad`, `TestScale3To5To3UnderLoad` | once | once | — |
+| `TestLinearizableKVUnderFaults` (Put/Get/Delete/CAS/Range, leader + follower reads, Porcupine) | 1 cycle | 6 cycles | `E2E_LIN_CYCLES` |
+| `TestOldLeaderServesNoStaleRead` (partitioned and SIGSTOPped old leader) | once | once | — |
+
+`E2E_SEED` fixes victim choice and the fault schedule; `E2E_OUT` sets the artifact directory; `E2E_KEEP` keeps the
+cluster running. Container names, ports and volumes are fixed, so only one compose e2e can run per Docker host.
+
+### 1.4 Membership in the compose e2e (M6)
 
 The compose file has five fixed container slots (`raftkv-nodek`, hostname `nodek`, ports `1700k`/`1900k`). Slot `k`
 runs member ID `RAFTKV_NODEk_ID` (default `k`) and passes `--join=RAFTKV_NODEk_JOIN` (default `false`). Member IDs are
@@ -76,31 +90,18 @@ time, so a majority always survives.
 
 ```mermaid
 flowchart LR
-  subgraph PR["pr.yml"]
-    direction LR
-    build --> unit
-    build --> sim["sim (fixed seeds)"]
-    build --> integ[integration]
-    build --> e2e["e2e-short"]
-    unit --> e2e
-    lint --> gate{{pr-gate}}
-    proto --> gate
-    unit --> gate
-    sim --> gate
-    integ --> gate
-    e2e --> gate
+  subgraph PR["pr.yml (parallel)"]
+    check["check: fmt, lint, build, test, race, mutation, proto drift"]
+    sim["sim: 500 seeds full, snapshot, membership"]
+    e2e["e2e-short (compose)"]
   end
 
-  subgraph NIGHTLY["nightly.yml"]
-    direction LR
-    simlong["sim-long (random seeds)"]
+  subgraph NIGHTLY["nightly.yml (parallel)"]
+    simlong["sim-long ×6 profiles, 100k seeds"]
+    simrace["sim-race: 10k seeds, -race"]
     fuzz[fuzz-long]
-    e2elong["e2e-long + broken-build check"]
-    chaos["chaos (kind + Chaos Mesh)"]
-    simlong -. failure .-> issues[report-failures]
-    fuzz -. failure .-> issues
-    e2elong -. failure .-> issues
-    chaos -. failure .-> issues
+    e2elong["e2e-long: mutation + compose nightly"]
+    chaos["chaos: kind + Chaos Mesh"]
   end
 ```
 
@@ -108,238 +109,56 @@ flowchart LR
 
 ## 3. Results and artifacts
 
-- **Pass rule:** every e2e and chaos run must report **0 linearizability violations** (harness exit code 0). A checker
-  timeout (exit code 3) is not a pass.
-- **On failure, CI uploads:** seed + repro command, histories and fault log, the Porcupine HTML visualization, node
-  logs and data directories (and for chaos, `kubectl get events` and pod logs). Kept 30 days. Histories and the seed
-  are uploaded on every e2e/chaos run, pass or fail.
-- Go module/build cache via `actions/setup-go`; Docker layers via the GHA cache. Caches never hold test results.
+- **Pass rule:** every e2e and chaos run must report **0 linearizability violations**. A checker timeout is a failure,
+  not a pass.
+- **Uploaded:** `out/e2e/<test>/` (fault log, node logs, WAL dumps, `history.jsonl`, the Porcupine HTML on failure) on
+  every e2e run; failing-seed JSONL traces (`out/sim/`) when a simulator job fails; fuzz crashers when `fuzz-long`
+  fails; `out/chaos/` (seed, fault log, history, pod logs, events) when `chaos` fails. Kept 30 days.
+- Go module/build cache via `actions/setup-go`. Caches never hold test results.
 
 ---
 
 ## 4. Flake policy
 
-- **No blind retries on correctness tests.** A Porcupine violation, invariant failure or divergence fails the job,
-  full stop. Never re-run with a new seed to "get green".
-- **A failing seed becomes an issue with a repro command**, e.g. `make sim SEED=8472910345 SIM_PROFILE=membership` or
-  `make e2e E2E_SEED=...`. The nightly `report-failures` job adds a comment instead of a duplicate if the same failure
-  is already open.
-- The fix PR adds the seed to `test/sim/seeds/regressions.txt` (or a new test), so the bug is re-checked on every PR.
-- Pure infrastructure steps (pulling images, creating the kind cluster) may retry up to 2 times. The test itself is
-  not re-run.
+- **No blind retries on correctness tests.** A Porcupine violation, invariant failure or divergence fails the job.
+  Never re-run with a new seed to "get green".
+- A failing simulator seed prints its repro command. The fix PR adds the seed to `test/sim/regressions/seeds.txt`
+  (replayed on every sim run) or a directed test.
 
 ---
 
-## 5. Required check and permissions
+## 5. Not built (planned in the original design)
 
-- `main` is protected; **`pr-gate` is the single required check**.
-- Workflows use `permissions: contents: read`; only `report-failures` gets `issues: write`. No other secrets are
-  needed (the built-in `GITHUB_TOKEN` is enough). Third-party actions are pinned by commit SHA.
-
----
-
-## 6. YAML sketches
-
-> **Sketch, not a workflow file.** `@<sha>` stands for a pinned action version.
-
-### 6.1 `pr.yml`
-
-```yaml
-name: pr
-on:
-  pull_request:
-    branches: [main]
-permissions:
-  contents: read
-concurrency:
-  group: pr-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
-jobs:
-  lint:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@<sha>
-      - uses: actions/setup-go@<sha>
-        with: { go-version-file: go.mod, cache: true }
-      - uses: golangci/golangci-lint-action@<sha>
-      - run: make tidy-check
-
-  build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@<sha>
-      - uses: actions/setup-go@<sha>
-        with: { go-version-file: go.mod, cache: true }
-      - run: make build
-      - run: docker build -t raftkvd:ci . && docker save raftkvd:ci -o /tmp/raftkvd.tar
-      - uses: actions/upload-artifact@<sha>
-        with: { name: raftkvd-image, path: /tmp/raftkvd.tar, retention-days: 1 }
-
-  unit:
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@<sha>
-      - uses: actions/setup-go@<sha>
-        with: { go-version-file: go.mod, cache: true }
-      - run: make test
-
-  sim:
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix: { shard: [0, 1, 2, 3] }
-    steps:
-      - uses: actions/checkout@<sha>
-      - uses: actions/setup-go@<sha>
-        with: { go-version-file: go.mod, cache: true }
-      - run: make sim-pr SHARD=${{ matrix.shard }} SHARDS=4
-      - if: failure()
-        uses: actions/upload-artifact@<sha>
-        with: { name: sim-failure-${{ matrix.shard }}, path: out/sim/ }
-
-  # proto (make proto-check) and integration (make integration) look just like unit.
-
-  e2e-short:
-    needs: [build, unit]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@<sha>
-      - uses: actions/download-artifact@<sha>
-        with: { name: raftkvd-image, path: /tmp }
-      - run: docker load -i /tmp/raftkvd.tar
-      - run: make e2e E2E_PROFILE=pr E2E_SEED=${{ github.event.pull_request.number }} IMAGE=raftkvd:ci
-      - if: always()
-        uses: actions/upload-artifact@<sha>
-        with: { name: e2e, path: out/e2e/, retention-days: 30 }
-
-  pr-gate:
-    if: always()
-    needs: [lint, proto, build, unit, sim, integration, e2e-short]
-    runs-on: ubuntu-24.04
-    steps:
-      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
-        run: exit 1
-```
-
-### 6.2 `nightly.yml`
-
-```yaml
-name: nightly
-on:
-  schedule:
-    - cron: "17 2 * * *"
-  workflow_dispatch:
-    inputs:
-      base_seed: { type: string, default: "" }
-permissions:
-  contents: read
-concurrency:
-  group: nightly
-  cancel-in-progress: false
-env:
-  BASE_SEED: ${{ inputs.base_seed || github.run_id }}
-
-jobs:
-  sim-long:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 150
-    strategy:
-      fail-fast: false
-      matrix: { shard: [0, 1, 2, 3] }
-    steps:
-      - uses: actions/checkout@<sha>
-      - uses: actions/setup-go@<sha>
-        with: { go-version-file: go.mod, cache: true }
-      - run: make sim-random BASE_SEED=$BASE_SEED SHARD=${{ matrix.shard }} SHARDS=4 DURATION=120m
-      - if: always()
-        uses: actions/upload-artifact@<sha>
-        with: { name: sim-long-${{ matrix.shard }}, path: out/sim/ }
-
-  fuzz-long:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@<sha>
-      - uses: actions/setup-go@<sha>
-        with: { go-version-file: go.mod, cache: true }
-      - uses: actions/cache@<sha>
-        with: { path: out/fuzz-corpus, key: "fuzz-${{ github.run_id }}", restore-keys: "fuzz-" }
-      - run: make fuzz FUZZTIME=10m
-
-  e2e-long:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@<sha>
-      - run: make e2e E2E_PROFILE=nightly E2E_SEED=$BASE_SEED
-      - run: make mutation   # the checker must detect the planted read-path bug (testing.md 3.4)
-      - if: always()
-        uses: actions/upload-artifact@<sha>
-        with: { name: e2e-long, path: out/e2e/, retention-days: 30 }
-
-  chaos:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@<sha>
-      - run: GOBIN=$PWD/bin go install sigs.k8s.io/kind@v0.30.0   # pinned kind
-      - run: make chaos-up               # kind + Chaos Mesh + image loaded with `kind load`
-      - run: make chaos CHAOS_DURATION=15m CHAOS_SEED=$BASE_SEED
-      - if: failure()
-        uses: actions/upload-artifact@<sha>
-        with: { name: chaos, path: out/chaos/, retention-days: 30 }
-      - if: always()
-        run: make chaos-down
-
-  report-failures:
-    if: failure()
-    needs: [sim-long, fuzz-long, e2e-long, chaos]
-    runs-on: ubuntu-24.04
-    permissions: { contents: read, issues: write }
-    steps:
-      - uses: actions/checkout@<sha>
-      - uses: actions/download-artifact@<sha>
-        with: { path: in/ }
-      - run: ./scripts/ci/file-issues.sh in/   # one issue per failure, with repro command
-        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
-```
+These were in the draft and are not in the workflow files: a single required `pr-gate` job, `concurrency` groups,
+explicit `permissions:` blocks, SHA-pinned actions, a `report-failures` job that files issues, `buf breaking`, and a
+`go mod tidy` check. Today a nightly failure is seen in the Actions tab only.
 
 ---
 
-## 7. Reproducing CI locally
+## 6. Reproducing CI locally
 
-CI calls only these Makefile targets (to be created), so local and CI commands are the same.
+CI calls only Makefile targets, so local and CI commands are the same.
 
 | Target | Does | CI job |
 |---|---|---|
-| `make test` | `go test -race -shuffle=on -count=1 ./...` plus short fuzz | `unit` |
-| `make sim SEED=<n> [SIM_PROFILE=...]` | Replays one simulator seed exactly | failing `sim` / `sim-long` seed |
-| `make e2e [E2E_PROFILE=pr\|nightly] [E2E_SEED=]` | 5-node docker-compose cluster + faults + Porcupine | `e2e-short`, `e2e-long` |
-| `make mutation` | Linearizability check against a `-tags raftkv_mutation` build whose followers serve "linearizable" reads locally; must report a violation (testing.md 3.4) | `check`, `e2e-long` |
-| `make chaos-up` | Create a kind cluster, install Chaos Mesh, deploy RaftKV | `chaos` |
-| `make chaos [CHAOS_DURATION=10m] [CHAOS_SEED=]` | Against a `make chaos-up` cluster: build and load the workload image, run the seeded fault schedule under the in-cluster workload, check the history with Porcupine (`out/chaos/`) | `chaos` |
-| `make chaos-down` | Delete the kind cluster | — |
-
-Helper targets used by CI: `make lint`, `make tidy-check`, `make proto-check`, `make build`, `make integration`,
-`make sim-pr`, `make sim-random`, `make fuzz`.
+| `make fmt-check lint build test race` | Formatting, golangci-lint, build, unit tests, unit tests with `-race` | `check` |
+| `make proto && git diff --exit-code` | Regenerate protobuf code and fail on drift | `check` |
+| `make mutation` | Linearizability check against a `-tags raftkv_mutation` build whose followers serve "linearizable" reads locally; must report a violation | `check`, `e2e-long` |
+| `make sim SEEDS=<n> SEED=<first> FAULTS=<profile> [SIMRACE=-race]` | Simulator over a seed range; a failing seed prints its repro command and writes a JSONL trace to `out/sim/` | `sim`, `sim-long`, `sim-race` |
+| `make fuzz [FUZZTIME=60s] [FUZZ=<target>]` | Every native fuzz target, or one | `fuzz-long` |
+| `make e2e [E2E_PROFILE=pr\|nightly] [E2E_SEED=n]` | Build the e2e image, run `test/e2e` against the 5-node compose cluster | `e2e-short`, `e2e-long` |
+| `make chaos-up` | Create a kind cluster, deploy RaftKV, install Chaos Mesh | `chaos` |
+| `make chaos [CHAOS_DURATION=10m] [CHAOS_SEED=n]` | Build and load the workload image, run the seeded fault schedule under the in-cluster workload, check the history with Porcupine (`out/chaos/`) | `chaos` |
+| `make chaos-down` | Delete the kind cluster | `chaos` |
 
 **Steps to reproduce a failure**
 
-1. Copy the repro command from the issue or job log, and `git checkout` the commit it names.
-2. **Simulator failure:** `make sim SEED=<seed> SIM_PROFILE=<profile>`. It is deterministic, so it must reproduce on
-   any machine; if it doesn't, that's a simulator bug.
-3. **E2E / chaos failure:** download the history artifact and open the Porcupine HTML to see the bad key. Re-running
-   `make e2e E2E_SEED=<seed>` repeats the same fault plan, but real timing differs, so it may not hit the same
-   interleaving. The saved history and logs are the main evidence; if possible, turn the bug into a simulator seed or
-   integration test.
-4. **Fix PR:** add the seed to `test/sim/seeds/regressions.txt` (or a new test) and link the issue.
+1. Copy the seed or repro command from the job log and `git checkout` the commit the run used.
+2. **Simulator failure:** `make sim SEEDS=1 SEED=<seed> FAULTS=<profile>`. It is deterministic, so it must reproduce on
+   any machine; if it doesn't, that's a simulator bug. `go run ./test/sim/cmd/simtrace <trace>` pretty-prints the trace.
+3. **E2E / chaos failure:** download the artifact and open the Porcupine HTML to see the bad key. Re-running with the
+   same seed repeats the same fault plan, but real timing differs, so it may not hit the same interleaving. If
+   possible, turn the bug into a simulator seed or an in-process test.
+4. **Fix PR:** add the seed to `test/sim/regressions/seeds.txt` (or a new test).
 
 Local needs: Go, Docker with Compose v2, about 4 vCPU / 8 GiB for `make e2e` and 8 vCPU / 16 GiB for `make chaos`.
