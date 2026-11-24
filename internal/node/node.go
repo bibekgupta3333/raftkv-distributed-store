@@ -593,7 +593,10 @@ func (n *Node) Run(ctx context.Context) error {
 		metricsSrv = &http.Server{Handler: n.httpHandler(), ReadHeaderTimeout: 5 * time.Second}
 		go func() { _ = metricsSrv.Serve(n.metricsLis) }()
 	}
-	n.tr.Start(ctx)
+	// WBS 6.2.3: the peer senders outlive ctx. A leader stopped by SIGTERM
+	// still has to catch its transfer target up and send TimeoutNow after ctx
+	// is cancelled; tr.Close below stops them once the loop has returned.
+	n.tr.Start(context.WithoutCancel(ctx))
 	close(n.started)
 	n.log.Info("node started", "component", "node", "addr", n.Addr(), "peers", len(n.cfg.Peers))
 

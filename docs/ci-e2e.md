@@ -41,7 +41,7 @@ see the M0 exit evidence in implementation-roadmap.md).
 | `sim-race` | 10,000 seeds of the `full` profile with `-race` (`make sim SIMRACE=-race`), WBS 1.9.1 | 90 min |
 | `fuzz-long` | `make fuzz FUZZTIME=3m`: every native fuzz target for 3 min (WBS 7.5.1); crashers uploaded | 75 min |
 | `e2e-long` | `make mutation`, then `make e2e E2E_PROFILE=nightly E2E_SEED=<run ID>` at nightly sizes (table 1.3). `out/e2e/` always uploaded | 90 min |
-| `chaos` | Pinned kind v0.30.0, `make chaos-up` (Chaos Mesh 2.8.8), `make chaos CHAOS_DURATION=15m CHAOS_SEED=<run ID>`: an in-cluster workload pod records a mixed KV history under a seeded PodChaos/NetworkChaos schedule, then Porcupine checks it. `out/chaos/` uploaded on failure; `make chaos-down` always | 60 min |
+| `chaos` | Pinned kind v0.30.0, `make chaos-up` (Chaos Mesh 2.8.8), `make chaos CHAOS_DURATION=15m CHAOS_SEED=<run ID>`: an in-cluster workload pod records a mixed KV history under a seeded PodChaos/NetworkChaos + rolling-restart schedule (each leader must hand over before it exits), then Porcupine checks it. `out/chaos/` uploaded on failure; `make chaos-down` always | 60 min |
 
 The e2e image is built locally on the runner; for kind it is loaded with `kind load docker-image`. Nothing is pushed
 to a registry.

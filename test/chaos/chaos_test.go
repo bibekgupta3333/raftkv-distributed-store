@@ -48,7 +48,17 @@ var faults = []fault{
 	{"network-partition-leader", "networkchaos", "raftkv-partition-leader", 0, 10 * time.Second, 15 * time.Second},
 	{"network-delay", "networkchaos", "raftkv-delay", 0, 15 * time.Second, 25 * time.Second},
 	{"network-loss", "networkchaos", "raftkv-loss", 0, 15 * time.Second, 25 * time.Second},
+	// WBS 7.4.5: not a Chaos Mesh experiment. `kubectl rollout restart`
+	// replaces every member, one at a time; see kube.rollingRestart.
+	{name: rollingRestart},
 }
+
+const (
+	rollingRestart = "rolling-restart"
+	// minRollouts rolling restarts run in every chaos run: the ones the
+	// schedule did not reach run after it, still under the workload.
+	minRollouts = 2
+)
 
 // leaderManifests are the leader faults; %[1]s is the leader's pod name.
 var leaderManifests = map[string]string{
@@ -94,11 +104,17 @@ spec:
 //     the killed pods came back under new UIDs), holds it, deletes it, waits
 //     until all five members are Ready again, then leaves a quiet gap. Every
 //     cycle runs each fault once, in a seeded order.
+//     One more step per cycle is a rolling restart of the StatefulSet
+//     (WBS 7.4.5): every member is replaced, and each one that led when it
+//     got SIGTERM must have handed leadership over by TimeoutNow (from its
+//     logs) instead of leaving the cluster to an election timeout. At least
+//     minRollouts rolling restarts run per chaos run.
 //  3. Stops the workload, fetches the history and checks it with Porcupine:
 //     any violation or a checker timeout fails the run.
 //
 // Artifacts (CHAOS_OUT, default out/chaos): seed.txt, fault-log.txt,
 // history.jsonl, summary.txt, pod logs (current and previous container),
+// rollout-N/ (each member's log up to its replacement in rolling restart N),
 // events and pod listings, and on failure the Porcupine visualization.
 //
 // Environment: CHAOS_DURATION (default 10m), CHAOS_SEED (default: from the
@@ -141,7 +157,14 @@ func TestChaos(t *testing.T) {
 
 	rng := rand.New(rand.NewPCG(seed, 0x43484153)) // "CHAS"
 	deadline := time.Now().Add(dur)
-	steps := 0
+	steps, rollouts := 0, 0
+	rollout := func(label string) {
+		rollouts++
+		flog.Logf("%s: rolling restart %d (leader %s)", label, rollouts, k.leader())
+		took, handovers := k.rollingRestart(filepath.Join(out, fmt.Sprintf("rollout-%d", rollouts)))
+		flog.Logf("%s: rolling restart %d done in %v; handovers: %s", label, rollouts, took.Round(time.Second),
+			strings.Join(handovers, ", "))
+	}
 	for cycle := 1; time.Now().Before(deadline); cycle++ {
 		order := rng.Perm(len(faults))
 		for _, i := range order {
@@ -152,6 +175,14 @@ func TestChaos(t *testing.T) {
 			hold := f.minHold + time.Duration(rng.Int64N(int64(f.extraHold)+1))
 			gap := 5*time.Second + time.Duration(rng.Int64N(int64(10*time.Second)+1))
 			steps++
+			if f.name == rollingRestart {
+				rollout(fmt.Sprintf("cycle %d step %d", cycle, steps))
+				took := k.waitMembersReady(5 * time.Minute)
+				flog.Logf("cycle %d step %d: all %d members Ready after %v; quiet %v",
+					cycle, steps, numMembers, took.Round(time.Second), gap.Round(time.Second))
+				time.Sleep(gap)
+				continue
+			}
 			lead := k.leader()
 			manifest, target := k.manifest(f, lead)
 			before := k.podUIDs()
@@ -175,7 +206,12 @@ func TestChaos(t *testing.T) {
 			time.Sleep(gap)
 		}
 	}
-	flog.Logf("schedule done: %d faults; stopping the workload", steps)
+	for rollouts < minRollouts {
+		rollout("after the schedule")
+		k.waitMembersReady(5 * time.Minute)
+		time.Sleep(5 * time.Second)
+	}
+	flog.Logf("schedule done: %d steps, %d rolling restarts; stopping the workload", steps, rollouts)
 
 	k.exec(clientBin, "stop")
 	k.waitFile("done", 2*time.Minute)
@@ -320,6 +356,89 @@ func (k *kube) waitReplaced(before map[string]string, n int, timeout time.Durati
 	}
 	k.t.Fatalf("pod kill: only %v of %d pods replaced after %v", killed, n, timeout)
 	return nil
+}
+
+// rollingRestart runs `kubectl rollout restart` on the StatefulSet and waits
+// for the rollout (WBS 7.4.5). The RollingUpdate strategy replaces one pod at
+// a time, highest ordinal first, and waits for each new pod to be Ready. A
+// replaced pod is deleted, so `kubectl logs --previous` cannot show its last
+// lines: each member's log is streamed into dir from before the restart until
+// its old container exits.
+//
+// It fails the test unless every member was replaced, every member that began
+// a shutdown handover (it led when SIGTERM arrived) stepped down within
+// maxHandover, no leader skipped the handover, and at least one handover
+// happened (whoever leads when the rollout begins is replaced at some point).
+// It returns how long the rollout took and one note per handover.
+func (k *kube) rollingRestart(dir string) (time.Duration, []string) {
+	k.t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		k.t.Fatal(err)
+	}
+	var streams []*exec.Cmd
+	for i := range numMembers {
+		pod := fmt.Sprintf("raftkv-%d", i)
+		f, err := os.Create(filepath.Join(dir, pod+".log"))
+		if err != nil {
+			k.t.Fatal(err)
+		}
+		cmd := k.cmd("logs", "--follow", "--tail=0", pod)
+		cmd.Stdout, cmd.Stderr = f, f
+		if err := cmd.Start(); err != nil {
+			k.t.Fatalf("stream %s logs: %v", pod, err)
+		}
+		k.t.Cleanup(func() { _ = f.Close() })
+		streams = append(streams, cmd)
+	}
+	time.Sleep(3 * time.Second) // let every stream attach before the first SIGTERM
+
+	before := k.podUIDs()
+	start := time.Now()
+	k.must("rollout", "restart", "statefulset/raftkv")
+	k.must("rollout", "status", "statefulset/raftkv", "--timeout=15m")
+	took := time.Since(start)
+	k.waitReplaced(before, numMembers, time.Minute)
+
+	// Each stream ends when its old container exits. All of them have been
+	// replaced, so give the stragglers a moment, then stop waiting.
+	ended := make(chan struct{})
+	go func() {
+		for _, cmd := range streams {
+			_ = cmd.Wait()
+		}
+		close(ended)
+	}()
+	select {
+	case <-ended:
+	case <-time.After(30 * time.Second):
+		for _, cmd := range streams {
+			_ = cmd.Process.Kill()
+		}
+		<-ended
+	}
+
+	var notes, problems []string
+	for i := range numMembers {
+		pod := fmt.Sprintf("raftkv-%d", i)
+		b, err := os.ReadFile(filepath.Join(dir, pod+".log"))
+		if err != nil {
+			k.t.Fatal(err)
+		}
+		note, problem := parseHandover(b).verdict(pod)
+		if note != "" {
+			notes = append(notes, note)
+		}
+		if problem != "" {
+			problems = append(problems, problem)
+		}
+	}
+	if len(notes) == 0 && len(problems) == 0 {
+		problems = append(problems, "no member logged a handover, though the leader was replaced")
+	}
+	if len(problems) > 0 {
+		k.t.Fatalf("rolling restart (member logs in %s):\n%s", dir, strings.Join(problems, "\n"))
+	}
+	return took, notes
 }
 
 func (k *kube) clearFaults() {

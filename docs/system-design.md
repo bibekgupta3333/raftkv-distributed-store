@@ -477,7 +477,38 @@ raftkvctl member transfer <ID>    # or with no ID: the most up-to-date voter
 It prints the new leader and term. The old leader stops taking proposals and lease reads, catches the target up, sends
 `TimeoutNow`, and gives up after one election timeout (`TRANSFER_TIMEOUT`), resuming service. A leader stopped with
 SIGTERM does the same on its own before it exits (WBS 6.2.3), so planned restarts (`kubectl rollout restart`, `docker
-stop`) cost one round trip of unavailability instead of an election timeout.
+stop`) cost one round trip of unavailability instead of an election timeout. The stopping leader keeps its peer
+connections open until the handover ends: under load the chosen target is usually a few appends behind, and those
+catch-up appends must still go out after the stop signal.
+
+### 7.9 Kubernetes: rolling restarts, and what the StatefulSet does not support
+
+**Rolling restart (supported).** `kubectl rollout restart statefulset/raftkv` replaces one pod at a time, highest
+ordinal first, and waits for each new pod to be Ready (D-46) before the next. Each pod gets the preStop sleep (2 s, so
+the endpoints controller drops it from the client Service first), then SIGTERM; if it leads, it hands over as in §7.8
+before it exits. The pod comes back with the same name, so the same node ID (`--node-id-from-ordinal`, 1 + ordinal) and
+the same PVC, and catches up from its WAL and the leader. `terminationGracePeriodSeconds: 30` covers the worst-case
+shutdown (about 9 s, itemised in `deploy/k8s/base/statefulset.yaml`). The chaos run (WBS 7.4.5) does two rolling
+restarts under the Porcupine-checked workload and fails unless every leader that got SIGTERM handed over by
+`TimeoutNow`, in under 800 ms (an election timeout is at least 1 s).
+
+**Not supported in v1: scaling the StatefulSet, or replacing a pod's disk.** On Kubernetes the node ID comes from the
+pod ordinal, while `AddLearner` assigns a random 64-bit ID (D-38) and a joining node must start with `--join --node-id
+<that ID>` (§7.5). One pod template cannot give one pod a different ID or flag, so:
+
+- **Scaling** (`kubectl scale --replicas=N`) is not supported. A new pod `raftkv-5` derives ID 6, which is not in the
+  peer list, so `raftkvd` refuses the configuration and the pod crash-loops; it was never added as a learner either.
+  Scaling down deletes pods without removing their IDs, so each one removed is a voter permanently down (3 of 5 must
+  stay up). The 5-member set in `deploy/k8s/base` is static; change the size by recreating the cluster.
+- **Replacing a lost or wiped PVC** is not supported. The pod comes back under its old ID with an empty data directory,
+  which is exactly what D-32 forbids: it forgot its vote and its acked entries. The peers that knew the old incarnation
+  refuse it (§7.5, guard 2), so it never becomes Ready, but that guard lives in memory: once every peer has restarted,
+  nothing stops it. Restoring an older copy of the PV is just as unsafe (the votes and entries since the copy are
+  gone, and the restored `IDENTITY` hides it). Do not delete a member's PVC; if one is lost, recreate the cluster.
+- **Removing a member** with `raftkvctl member remove` works, but the removed pod then exits and refuses to start under
+  its ID again (§7.4, exit 78), so the StatefulSet keeps restarting it. Only do it before recreating the cluster.
+
+The compose and bare-metal deployments, where each node has its own command line, support all of §7.6 and §7.7.
 
 ---
 
