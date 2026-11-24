@@ -108,7 +108,7 @@ CHAOS_NS       := chaos-mesh
 HELM           := HELM_REPOSITORY_CONFIG=$(CURDIR)/out/helm/repositories.yaml \
                   HELM_REPOSITORY_CACHE=$(CURDIR)/out/helm/cache helm --kube-context $(KIND_CTX)
 
-.PHONY: kind-image kind-up kind-down kind-status chaos-up chaos-down chaos-apply chaos-clear
+.PHONY: kind-image kind-up kind-down kind-status chaos-up chaos-down chaos-apply chaos-clear chaos-image chaos
 
 $(CURDIR)/bin/kind:
 	GOBIN=$(CURDIR)/bin go install sigs.k8s.io/kind@$(KIND_VERSION)
@@ -149,6 +149,18 @@ chaos-apply: ## apply one fault: FAULT=pod-kill|pod-kill-two|network-partition|n
 
 chaos-clear: ## delete every chaos experiment in the RaftKV namespace
 	$(KUBECTL) -n $(K8S_NS) delete podchaos,networkchaos --all --ignore-not-found
+
+CHAOS_IMAGE    ?= raftkv-chaos:kind
+CHAOS_DURATION ?= 10m
+CHAOS_SEED     ?=
+
+chaos-image: ## build the in-cluster chaos workload image as raftkv-chaos:kind
+	docker build --target chaos -t $(CHAOS_IMAGE) .
+
+chaos: chaos-image $(KIND) ## fault schedule + Porcupine check on a `make chaos-up` cluster: CHAOS_DURATION=10m CHAOS_SEED=n
+	$(KIND) load docker-image $(CHAOS_IMAGE) --name $(KIND_CLUSTER)
+	CHAOS_DURATION=$(CHAOS_DURATION) CHAOS_SEED=$(CHAOS_SEED) CHAOS_IMAGE=$(CHAOS_IMAGE) \
+		CHAOS_KUBE_CONTEXT=$(KIND_CTX) go test -tags chaos -count=1 -timeout 240m -v -run TestChaos ./test/chaos/...
 
 chaos-down: kind-down ## delete the kind cluster (Chaos Mesh and all experiments go with it)
 

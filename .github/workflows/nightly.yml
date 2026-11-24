@@ -1,6 +1,6 @@
 name: nightly
 # D-19, WBS 1.7.5: long deterministic-simulator run with fresh seeds each day.
-# Also: fuzzing (WBS 7.5.1) and long e2e; later milestones add kind + Chaos Mesh.
+# Also: fuzzing (WBS 7.5.1), long e2e and kind + Chaos Mesh (WBS 7.4.6).
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -12,8 +12,16 @@ on:
       base_seed:
         description: "first seed (default: derived from the run ID)"
         default: ""
+      jobs:
+        description: "jobs to run: all, or a comma-separated subset of sim-long,fuzz-long,e2e-long,chaos"
+        default: "all"
+      chaos_duration:
+        description: "length of the chaos fault schedule"
+        default: "15m"
+# A scheduled run has no inputs: inputs.jobs is empty and every job runs.
 jobs:
   sim-long:
+    if: ${{ !inputs.jobs || inputs.jobs == 'all' || contains(inputs.jobs, 'sim-long') }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -47,6 +55,7 @@ jobs:
   # YAML config) for a few minutes each. A crasher fails the job; its input
   # is uploaded so it can be committed under <pkg>/testdata/fuzz/.
   fuzz-long:
+    if: ${{ !inputs.jobs || inputs.jobs == 'all' || contains(inputs.jobs, 'fuzz-long') }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
@@ -67,6 +76,7 @@ jobs:
   # SIGSTOP and partitions (TestLinearizableKVUnderFaults, 6 fault cycles in the nightly profile),
   # preceded by the deliberately broken build the checker must catch (testing.md 3.4).
   e2e-long:
+    if: ${{ !inputs.jobs || inputs.jobs == 'all' || contains(inputs.jobs, 'e2e-long') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -83,3 +93,42 @@ jobs:
           name: e2e-long
           path: out/e2e/
           retention-days: 30
+  # WBS 7.4.4, 7.4.6 (D-47, docs/testing.md 2.6): kind + Chaos Mesh. The 5-node
+  # StatefulSet runs the mixed Porcupine workload from an in-cluster client pod
+  # while a seeded schedule applies, holds and clears pod kills, a partition,
+  # delay and loss; any linearizability violation fails the job. Histories,
+  # the fault log, the seed and pod logs are uploaded on failure.
+  chaos:
+    if: ${{ !inputs.jobs || inputs.jobs == 'all' || contains(inputs.jobs, 'chaos') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      KIND_VERSION: v0.30.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: install kind (pinned)
+        run: |
+          GOBIN="$PWD/bin" go install "sigs.k8s.io/kind@$KIND_VERSION"
+          echo "KIND=$PWD/bin/kind" >> "$GITHUB_ENV"
+          "$PWD/bin/kind" version; kubectl version --client; helm version
+      - name: kind cluster + Chaos Mesh
+        run: make chaos-up
+      - name: chaos schedule + Porcupine check
+        env:
+          SEED: ${{ inputs.base_seed || github.run_id }}
+          DURATION: ${{ inputs.chaos_duration || '15m' }}
+        run: make chaos CHAOS_DURATION="$DURATION" CHAOS_SEED="$SEED"
+      - name: upload chaos artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos
+          path: out/chaos/
+          retention-days: 30
+      - name: delete the kind cluster
+        if: always()
+        run: make chaos-down
