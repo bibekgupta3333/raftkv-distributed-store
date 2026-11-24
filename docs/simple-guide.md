@@ -90,7 +90,7 @@ The rules make sure the new leader always has every saved value. Apps just retry
 
 ---
 
-## How will we know it actually works?
+## How do we know it actually works?
 
 Saying it works is easy. Proving it is the real project, and the best part to learn from.
 
@@ -124,9 +124,9 @@ You can also watch it live in the **observer page** in your browser.
 
 ---
 
-## The plan
+## How it was built
 
-| Step | What gets built |
+| Step | What was built |
 |---|---|
 | M0 | Project setup |
 | M1 | Voting and copying rules, plus a simulator to test them |
@@ -139,4 +139,4 @@ You can also watch it live in the **observer page** in your browser.
 
 ---
 
-*Status: planning. No code written yet. Speed is not a goal; this is a learning project.*
+*Status: version 1.0 is built and tested (all steps M0–M7). Speed is not a goal; this is a learning project.*

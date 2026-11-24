@@ -339,7 +339,7 @@ flowchart TD
 
 **Why: fsyncgate (2018).** PostgreSQL developers found that on Linux, after a failed writeback the kernel may report the error to one `fsync` caller and then mark the pages clean. A retried `fsync` then "succeeds" even though the data never reached disk. For RaftKV that would mean acknowledging votes or entries that are not durable, which breaks election safety (double votes) and durability (a "committed" entry on fewer than a quorum of disks). The only state we can trust after an I/O error is what a fresh process reads back from disk, so we exit and let recovery (§5) rebuild.
 
-After exit, Kubernetes restarts the pod and recovery cuts any torn tail. If the disk keeps failing, the pod crash-loops; replace the volume and re-add the member as a learner. The cluster keeps working with 4 of 5 nodes.
+After exit, Kubernetes (or the operator) restarts the node and recovery cuts any torn tail. If the disk keeps failing, the node crash-loops; replace the volume and re-add the member as a learner under a new ID (compose / bare metal; on Kubernetes v1 cannot replace a PVC, system-design 7.9). The cluster keeps working with 4 of 5 nodes.
 
 Summary:
 
@@ -385,10 +385,10 @@ Summary:
 | 4 | Crash mid-snapshot creation | `snap/tmp-*` present | Deleted on startup | Safe; previous snapshot still valid | None |
 | 5 | Crash mid-install, before `CURRENT` swap | Staging dir in `incoming/` | Deleted; old db stays live; leader resends | Safe | None |
 | 6 | Crash after swap, before WAL marker | `A > lastIndex` or term mismatch at `A` | Reconcile (§5 step 6) | Safe | None |
-| 7 | Corruption in a sealed segment | CRC mismatch not at the tail | **Refuse to start** (exit 78) | Node untrusted; cluster fine (3/5) | Remove member, wipe PVC, add as learner, promote |
+| 7 | Corruption in a sealed segment | CRC mismatch not at the tail | **Refuse to start** (exit 78) | Node untrusted; cluster fine (3/5) | Remove member, wipe its data, add as learner, promote (compose / bare metal; on Kubernetes in v1, recreate the cluster) |
 | 8 | Pebble SST corruption | Pebble checksum error | Read returns `DATA_LOSS`, then fail-stop | Same as #7 | Same as #7 |
 | 9 | fsync / write error, or disk full | Syscall error | **Crash** (exit 75), restart, recover | Safe: nothing acked after the error | If it repeats, replace the volume |
-| 10 | PVC lost; pod restarts empty under the same name | `META` missing for an existing member | **Refuse to bootstrap** | Prevents vote amnesia | Remove old ID, re-add as learner (D-32) |
+| 10 | Data dir lost; node restarts empty under its old ID | `IDENTITY` kept but WAL gone: `ErrStateLost`. Fully wiped: peers see a new incarnation (D-32) | **Refuse to start**, or peers refuse it (they keep incarnations in memory only) | Prevents vote amnesia | Remove old ID, re-add as a learner with `--join` (D-32). On Kubernetes in v1 this is not possible: recreate the cluster (system-design 7.9) |
 | 11 | Data dir from another cluster or member | `cluster_id`/`member_id` mismatch | Refuse to start | Prevents mixing logs | Fix the volume binding |
 | 12 | Disk that lies about fsync | Undetectable locally | None | Raft safety breaks only if a **majority** lie | Out of scope |
 | 13 | Two processes on one dir | Pebble's `LOCK` in `sm/db-*` is held | Second process fails to open Pebble and exits | Safe | Fix the deployment |

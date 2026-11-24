@@ -14,10 +14,11 @@ spec:
     - {name: metrics, port: 9100, targetPort: metrics}
 ---
 # raftkv: client Service. Only ready pods (known leader, caught up; D-46)
-# receive client traffic. Until follower forwarding lands (D-28, M4) a
-# follower answers NOT_LEADER with a hint the client can only follow to an
-# endpoint it already knows, so clients should list the peer names
-# (raftkv-0.raftkv-peer:7000,...) rather than only this Service.
+# receive client traffic. Any member serves a client: followers forward
+# writes to the leader (D-28) and answer linearizable reads by ReadIndex
+# (D-05), so this Service alone is enough. Listing the peer names
+# (raftkv-0.raftkv-peer:7000,...) lets pkg/client fail over without waiting
+# for a new connection through the Service.
 apiVersion: v1
 kind: Service
 metadata:

@@ -23,18 +23,18 @@ tasks, and every task aims at a working, tested feature.
 
 | Milestone | Theme | Done / Leaves | Est. weeks | Status |
 |-----------|-------|---------------|------------|--------|
-| M0 | Repo setup, tooling, protos | 15/15 | 1 | Done (tag pending) |
-| M1 | Raft core + deterministic simulator | 39/39 | 5 | Done (tag pending) |
-| M2 | WAL + gRPC transport + real 5-process cluster | 38/38 | 4 | Done (tag pending) |
-| M3 | Pebble state machine + basic KV | 20/20 | 2.5 | Done (tag pending) |
-| M4 | Linearizable reads, client sessions, full KV API | 25/25 | 3.5 | Done (tag pending) |
-| M5 | Snapshots + follower catch-up | 18/18 | 2.5 | Done (tag pending) |
-| M6 | Membership changes + leadership transfer | 21/21 | 3 | Done (tag pending) |
-| M7 | Kubernetes, observer UI, chaos tests, v1.0 | 16/25 | 3.5 | In progress |
-| **Total** | | **192/201** | **25** | |
+| M0 | Repo setup, tooling, protos | 15/15 | 1 | Done (`v0.0.1`) |
+| M1 | Raft core + deterministic simulator | 39/39 | 5 | Done (`v0.1.0-alpha`) |
+| M2 | WAL + gRPC transport + real 5-process cluster | 38/38 | 4 | Done (`v0.1.0`) |
+| M3 | Pebble state machine + basic KV | 20/20 | 2.5 | Done (`v0.2.0`) |
+| M4 | Linearizable reads, client sessions, full KV API | 25/25 | 3.5 | Done (`v0.3.0`) |
+| M5 | Snapshots + follower catch-up | 18/18 | 2.5 | Done (`v0.4.0`) |
+| M6 | Membership changes + leadership transfer | 21/21 | 3 | Done (`v0.5.0`) |
+| M7 | Kubernetes, observer UI, chaos tests, v1.0 | 20/25 | 3.5 | In progress (v1.0 DoD walk: 2 items open) |
+| **Total** | | **196/201** | **25** | |
 
-M0–M6 are done: every exit criterion is linked in docs/implementation-roadmap.md ("Exit evidence"). Only their
-release tags are pending; the proposed tag commits are listed in the PR that ticked the exit reviews.
+M0–M6 are done and tagged: every exit criterion is linked in docs/implementation-roadmap.md ("Exit evidence").
+M7's evidence and the v1.0 Definition of Done walk are in the same file.
 
 ---
 
@@ -58,7 +58,7 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 0.3.3 Commit generated code and add a drift check (`make proto && git diff --exit-code`) (D-43) → CI fails on stale generated code (#2, #3)
 - [x] **0.4 CI and exit review**
   - [x] 0.4.1 `.github/workflows/pr.yml`: Go cache, `make fmt-check lint build test race`, buf lint, proto drift check → green on `main` (#2)
-  - [x] 0.4.2 M0 exit review: link evidence for each roadmap M0 exit criterion, update CHANGELOG.md and memory.md, tag `v0.0.1` → all criteria linked, tag exists (#24 drift proof, #25; evidence in implementation-roadmap.md M0) (tag pending, see PR)
+  - [x] 0.4.2 M0 exit review: link evidence for each roadmap M0 exit criterion, update CHANGELOG.md and memory.md, tag `v0.0.1` → all criteria linked, tag exists (#24 drift proof, #25; evidence in implementation-roadmap.md M0) (tag `v0.0.1`)
 
 ---
 
@@ -111,7 +111,7 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
 - [x] **1.9 M1 exit review**
   - [x] 1.9.1 Run 10,000 seeds with the full fault profile, race detector clean → 0 violations, CI run linked (#25; nightly sim-race run 45302500294: 10,000 seeds, full profile, -race, 0 violations)
   - [x] 1.9.2 Update architecture.md / system-design.md Raft core sections to match the code → diff reviewed (#25)
-  - [x] 1.9.3 Update CHANGELOG.md and memory.md (core API, sim usage, bugs the sim found), tag `v0.1.0-alpha` → diff reviewed, tag exists (#25) (tag pending, see PR)
+  - [x] 1.9.3 Update CHANGELOG.md and memory.md (core API, sim usage, bugs the sim found), tag `v0.1.0-alpha` → diff reviewed, tag exists (#25) (tag `v0.1.0-alpha`)
 
 ---
 
@@ -161,7 +161,7 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
 - [x] **2.9 M2 exit review**
   - [x] 2.9.1 Re-run sim 10,000 seeds and link evidence for every M2 exit criterion → all linked (#25; evidence in implementation-roadmap.md M2)
   - [x] 2.9.2 Update storage-design.md (WAL as built), system-design.md (node loop), ci-e2e.md (jobs) → diffs reviewed (#25)
-  - [x] 2.9.3 Update CHANGELOG.md and memory.md (WAL format, fsync gotchas, e2e tips), tag `v0.1.0` → diff reviewed, tag exists (#25) (tag pending, see PR)
+  - [x] 2.9.3 Update CHANGELOG.md and memory.md (WAL format, fsync gotchas, e2e tips), tag `v0.1.0` → diff reviewed, tag exists (#25) (tag `v0.1.0`)
 
 ---
 
@@ -191,7 +191,7 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 3.4.3 Wire the recorder into e2e with leader kill, follower kill, and partition → checked histories, 0 violations (#9 in-process, #18 docker e2e, #23 kind chaos with pod kills; 0 violations)
 - [x] **3.9 M3 exit review**
   - [x] 3.9.1 Link evidence for every M3 exit criterion; update storage-design.md (key schema, durability) and api-design.md (implemented RPCs) → linked, diffs reviewed (#25; evidence in implementation-roadmap.md M3)
-  - [x] 3.9.2 Update CHANGELOG.md and memory.md, tag `v0.2.0` → diff reviewed, tag exists (#25) (tag pending, see PR)
+  - [x] 3.9.2 Update CHANGELOG.md and memory.md, tag `v0.2.0` → diff reviewed, tag exists (#25) (tag `v0.2.0`)
 
 ---
 
@@ -228,7 +228,7 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 4.6.2 e2e mixing Put/Get/Delete/CAS/Range with leader and follower reads under leader kill, pause, partition → 0 violations, runs nightly (#18)
 - [x] **4.9 M4 exit review**
   - [x] 4.9.1 Link evidence for every M4 exit criterion; update api-design.md (final API) and system-design.md (read path, sessions) → linked, diffs reviewed (#18, #25; evidence in implementation-roadmap.md M4)
-  - [x] 4.9.2 Update CHANGELOG.md and memory.md, tag `v0.3.0` → diff reviewed, tag exists (#25) (tag pending, see PR)
+  - [x] 4.9.2 Update CHANGELOG.md and memory.md, tag `v0.3.0` → diff reviewed, tag exists (#25) (tag `v0.3.0`)
 
 ---
 
@@ -257,7 +257,7 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 5.5.2 Add follower-wipe to the e2e fault driver and nightly; linearizability still passes → 0 violations (#17)
 - [x] **5.9 M5 exit review**
   - [x] 5.9.1 Link evidence for every M5 exit criterion; add snapshot metrics (size, duration, installs) and update storage-design.md → linked, diff reviewed (#17, #25; evidence in implementation-roadmap.md M5)
-  - [x] 5.9.2 Update CHANGELOG.md and memory.md, tag `v0.4.0` → diff reviewed, tag exists (#25) (tag pending, see PR)
+  - [x] 5.9.2 Update CHANGELOG.md and memory.md, tag `v0.4.0` → diff reviewed, tag exists (#25) (tag `v0.4.0`)
 
 ---
 
@@ -289,18 +289,18 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 6.5.2 Scale 3 → 5 → 3 under load, plus membership changes in the nightly fault mix → 0 violations, nightly green (#22)
 - [x] **6.9 M6 exit review**
   - [x] 6.9.1 Link evidence for every M6 exit criterion; write how-tos "replace a node", "scale 3 → 5", "transfer leadership" in system-design.md → linked, diff reviewed (#22 how-tos in system-design §7.6–7.8, #25; evidence in implementation-roadmap.md M6)
-  - [x] 6.9.2 Update CHANGELOG.md and memory.md, tag `v0.5.0` → diff reviewed, tag exists (#25) (tag pending, see PR)
+  - [x] 6.9.2 Update CHANGELOG.md and memory.md, tag `v0.5.0` → diff reviewed, tag exists (#25) (tag `v0.5.0`)
 
 ---
 
 ## 7. M7 — Kubernetes, observer UI, chaos tests, v1.0
 
-- [ ] **7.1 Kubernetes on kind (deploy/k8s, D-16)**
+- [x] **7.1 Kubernetes on kind (deploy/k8s, D-16)**
   - [x] 7.1.1 Kustomize base: StatefulSet (5 replicas, PVC template, non-root) → `kubectl apply --dry-run=server` passes (#13)
   - [x] 7.1.2 Headless Service for peer DNS and a client Service → DNS resolves in kind (#13)
   - [x] 7.1.3 Node ID from the pod ordinal, stable across restarts; config from a ConfigMap → restart keeps the ID (#13)
   - [x] 7.1.4 Readiness (knows leader, caught up) and liveness (driver loop responds) probes (D-46) → probe behavior checked in kind (#13)
-  - [ ] 7.1.5 `preStop` hook that transfers leadership, grace period sized for it → rolling restart test (partial #13, #22: preStop sleep + grace period; raftkvd hands leadership over on SIGTERM since #22; the rolling restart test is open with 7.4.5)
+  - [x] 7.1.5 `preStop` hook that transfers leadership, grace period sized for it → rolling restart test (#13, #22, #26: preStop sleep 2 s, raftkvd hands over on SIGTERM, grace period 30 s for a ~9 s worst case; rolling restart test in the chaos run)
   - [x] 7.1.6 `kind` overlay and `make kind-up` script → 5-node cluster passes the e2e smoke test (#13)
 - [x] **7.2 Observer UI (D-48)**
   - [x] 7.2.1 `cmd/raftkv-observer`: polls `Cluster.Status` on all nodes every 500 ms and serves an embedded HTML page over SSE → page shows 5 node cards against the compose cluster (#12)
@@ -313,20 +313,26 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 7.4.2 `PodChaos` pod-kill manifests → applied in kind (#13)
   - [x] 7.4.3 `NetworkChaos` partition, delay, and loss manifests → applied in kind (#13)
   - [x] 7.4.4 Chaos driver: run a fault schedule while recording histories, then run Porcupine → one automated run, 0 violations (#23; nightly chaos run 45299681977: 925,159 ops, 0 violations)
-  - [ ] 7.4.5 Rolling restart of the StatefulSet under load → 0 violations, each pod hands off leadership
+  - [x] 7.4.5 Rolling restart of the StatefulSet under load → 0 violations, each pod hands off leadership (#26; nightly chaos run 45309611538: 3 rolling restarts, 4 handovers in 36-68 ms, 1,104,335 ops, linearizable)
   - [ ] 7.4.6 Add the kind + Chaos Mesh job to `nightly.yml` → 3 green nights in a row
-    (partial #23: job added; green on dispatch, runs 45297525546 and 45299681977; no scheduled night yet)
+    (partial #23, #26: job added; green on dispatch, runs 45297525546, 45299681977 and 45309611538; the first scheduled
+    night with the chaos job is the 03:17 UTC run after #26, so 3 green nights in a row cannot be shown yet)
 - [x] **7.5 Hardening**
   - [x] 7.5.1 Fuzz tests for the WAL record decoder, snapshot metadata, and command envelope, run in nightly → 0 crashers (#21)
   - [x] 7.5.2 On-disk format version check (WAL, snapshot, Pebble schema), refuse unknown versions → tests (#21)
 - [ ] **7.6 Documentation**
   - [x] 7.6.1 Configuration reference matching `--help` → doc matches flags (#21)
-  - [ ] 7.6.2 Final pass over architecture.md, system-design.md, api-design.md, storage-design.md, testing.md, ci-e2e.md → each matches v1.0
+  - [x] 7.6.2 Final pass over architecture.md, system-design.md, api-design.md, storage-design.md, testing.md, ci-e2e.md → each matches v1.0 (#27; also configuration.md, design-decisions.md, raftkv-in-5-minutes.md, simple-guide.md)
   - [ ] 7.6.3 README quick start (compose and kind) tried on a clean machine; known limitations listed (one Raft group, no Watch/transactions, no TLS/auth) → verified
+    (partial #27: quick start and known limitations written, every target and port checked against the Makefile,
+    compose file and manifests; the clean-machine trial is still to do)
 - [ ] **7.9 M7 exit review and v1.0**
   - [ ] 7.9.1 Link evidence for every M7 exit criterion → linked
+    (partial #27: criteria 1-4 linked in implementation-roadmap.md M7; 5 (3 green nights) open with 7.4.6, 6 with 7.9.2)
   - [ ] 7.9.2 Walk the v1.0 Definition of Done (roadmap §5), every box linked → all checked
-  - [ ] 7.9.3 Update CHANGELOG.md (`1.0.0` section) and memory.md (final state, lessons learned) → diff reviewed
+    (partial #27: walked in implementation-roadmap.md §5; open: 3 green nights (7.4.6), the clean-machine quick start
+    (7.6.3) and a live look at the observer on compose and kind)
+  - [x] 7.9.3 Update CHANGELOG.md (`1.0.0` section) and memory.md (final state, lessons learned) → diff reviewed (#27)
   - [ ] 7.9.4 Tag `v1.0.0` and write GitHub release notes from the CHANGELOG → release page live
 
 ---
@@ -335,5 +341,8 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
 
 Items moved here keep their original number and get a one-line reason.
 
-- (none yet) Out of scope by decision: joint consensus (D-06), sharding (D-07), `Watch` and transactions (D-10). Removed
-  with the learning-project re-scope: performance work, TLS/auth, release signing, rolling upgrades.
+- (no WBS leaf deferred.) Out of scope by decision: joint consensus (D-06), sharding (D-07), `Watch` and transactions
+  (D-10). Removed with the learning-project re-scope: performance work, TLS/auth, release signing, rolling upgrades.
+- v1 limitation, not a WBS leaf: membership changes on Kubernetes (scaling the StatefulSet, replacing a lost PVC). Pod
+  ordinals give fixed node IDs while `AddLearner` assigns random ones (D-38); it would need a per-pod ID source such as
+  an ID file on the PVC written by an init step (system-design.md 7.9).

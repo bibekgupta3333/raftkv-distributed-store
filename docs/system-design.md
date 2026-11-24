@@ -518,21 +518,21 @@ Legend: **SIM** = deterministic simulator. **E2E** = docker-compose 5-node with 
 
 | # | Scenario | Expected behaviour | Safety | Tested by |
 |---|----------|--------------------|--------|-----------|
-| F-01 | **Leader crashes before commit** | Entry survives (committed by the next leader) or is overwritten. Client retries with the same seq; dedup gives exactly-once | Safe: never acked | SIM crash at every step; E2E `kill -9` + LIN |
+| F-01 | **Leader crashes before commit** | Entry survives (committed by the next leader) or is overwritten. Client retries with the same seq; dedup gives exactly-once | Safe: never acked | SIM `crash`/`full` profiles; E2E `kill -9` of the leader + LIN; CHAOS leader pod kill + LIN |
 | F-02 | **Leader crashes after commit, before reply** | Entry is on ≥ 3 nodes, so every electable leader has it (T3). Retry returns the cached result | Safe (Leader Completeness) | SIM; LIN marks first attempt indeterminate |
 | F-03 | **Minority partition** (leader + 1 cut off) | Old leader fails CheckQuorum and steps down. Majority elects a new leader. Minority rejects writes and linearizable reads; PreVote stops term inflation | Safe: old leader cannot commit or confirm reads | SIM; E2E; CHAOS partition |
-| F-04 | **No majority anywhere** (2/2/1) | No leader. Writes and linearizable reads fail with `UNAVAILABLE` until healed | Safe | SIM; CHAOS; no acked write lost after heal |
-| F-05 | **One-way partition** | (a) Leader can send but not receive: CheckQuorum steps it down, new election. (b) One follower cut off from the leader only: its PreVotes are refused (T4/T5), leader undisturbed | Safe | SIM one-way drops; CHAOS; term unchanged in (b) |
-| F-06 | **Split vote** | No one gets 3. Random timeouts re-draw; someone usually wins next round | Safe: one persisted vote per term | SIM forced simultaneous timeouts |
-| F-07 | **Disk write or fsync error** (including disk full) | The node crashes at once (D-33). It never retries the fsync. Cluster runs on the rest | Safe: never acks unpersisted data | UNIT injected `EIO`/`ENOSPC`; E2E small volume |
+| F-04 | **No majority anywhere** (2/2/1) | No leader. Writes and linearizable reads fail with `UNAVAILABLE` until healed | Safe | SIM random partitions (3- and 5-node) |
+| F-05 | **One-way partition** | (a) Leader can send but not receive: CheckQuorum steps it down, new election. (b) One follower cut off from the leader only: its PreVotes are refused (T4/T5), leader undisturbed | Safe | SIM one-way blocks (E2E and CHAOS partitions are both-way) |
+| F-06 | **Split vote** | No one gets 3. Random timeouts re-draw; someone usually wins next round | Safe: one persisted vote per term | SIM (randomized timeouts, every seed) |
+| F-07 | **Disk write or fsync error** (including disk full) | The node crashes at once (D-33). It never retries the fsync. Cluster runs on the rest | Safe: never acks unpersisted data | UNIT: WAL file shim fails write, fsync and dir fsync (`TestFsyncErrorIsFatalAndNotRetried`, `TestWriteErrorIsFatal`); disk full not run |
 | F-08 | **Torn WAL tail** after power loss | Cut to the last valid record on restart, then catch up | Safe: lost record was never acked | UNIT tears at every byte offset; mid-log corruption → refuse to start |
-| F-09 | **Stale leader serving reads** (paused, wakes after a new election) | ReadIndex: its heartbeat round sees a higher term, it steps down. Lease: the lease expired during the pause; the post-read check catches mid-read pauses | Safe with ReadIndex. Lease relies on bounded drift | SIM; CHAOS pause + LIN, lease on and off |
-| F-10 | **Follower far behind** | `next < firstIndex` → snapshot, then log tail. Not ready for clients until caught up | Safe | E2E: stop a node, write > 100k entries, restart |
-| F-11 | **Snapshot transfer interrupted** | Transfer starts over (D-14). A crash mid-install leaves the old state (atomic swap) | Safe: partial snapshots never installed | UNIT kill at each install phase; E2E drop stream |
-| F-12 | **Node replaced with empty disk** | New ID, join mode, no campaigning. Operator removes old ID, adds and promotes new one | Safe if followed; old-ID reuse is blocked | E2E: delete PVC, recreate pod |
-| F-13 | **Two nodes down** | 3 remain = quorum. New election if the leader was one of them. A third failure stops availability | Safe | CHAOS kill 2 (incl. leader) + LIN, then a third |
-| F-14 | **Removed node comes back** | Its messages are ignored (D-31). It never gets heartbeats and shuts down its Raft loop | Safe | SIM; E2E restart old pod with old disk, term unchanged |
-| F-15 | **Crash during a membership change** | New leader may or may not have the entry. If not, nodes that appended it revert. Operator retries (idempotent) | Safe (one-server overlap) | SIM crash at every step; E2E |
+| F-09 | **Stale leader serving reads** (paused, wakes after a new election) | ReadIndex: its heartbeat round sees a higher term, it steps down. Lease: the lease expired during the pause; the post-read check catches mid-read pauses | Safe with ReadIndex. Lease relies on bounded drift | SIM READ-1/READ-2 (`TestSimReadPartitionedOldLeader`), `lease` profile; E2E `TestOldLeaderServesNoStaleRead` (partitioned and SIGSTOPped leader) + LIN |
+| F-10 | **Follower far behind** | `next < firstIndex` → snapshot, then log tail. Not ready for clients until caught up | Safe | SIM `snapshot` profile; in-process `TestClusterIsLinearizableWithFollowerWipes` (partition past compaction); E2E new learners catch up by snapshot |
+| F-11 | **Snapshot transfer interrupted** | Transfer starts over (D-14). A crash mid-install leaves the old state (atomic swap) | Safe: partial snapshots never installed | UNIT `TestInstallCrashAtEachStep`, `TestReceiveRejectsAndRestarts`; SIM lost transfers and crashes during install |
+| F-12 | **Node replaced with empty disk** | New ID, join mode, no campaigning. Operator removes old ID, adds and promotes new one | Safe if followed; old-ID reuse is blocked | E2E `TestWipedFollowerRejoinsAsNewLearner`, `TestReplaceNodeUnderLoad` (compose volumes). Not supported on Kubernetes in v1 (§7.9) |
+| F-13 | **Two nodes down** | 3 remain = quorum. New election if the leader was one of them. A third failure stops availability | Safe | CHAOS `pod-kill-two` + LIN |
+| F-14 | **Removed node comes back** | Its messages are ignored (D-31). It never gets heartbeats and shuts down its Raft loop | Safe | SIM `membership` (removed nodes left running); UNIT `TestServerRefusesRemovedSenderAndWrongCluster` |
+| F-15 | **Crash during a membership change** | New leader may or may not have the entry. If not, nodes that appended it revert. Operator retries (idempotent) | Safe (one-server overlap) | SIM `membership` profile (crashes, partitions) |
 
 ---
 
@@ -548,6 +548,6 @@ Checked after every simulator step, and as runtime assertions that **panic** rat
 | **Leader Completeness** | A committed entry is in every later leader's log | Up-to-date vote check (T3), current-term commit (§2.4), never truncate committed entries | SIM: check each new leader |
 | **State Machine Safety** | No two nodes apply different entries at the same index | Above, plus in-order apply, atomic `appliedIndex` (D-04), deterministic apply, atomic snapshot install | SIM: per-index hash; E2E state digest |
 | **Durability** | An acked write survives any 2 node failures, including disk loss with correct replacement | Ack only after commit on 3 fsynced logs; refuse to start on corruption; new ID on empty disk | E2E/CHAOS + LIN |
-| **Exactly-once** | Within a live session, a `(client_id, seq)` takes effect at most once | Session table checked at apply time | SIM/E2E duplicates; Porcupine with sessions |
+| **Exactly-once** | Within a live session, a `(client_id, seq)` takes effect at most once | Session table checked at apply time | `TestSessionDedupOnApply`, `TestExactlyOnceUnderRetries`; Porcupine with sessions |
 | **Linearizability** | Each operation appears to happen at one instant between call and reply | Writes: commit + apply before reply. Reads: ReadIndex or lease. `STALE` excluded | Porcupine: zero violations |
-| **Config safety** | At most one uncommitted conf change; none before a current-term commit | Leader preconditions (§7.1) | SIM; fuzz the admin API |
+| **Config safety** | At most one uncommitted conf change; none before a current-term commit | Leader preconditions (§7.1) | SIM CONF-1/CONF-2 with planted bugs; `TestSecondConfChangeRejectedWhilePending` |

@@ -1,7 +1,7 @@
 # RaftKV in 5 Minutes
 
 A learning project: a key-value database with Raft built from scratch. It runs on **5 nodes** (all on your laptop), keeps working when **any 2 fail**, and never loses an acknowledged write or returns a stale read.
-Status: **design phase, no code yet.** Speed is not a goal. Details live in the other files in [docs/](.).
+Status: **v1.0, built and tested** (milestones M0–M7). Speed is not a goal. Details live in the other files in [docs/](.).
 
 **Contents:** [Features](#1-features) · [Architecture](#2-architecture) · [System Design](#3-system-design) · [Database](#4-database-design) · [Sequences](#5-sequence-design) · [Observer UI](#6-observer-frontend) · [E2E Testing](#7-simple-e2e-testing) · [WBS](#8-wbs-checklist)
 
@@ -84,12 +84,12 @@ Pebble keys start with a one-byte prefix, so user keys can never clash with inte
 
 ```text
 data/
-├── META               # cluster_id, member_id
+├── IDENTITY           # node_id, cluster_id, incarnation
 ├── wal/
 │   └── wal-<seq>-<firstIndex>.seg
 ├── sm/
 │   ├── CURRENT        # points at the live Pebble dir
-│   └── db-<index>-<rand>/
+│   └── db-<index>/
 └── snap/              # last 2 snapshots (Pebble checkpoints)
 ```
 
@@ -146,18 +146,19 @@ sequenceDiagram
     O-->>F: Votes from majority
     F->>O: Heartbeats as new leader
     C->>OL: Put fails or times out
-    C->>O: Retry on any node
-    O-->>C: NOT_LEADER with leader hint
-    C->>F: Retry on new leader
+    C->>O: Retry on any node (same session sequence)
+    O->>F: Forward the write to the new leader
+    F-->>C: OK, applied once
 ```
-*PreVote stops a cut-off node from disrupting the cluster, and the client follows the leader hint.*
+*PreVote stops a cut-off node from disrupting the cluster. Followers forward writes to the leader, and the session
+sequence makes the retry apply only once.*
 
 
 ---
 
 ## 6. Observer Frontend
 
-A read-only live view of Raft state: who leads, terms, elections, per-node commit/applied, lagging followers, snapshots, and nodes going up or down. Built for watching e2e and chaos runs as faults land (proposed **D-48**).
+A read-only live view of Raft state: who leads, terms, elections, per-node commit/applied, lagging followers, snapshots, and nodes going up or down. Built for watching e2e and chaos runs as faults land (**D-48**).
 
 ```mermaid
 flowchart LR
@@ -199,13 +200,14 @@ Events
 
 - **Read-only, polling only.** The observer calls nothing except `Cluster.Status`, polling at a fixed 500 ms (flag-configurable), and needs no server changes. Events are inferred by diffing polls, so very short blips (< 500 ms) can be missed. Grafana keeps metrics history and alerting; the observer gives a live, per-node picture of Raft state that dashboards built on scraped metrics show poorly.
 - **One Go binary, no build step.** It embeds the page with `embed` and pushes snapshots over SSE. It runs as a 1-replica k8s Deployment and as a docker-compose service in the e2e stack.
-- **No auth in v1.** It binds to localhost; reach it in k8s with `kubectl port-forward`.
+- **No auth in v1.** It binds to localhost; reach it in k8s with
+  `kubectl -n raftkv port-forward deploy/raftkv-observer 18080:8080`.
 - **Running it.** `make cluster-up` starts it with the compose cluster at http://127.0.0.1:18080 (Grafana, with
   the provisioned "RaftKV overview" dashboard, at http://127.0.0.1:13000). Against any cluster:
   `raftkv-observer --endpoints=name=host:port,... --listen=127.0.0.1:18080 --interval=500ms`. `/api/state` returns
   the current view as JSON.
 - **Lag and writes/s.** A node's lag is the leader's last log index minus that node's `match_index`. Writes/s is the
-  leader's applied-index delta, so it also counts no-op entries and (until ReadIndex, M4) linearizable reads.
+  leader's applied-index delta, so it also counts no-op entries and session registrations.
 
 
 ---
@@ -226,7 +228,7 @@ It runs in GitHub Actions on every PR. The observer UI (section 6) runs in the s
 
 **Commands:**
 - `make e2e`: 5-node docker-compose e2e suite.
-- `make sim SEED=…`: replay one deterministic simulation.
+- `make sim SEEDS=1 SEED=… FAULTS=…`: replay one deterministic simulation.
 - `make chaos-up && make chaos`: Chaos Mesh fault campaign on kind.
 
 Nightly CI runs a longer kind + Chaos Mesh run. Pass = 0 linearizability violations; failing histories and seeds are saved for replay.
@@ -234,32 +236,32 @@ Nightly CI runs a longer kind + Chaos Mesh run. Pass = 0 linearizability violati
 ## 8. WBS (Checklist)
 
 - **M0 — Repo, tooling, proto skeleton (1 wk)**
-  - [ ] Repo, Makefile, lint, CI
-  - [ ] gRPC protos
+  - [x] Repo, Makefile, lint, CI
+  - [x] gRPC protos
 - **M1 — Raft core + simulator (5 wk)**
-  - [ ] Leader election and log replication
-  - [ ] Deterministic simulator with seed replay
+  - [x] Leader election and log replication
+  - [x] Deterministic simulator with seed replay
 - **M2 — WAL + gRPC transport + multi-process cluster (4 wk)**
-  - [ ] Durable WAL
-  - [ ] gRPC transport between nodes
-  - [ ] docker-compose cluster + e2e harness
+  - [x] Durable WAL
+  - [x] gRPC transport between nodes
+  - [x] docker-compose cluster + e2e harness
 - **M3 — Pebble state machine + basic KV (2.5 wk)**
-  - [ ] Apply committed entries to Pebble
-  - [ ] Put/Get/Delete end to end
+  - [x] Apply committed entries to Pebble
+  - [x] Put/Get/Delete end to end
 - **M4 — Linearizable reads, sessions, full KV API (3.5 wk)**
-  - [ ] ReadIndex / lease reads
-  - [ ] Client sessions (exactly-once)
-  - [ ] Full KV API (CAS, Range)
+  - [x] ReadIndex / lease reads
+  - [x] Client sessions (exactly-once)
+  - [x] Full KV API (CAS, Range)
 - **M5 — Snapshots + follower recovery (2.5 wk)**
-  - [ ] Snapshots + log compaction
-  - [ ] Catch up lagging followers
+  - [x] Snapshots + log compaction
+  - [x] Catch up lagging followers
 - **M6 — Membership changes + leadership transfer (3 wk)**
-  - [ ] Add/remove node
-  - [ ] Leadership transfer
+  - [x] Add/remove node
+  - [x] Leadership transfer
 - **M7 — Kubernetes, observer UI, chaos, v1.0 (3.5 wk)**
-  - [ ] Kubernetes on kind
-  - [ ] Observer UI (D-48) + one Grafana dashboard
-  - [ ] Chaos Mesh nightly run, v1.0
+  - [x] Kubernetes on kind
+  - [x] Observer UI (D-48) + one Grafana dashboard
+  - [x] Chaos Mesh nightly run (3 green nights in a row still to come)
 
-Full 201-task checklist (about 25 weeks): [WBS.md](../WBS.md)
+Full 201-task checklist: [WBS.md](../WBS.md)
 

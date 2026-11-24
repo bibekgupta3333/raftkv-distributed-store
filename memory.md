@@ -2,6 +2,45 @@
 
 Context and reasoning that isn't obvious from the docs or git history. Newest first.
 
+## 2026-11-24 — State of v1.0 and lessons learned (PRs #26, #27)
+
+**State.** Every milestone is built and M0–M6 are tagged (`v0.0.1` … `v0.5.0`). The v1.0 Definition of Done
+(implementation-roadmap.md §5) is met except: 3 green scheduled nightly runs in a row (the chaos job only joined the
+scheduled run after #23, and no scheduled night had run since), the README quick start on a clean machine, and a live
+look at the observer against compose and kind. Docker was unusable on the host that did the final pass, so none of
+these could be closed there.
+
+**Rolling restart (#26).**
+- Anything a node must still do *after* its stop signal must not hang off the signal context. The transport was
+  started with `ctx`, so SIGTERM stopped the peer senders before the handover's catch-up appends went out; the
+  `TimeoutNow` itself used `context.Background()` and still worked when the target was already caught up, which is
+  why every idle test passed. The transport now runs on `context.WithoutCancel(ctx)` and `tr.Close()` stops it.
+- "A new leader appeared soon after the old one exited" does not prove a handover: the handover cap (2.2 s) is longer
+  than an election timeout. Measure from the old leader's own log records (began → finished) and require less than
+  the minimum election timeout (800 ms vs 1 s). The compose check (`TestSIGTERMLeaderHandsOver`) times from after
+  `docker stop` returns and could not see the bug.
+- A StatefulSet rollout deletes pods, so `kubectl logs --previous` has nothing. Stream logs with `--follow` before the
+  restart.
+- Pod-ordinal node IDs and random `AddLearner` IDs (D-38) do not mix: no StatefulSet scaling or PVC replacement in v1.
+  Fixing it needs a per-pod ID source (an ID file on the PVC written by an init step, or a join controller).
+
+**Lessons learned (the non-obvious ones).**
+- **Most "bugs" the simulator reported were checker bugs** (seed 9940). The bugs that reached real clusters were in
+  the glue the simulator does not model: raw bytes in the log after M3 (#11), shutdown ordering (#26), gRPC reconnect
+  and DNS re-resolution delays. Plan real-process tests for the driver, transport and shutdown paths, not only for
+  the core.
+- **Every safety check needs a planted failure.** Planted-bug sim tests, `make mutation` and the throwaway drift PR
+  (#24) each caught a check that would otherwise have passed vacuously at least once during development.
+- **Sessions hide indeterminate writes from Porcupine.** Keep sessionless writers in every checked workload, or the
+  checker never sees an `info` op.
+- **Prove a fault happened before counting a pass**: wait for new pod UIDs, `AllInjected`, a handover log line.
+  "Cluster recovered" is indistinguishable from "fault never applied".
+- **Docs drift from the plan, not from the code.** Each exit review found design text describing what was planned
+  (separate listeners, async applier, `META`/`flock`, rapid, harness exit codes, a harness container). Re-read the docs
+  against the code at every milestone, not only at the end.
+- **Tags lag merges.** Parallel branches merge out of milestone order (#18 and #21–#23 landed in `v0.5.0`), so pick
+  each tag at the first green `main` that contains the milestone and say what else it includes.
+
 ## 2026-11-24 — Exit reviews M0–M6, membership, chaos, hardening (PRs #21–#24)
 
 - **Exit reviews found doc drift, not code bugs.** The design docs still described the plan: separate client/peer
@@ -15,7 +54,7 @@ Context and reasoning that isn't obvious from the docs or git history. Newest fi
   at `make proto && git diff --exit-code`. A dispatchable workflow would have been cheaper; `pr.yml` has no
   `workflow_dispatch`.
 - **Tags lag milestones on `main`.** M3 broke the compose e2e (#9), so `v0.2.0` goes on the #11 fix. M4's checker
-  coverage (#18) merged after M5 (#17), so `v0.3.0` is the last green commit before M5 and #18 ships in `v0.4.0`.
+  coverage (#18) merged after M5 (#17), so `v0.3.0` is the last green commit before M5; `v0.4.0` is the #17 merge, so #18 ships in `v0.5.0`.
 - **Tombstones use the committed config (D-31).** A leader removing itself still needs followers to accept the
   appends that commit the removal; filtering on the appended config broke exactly that. Its final `TimeoutNow` is
   exempt (#22).
