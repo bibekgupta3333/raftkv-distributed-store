@@ -5,6 +5,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Docs
+
+- README: a "Demo" section with real screenshots from a 5-pod kind cluster: start, replication, killing the leader,
+  killing a second node, restore and catch-up, plus the Grafana dashboard (`docs/images/demo/`).
+
 ## [1.0.0] - 2026-11-24
 
 The first complete release: Raft and a replicated key-value store written from scratch in Go, a 5-node cluster on
