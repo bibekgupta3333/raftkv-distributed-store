@@ -3,6 +3,7 @@
 // 	protoc-gen-go v1.36.12
 // 	protoc        (unknown)
 // source: raftkv/v1/kv.proto
+// STALE: hand edit to prove the CI proto drift check fails (M0 exit criterion 3). Do not merge.
 
 package raftkvv1
 
