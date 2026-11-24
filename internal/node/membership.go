@@ -408,7 +408,12 @@ func (n *Node) handleTransfer(req *transferReq) {
 		}
 	}
 	n.revokeLease()
-	req.resp <- n.rn.TransferLeadership(req.target)
+	err := n.rn.TransferLeadership(req.target)
+	// Publish the status now: the caller polls it for the outcome, and the
+	// Ready that would publish it is handled only after this returns.
+	st = n.rn.Status()
+	n.status.Store(&st)
+	req.resp <- err
 }
 
 // revokeLease drops the read lease (D-25): on a transfer and on any change of

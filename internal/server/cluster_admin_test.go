@@ -266,3 +266,23 @@ func TestGracefulShutdownHandsLeadershipOver(t *testing.T) {
 	}
 	c.Start(leader)
 }
+
+// WBS 6.2.1: repeated transfers between caught-up voters each succeed and
+// report the target as the new leader (regression: the caller once read the
+// status before the transfer was published and reported TRANSFER_TIMEOUT).
+func TestRepeatedTransfers(t *testing.T) {
+	c := kvtest.New(t, 3, kvtest.Options{})
+	c.Leader(15 * time.Second)
+	ctx := ctx5(t)
+	for i := range 10 {
+		leader := c.Leader(15 * time.Second)
+		target := followerOf(c, leader)
+		resp, err := clusterClient(t, c.Addr(leader)).TransferLeadership(ctx, &raftkvv1.TransferLeadershipRequest{TargetMemberId: target})
+		if err != nil {
+			t.Fatalf("transfer %d (%d -> %d): %v", i, leader, target, err)
+		}
+		if resp.GetNewLeaderId() != target {
+			t.Fatalf("transfer %d: new leader %d, want %d", i, resp.GetNewLeaderId(), target)
+		}
+	}
+}
