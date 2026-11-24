@@ -23,7 +23,7 @@ edges.
 | Job | What it does |
 |---|---|
 | `check` | `make fmt-check lint build test race` (golangci-lint includes the `forbidigo` ban on `time.Now` in `internal/raft`, D-24); `make mutation` (the checker must catch a deliberately broken read path, testing.md 3.4); proto drift check `make proto && git diff --exit-code` (D-43) |
-| `sim` | `make sim SEEDS=500 FAULTS=full` and `make sim SEEDS=500 FAULTS=snapshot`. Every run also replays `test/sim/regressions/seeds.txt`. Failing-seed traces (`out/sim/`) are uploaded |
+| `sim` | `make sim SEEDS=500` with the `full`, `snapshot` and `membership` profiles. Every run also replays `test/sim/regressions/seeds.txt`. Failing-seed traces (`out/sim/`) are uploaded |
 | `e2e-short` | `make e2e E2E_PROFILE=pr E2E_SEED=<PR number>` (30 min timeout): the 5-node compose cluster and the `test/e2e` suite at PR sizes (table 1.3). `out/e2e/` is always uploaded (30 days) |
 
 The proto drift check was proven once with a throwaway PR that hand-edited a generated file (M0 exit criterion 3;
@@ -37,7 +37,7 @@ see the M0 exit evidence in implementation-roadmap.md).
 
 | Job | What it does | Timeout |
 |---|---|---|
-| `sim-long` | Matrix over the `full`, `lossy`, `partition`, `crash` and `snapshot` profiles, 100,000 seeds each. First seed = `(run ID mod 10^6) × 10^6` (logged), so each night covers a new range | 120 min |
+| `sim-long` | Matrix over the `full`, `lossy`, `partition`, `crash`, `snapshot` and `membership` profiles, 100,000 seeds each. First seed = `(run ID mod 10^6) × 10^6` (logged), so each night covers a new range | 120 min |
 | `sim-race` | 10,000 seeds of the `full` profile with `-race` (`make sim SIMRACE=-race`), WBS 1.9.1 | 90 min |
 | `fuzz-long` | `make fuzz FUZZTIME=3m`: every native fuzz target for 3 min (WBS 7.5.1); crashers uploaded | 75 min |
 | `e2e-long` | `make mutation`, then `make e2e E2E_PROFILE=nightly E2E_SEED=<run ID>` at nightly sizes (table 1.3). `out/e2e/` always uploaded | 90 min |
@@ -53,14 +53,16 @@ to a registry.
 | `TestLeaderElectedOnStart`, `TestNewLeaderAfterLeaderKill`, `TestMinorityStopsCommittingAndLogsMatchAfterHeal` | once | once | — |
 | `TestKillRestartRoundsLoseNoCommittedEntry` (kill -9 a random node, often the leader; every acked entry in all 5 WALs) | 20 rounds | 200 rounds | `E2E_ROUNDS` |
 | `TestSeededFaultSchedule` (kill, SIGSTOP, partition, netem delay/loss; nightly adds follower wipe) | 6 steps | 40 steps | `E2E_STEPS` |
-| `TestWipedFollowerRejoinsViaSnapshot` (state hash of all 5 replicas) | 2 runs | 20 runs | `E2E_WIPE_RUNS` |
+| `TestWipedFollowerRejoinsAsNewLearner` (old ID refused, rejoin as a new learner via snapshot, state hashes equal) | 2 runs | 20 runs | `E2E_WIPE_RUNS` |
+| `TestSIGTERMLeaderHandsOver` | 2 rounds | 5 rounds | `E2E_SIGTERM_ROUNDS` |
+| `TestRaftkvctlMemberSmoke`, `TestReplaceNodeUnderLoad`, `TestScale3To5To3UnderLoad` | once | once | — |
 | `TestLinearizableKVUnderFaults` (Put/Get/Delete/CAS/Range, leader + follower reads, Porcupine) | 1 cycle | 6 cycles | `E2E_LIN_CYCLES` |
 | `TestOldLeaderServesNoStaleRead` (partitioned and SIGSTOPped old leader) | once | once | — |
 
 `E2E_SEED` fixes victim choice and the fault schedule; `E2E_OUT` sets the artifact directory; `E2E_KEEP` keeps the
 cluster running. Container names, ports and volumes are fixed, so only one compose e2e can run per Docker host.
 
-### 1.3 Membership in the compose e2e (M6)
+### 1.4 Membership in the compose e2e (M6)
 
 The compose file has five fixed container slots (`raftkv-nodek`, hostname `nodek`, ports `1700k`/`1900k`). Slot `k`
 runs member ID `RAFTKV_NODEk_ID` (default `k`) and passes `--join=RAFTKV_NODEk_JOIN` (default `false`). Member IDs are
@@ -90,12 +92,12 @@ time, so a majority always survives.
 flowchart LR
   subgraph PR["pr.yml (parallel)"]
     check["check: fmt, lint, build, test, race, mutation, proto drift"]
-    sim["sim: 500 seeds full + snapshot"]
+    sim["sim: 500 seeds full, snapshot, membership"]
     e2e["e2e-short (compose)"]
   end
 
   subgraph NIGHTLY["nightly.yml (parallel)"]
-    simlong["sim-long ×5 profiles, 100k seeds"]
+    simlong["sim-long ×6 profiles, 100k seeds"]
     simrace["sim-race: 10k seeds, -race"]
     fuzz[fuzz-long]
     e2elong["e2e-long: mutation + compose nightly"]

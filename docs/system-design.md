@@ -300,7 +300,7 @@ sequenceDiagram
 - The follower **never** installs a snapshot at or below its `commitIndex`. The old Pebble dir stays live until an atomic rename commits the swap, so a crash leaves either old or new state.
 - After install, `appliedIndex = commitIndex = snapshot.index` and membership comes from the snapshot.
 - The core carries only `{index, term}` in `MsgSnap`; the driver streams the files out of band and reports the outcome with `ReportSnapshot` (success or failure both return the follower to Probe; a failure starts over, D-14). The follower acknowledges with a `MsgAppResp` at the snapshot index.
-- **Wiped follower (same ID).** A follower whose disk was replaced comes back empty while the leader still holds its old `match`. The follower ignores a heartbeat commit index beyond its last index, and rejects the next append at the index it had acknowledged; the leader takes that (responses arrive in order) as lost state, resets `match` to 0 and probes from scratch, which leads to a snapshot. Lowering `match` never uncommits anything. Re-joining under the same ID is unsafe if the node had voted in the current term, so since M6 the peers refuse such a node before it gets this far (D-32, §7.5); it comes back as a learner with a new ID.
+- **Wiped follower (same ID).** A follower whose disk was replaced comes back empty while the leader still holds its old `match`. The follower ignores a heartbeat commit index beyond its last index, and rejects the next append at the index it had acknowledged; the leader takes that (responses arrive in order) as lost state, resets `match` to 0 and probes from scratch, which leads to a snapshot. Lowering `match` never uncommits anything. Since M6 such a follower is refused before it gets here (data-directory incarnation, §7.5); the core keeps this reset-and-probe as a harmless fallback.
 
 ### 5.3 Lagging followers
 
@@ -316,8 +316,9 @@ The **WAL is the source of truth** (D-03). Pebble can lose its unflushed memtabl
 
 ```
 startup(dataDir):   // server.OpenKVNode + node.New; storage-design §5 has every step
-  1. Read IDENTITY (node_id, cluster_id); a mismatch with the config refuses to start.
-     Missing -> write it (bootstrap). Pebble's LOCK is the only guard against two processes.
+  1. Read IDENTITY (node_id, cluster_id, incarnation); a mismatch with the config refuses to
+     start, and IDENTITY without a WAL is ErrStateLost (§7.5). Missing -> write it (bootstrap,
+     or --join). Pebble's LOCK is the only guard against two processes.
   2. Prepare sm/: follow sm/CURRENT, delete orphan sm/db-* and temp files; a pre-M5 flat
      sm/ is refused. Check on-disk format versions (WAL, Pebble schema, snapshot meta).
   3. Open Pebble at sm/CURRENT, read appliedIndex_p (= its durable applied index).

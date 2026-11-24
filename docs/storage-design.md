@@ -207,7 +207,7 @@ A one-byte prefix separates namespaces. Client keys can never collide with inter
 | `m/appliedTerm` | uint64 LE | Every apply batch |
 | `m/sessionClock` | uint64 LE | When a command's leader-stamped time (D-27) is above it. The session "now": the max stamped time applied, so it never goes backwards across leaders |
 | `m/membership` | `ClusterConfig` | In the batch of a conf-change entry |
-| `m/removedMembers` | list of IDs | In the batch of a `REMOVE_MEMBER` (D-31, D-38) |
+| `m/removedMembers` | list of IDs | Not a separate key as built: removed IDs are in `ClusterConfig.removed` inside `m/membership` (D-31, D-38) |
 | `m/clusterID` | uint64 LE | Not written as built: the cluster ID lives in `IDENTITY` and every WAL segment header |
 | `m/schemaVersion` | uint64 LE | Once, when the database is first opened; checked on every open (§10) |
 
@@ -288,7 +288,7 @@ After the `last=true` chunk with every file verified:
 
 ## 5. Crash recovery
 
-1. **Identity.** Read and check `IDENTITY` (JSON `{node_id, cluster_id}`, written once with a temp file, fsync and rename). A mismatch with the configuration refuses to start (WBS 2.3.4). There is no separate `flock`: Pebble's own `LOCK` file in the live `sm/db-*` directory is what stops two processes from sharing a data dir. If `IDENTITY` is missing: bootstrap or join as configured, but an empty data dir **never** reuses a member ID that may have voted (D-32). As of M5 this is not enforced yet: a wiped member restarts empty under its old ID (M6, WBS 6.4.2).
+1. **Identity.** Read and check `IDENTITY` (JSON `{node_id, cluster_id, incarnation}`, written once with a temp file, fsync and rename; `incarnation` is random per data dir, M6). A mismatch with the configuration refuses to start (WBS 2.3.4). There is no separate `flock`: Pebble's own `LOCK` file in the live `sm/db-*` directory is what stops two processes from sharing a data dir. If `IDENTITY` is missing: bootstrap or join as configured, but an empty data dir **never** reuses a member ID that may have voted (D-32). As built (M6): an `IDENTITY` whose WAL is gone refuses to start (`ErrStateLost`); a fully wiped dir gets a new incarnation, and peers refuse a member whose incarnation changed (in memory only, D-32). `--join` starts a new learner.
 2. **Clean up** temp files (§4.5, `sm/CURRENT.tmp`).
 3. **Open Pebble** at `sm/<CURRENT>`. Read `A = m/appliedIndex`, `At = m/appliedTerm`, `Cfg_sm = m/membership`. If Pebble cannot open, exit 78.
 4. **Scan the WAL** in `seq` order, checking headers and CRCs:
@@ -353,7 +353,7 @@ Summary:
 
 ```
 /var/lib/raftkv/                         # PVC mount (one per pod, D-16)
-├── IDENTITY                             # JSON {node_id, cluster_id}; written once, fsynced, then renamed into place
+├── IDENTITY                             # JSON {node_id, cluster_id, incarnation}; written once, fsynced, renamed into place
 ├── wal/
 │   ├── wal-0000000000000027-00000000004a1c21.seg   # sealed
 │   ├── wal-0000000000000028-00000000004b9e7f.seg   # sealed

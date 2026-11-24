@@ -162,9 +162,9 @@ core.Step(msg) error                // inbound peer message
 core.Propose(data) -> (index, term, err)   // err: *NotLeaderError (leader hint) | ErrProposalDropped
 core.ReportUnreachable(id)          // transport lost a peer: drop it to Probe
 core.ReportSnapshot(id, failed)     // outcome of a snapshot transfer
-core.ProposeConfChange(cc)
+core.ProposeConfChange(cc) -> (index, term, err)   // one pending change at a time (D-06, D-31)
 core.ReadIndex(ctx []byte) error    // request a linearizable read point
-core.TransferLeader(target)
+core.TransferLeadership(target) error              // pause proposals, catch up, TimeoutNow
 core.HasReady() bool
 core.Ready() Ready
 core.Advance(Ready)                 // the Ready was fully handled
@@ -192,6 +192,8 @@ The driver is a single goroutine that owns the core, so the core needs no locks.
 loop:   // internal/node/node.go, Node.loop
   select {
     case <-ticker.C:             core.Tick(); maybeRenewLease()
+    case req := <-confCh:        core.ProposeConfChange(req.cc)
+    case req := <-transferCh:    core.TransferLeadership(req.to)
     case m := <-inbox:           core.Step(m)
     case id := <-unreach:        core.ReportUnreachable(id)
     case p := <-propCh:          core.Propose(p.data); register a waiter by index (term checked on apply)
