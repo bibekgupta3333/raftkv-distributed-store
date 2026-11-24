@@ -9,7 +9,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	raftkvv1 "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
@@ -76,7 +79,8 @@ type Config struct {
 	// ID is this node's ID; ClusterID is stamped on every request and, when
 	// non-zero, checked on every inbound one.
 	ID, ClusterID uint64
-	// Peers is the static address book (WBS 2.2.6). It must contain ID.
+	// Peers is the address book (WBS 2.2.6): the bootstrap members, then
+	// whatever [Transport.AddPeer] adds (D-06).
 	Peers   *AddressBook
 	Handler Handler
 	Logger  *slog.Logger
@@ -100,6 +104,13 @@ type Config struct {
 	SnapshotTimeout time.Duration
 	BackoffMin      time.Duration
 	BackoffMax      time.Duration
+	// Incarnation is this node's data-directory incarnation, sent with
+	// every request and answer so peers can tell a wiped member (D-32). 0
+	// sends none.
+	Incarnation uint64
+	// OnPeerWiped is called (on its own goroutine) when a peer comes back
+	// with a different incarnation: its data directory was wiped (D-32).
+	OnPeerWiped func(peer uint64)
 	// DialOptions are extra grpc dial options (credentials, for example).
 	// Without any, the transport uses insecure credentials: mTLS is out of
 	// scope for this learning project (removed D-15).
@@ -110,8 +121,8 @@ func (c *Config) fill() error {
 	switch {
 	case c.ID == 0:
 		return errors.New("transport: config: ID must be non-zero")
-	case c.Peers == nil || !c.Peers.Has(c.ID):
-		return errors.New("transport: config: Peers must be set and contain ID")
+	case c.Peers == nil:
+		return errors.New("transport: config: Peers must be set")
 	case c.Handler == nil:
 		return errors.New("transport: config: Handler is required")
 	}
@@ -161,12 +172,17 @@ type Transport struct {
 	inbound map[uint64]*inboundStream
 	votes   map[voteKey]chan raft.Message
 	reads   map[readKey]chan raft.Message
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	started bool
-	closed  bool
-	baseCtx context.Context
-	closing chan struct{} // closed by Close; unblocks idle inbound streams
+	// D-31, D-32: data-directory incarnation seen per peer, peers refused
+	// (with the reason) and peers removed from the configuration.
+	incarnations map[uint64]uint64
+	refused      map[uint64]string
+	removed      map[uint64]bool
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	started      bool
+	closed       bool
+	baseCtx      context.Context
+	closing      chan struct{} // closed by Close; unblocks idle inbound streams
 }
 
 // New validates cfg and builds a Transport. Call [Transport.Start] to begin
@@ -182,6 +198,10 @@ func New(cfg Config) (*Transport, error) {
 		votes:   make(map[voteKey]chan raft.Message),
 		reads:   make(map[readKey]chan raft.Message),
 		closing: make(chan struct{}),
+
+		incarnations: make(map[uint64]uint64),
+		refused:      make(map[uint64]string),
+		removed:      make(map[uint64]bool),
 	}
 	for _, id := range cfg.Peers.IDs() {
 		if id != cfg.ID {
@@ -217,11 +237,7 @@ func (t *Transport) Start(ctx context.Context) {
 	ctx, t.cancel = context.WithCancel(ctx)
 	t.baseCtx = ctx
 	for _, p := range t.peers {
-		t.wg.Add(1)
-		go func() {
-			defer t.wg.Done()
-			p.run(ctx)
-		}()
+		t.startPeer(p)
 	}
 }
 
@@ -254,16 +270,19 @@ func (t *Transport) Close() {
 // queue drops the message and Raft retries.
 func (t *Transport) Send(msgs []raft.Message) {
 	for _, m := range msgs {
-		if m.To == t.cfg.ID {
-			continue
+		if m.To == t.cfg.ID || t.isRefused(m.To) {
+			continue // D-31, D-32: nothing goes to a removed or wiped member
 		}
+		t.mu.Lock()
+		p := t.peers[m.To]
+		t.mu.Unlock()
 		switch {
 		case IsAppendRequest(m.Type):
-			if p := t.peers[m.To]; p != nil {
+			if p != nil {
 				p.enqueue(m)
 			}
 		case IsVoteRequest(m.Type):
-			if p := t.peers[m.To]; p != nil {
+			if p != nil {
 				p.sendVote(m)
 			}
 		case IsAppendResponse(m.Type):
@@ -271,14 +290,18 @@ func (t *Transport) Send(msgs []raft.Message) {
 		case IsVoteResponse(m.Type):
 			t.completeVote(m)
 		case IsReadIndexRequest(m.Type):
-			if p := t.peers[m.To]; p != nil {
+			if p != nil {
 				p.sendReadIndex(m)
 			}
 		case IsReadIndexResponse(m.Type):
 			t.completeReadIndex(m)
 		case m.Type == raft.MsgSnap:
-			if p := t.peers[m.To]; p != nil {
+			if p != nil {
 				p.sendSnapshot(m)
+			}
+		case IsTimeoutNow(m.Type):
+			if p != nil {
+				p.sendTimeoutNow(m)
 			}
 		}
 	}
@@ -373,12 +396,24 @@ func (t *Transport) registerReadIndex(k readKey) (<-chan raft.Message, func()) {
 	}
 }
 
-func (t *Transport) checkSender(cluster, from uint64) error {
+// checkSender authenticates an inbound request: right cluster, not ourselves,
+// not a removed member (D-31), and the same data-directory incarnation as
+// before (D-32). Members this node has not heard of yet are accepted: a
+// learner learns its peers from the log, and the core decides what a message
+// from a stranger may do.
+func (t *Transport) checkSender(ctx context.Context, cluster, from uint64) error {
 	if t.cfg.ClusterID != 0 && cluster != t.cfg.ClusterID {
 		return fmt.Errorf("cluster id mismatch: got %d, want %d", cluster, t.cfg.ClusterID)
 	}
-	if from == t.cfg.ID || !t.cfg.Peers.Has(from) {
-		return fmt.Errorf("unknown sender %d", from)
+	if from == 0 || from == t.cfg.ID {
+		return fmt.Errorf("bad sender %d", from)
 	}
-	return nil
+	md, _ := metadata.FromIncomingContext(ctx)
+	return t.observeIncarnation(from, parseIncarnation(md))
 }
+
+// refusedStatus is the gRPC status for a request checkSender rejected.
+func refusedStatus(err error) error { return status.Error(codes.PermissionDenied, err.Error()) }
+
+// statusFromContext turns a context error into its gRPC status.
+func statusFromContext(err error) error { return status.FromContextError(err).Err() }

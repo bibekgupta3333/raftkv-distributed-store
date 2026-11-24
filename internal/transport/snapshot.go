@@ -73,7 +73,7 @@ func (p *peer) installSnapshot(ctx context.Context, m raft.Message) (bool, error
 	if err != nil {
 		return false, err
 	}
-	stream, err := raftkvv1.NewRaftClient(conn).InstallSnapshot(ctx)
+	stream, err := raftkvv1.NewRaftClient(conn).InstallSnapshot(p.t.withIncarnation(ctx))
 	if err != nil {
 		return false, err
 	}
@@ -113,7 +113,7 @@ func (s *raftServer) InstallSnapshot(stream raftkvv1.Raft_InstallSnapshotServer)
 	if meta == nil {
 		return status.Error(codes.InvalidArgument, "the first InstallSnapshot message must be the metadata")
 	}
-	if err := t.checkSender(meta.GetClusterId(), meta.GetLeaderId()); err != nil {
+	if err := t.checkSender(stream.Context(), meta.GetClusterId(), meta.GetLeaderId()); err != nil {
 		return status.Error(codes.PermissionDenied, err.Error())
 	}
 	resp, err := h.ReceiveSnapshot(stream.Context(), meta, stream.Recv)
