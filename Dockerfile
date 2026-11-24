@@ -4,6 +4,7 @@
 #        iptables + iproute2 so the e2e fault driver can partition and delay
 #        traffic (it runs those as root through `docker exec -u 0`; the node
 #        process itself is still non-root).
+#   chaos: the in-cluster workload of the kind + Chaos Mesh driver (test only).
 # Both images also carry raftkv-observer (D-48); compose and k8s run it from
 # the same image with the entrypoint overridden.
 FROM golang:1.27-alpine AS build
@@ -19,6 +20,17 @@ RUN go build -trimpath -tags "${GOFLAGS_TAGS}" \
       -ldflags "-s -w -X github.com/bibekgupta3333/raftkv-distributed-store/internal/version.Version=${VERSION} -X github.com/bibekgupta3333/raftkv-distributed-store/internal/version.GitSHA=${SHA}" \
       -o /out/ ./cmd/raftkvd ./cmd/raftkvctl ./cmd/raftkv-observer && \
     mkdir -p /rootfs/data && chown 65532:65532 /rootfs/data
+
+# chaos: the in-cluster workload of the kind + Chaos Mesh driver (WBS 7.4.4,
+# test/chaos/client). Test tooling only; `make chaos` builds it as
+# raftkv-chaos:kind and loads it into the kind cluster.
+FROM build AS chaos-build
+RUN go build -trimpath -ldflags "-s -w" -o /out/raftkv-chaos ./test/chaos/client
+
+FROM scratch AS chaos
+COPY --from=chaos-build /out/raftkv-chaos /usr/local/bin/
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/raftkv-chaos"]
 
 FROM scratch AS release
 COPY --from=build --chown=65532:65532 /rootfs/data /data
@@ -37,3 +49,4 @@ VOLUME /data
 EXPOSE 7000 9100
 ENTRYPOINT ["/usr/local/bin/raftkvd"]
 CMD ["--data-dir", "/data"]
+
