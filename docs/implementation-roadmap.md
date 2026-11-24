@@ -100,7 +100,7 @@ committed (D-43), `pr.yml`, `CHANGELOG.md`, `memory.md`, stub binaries.
 3. CI fails if the generated proto code is out of date (checked once with a throwaway change).
 4. `raftkvd --version` prints the version and git SHA.
 
-**Exit evidence** (tag `v0.0.1` proposed at `ba3564d`, the #3 merge)
+**Exit evidence** (tag `v0.0.1` at `ba3564d`, the #3 merge)
 
 | # | Evidence |
 |---|---|
@@ -133,7 +133,7 @@ Figure 8 tests. `nightly.yml` with a long sim run.
 5. PreVote test: a rejoining partitioned node does not raise the term. CheckQuorum test: an isolated leader steps down.
 6. `go test -race ./internal/raft/...` is clean.
 
-**Exit evidence** (tag `v0.1.0-alpha` proposed at `19e2169`, the #7 merge)
+**Exit evidence** (tag `v0.1.0-alpha` at `19e2169`, the #7 merge)
 
 | # | Evidence |
 |---|---|
@@ -168,7 +168,7 @@ Dockerfile and a 5-node docker-compose cluster. An e2e harness with kill, pause,
 5. `/metrics` shows term, leader, commit index, and fsync timing.
 6. The short e2e job with faults is green in `pr.yml`. Sim still passes 10,000 seeds.
 
-**Exit evidence** (tag `v0.1.0` proposed at `c1cd66d`, the #8 merge)
+**Exit evidence** (tag `v0.1.0` at `c1cd66d`, the #8 merge)
 
 | # | Evidence |
 |---|---|
@@ -202,7 +202,7 @@ wired into e2e.
 3. **e2e linearizability check passes** (Porcupine, 0 violations) under leader kill, follower kill, and partition.
 4. No acknowledged write is lost across 100 leader kills.
 
-**Exit evidence** (tag `v0.2.0` proposed at `78b7830`, the #11 merge: the first green `main` with M3, since `fbe79c0` (#9) broke the compose e2e)
+**Exit evidence** (tag `v0.2.0` at `78b7830`, the #11 merge: the first green `main` with M3, since `fbe79c0` (#9) broke the compose e2e)
 
 | # | Evidence |
 |---|---|
@@ -236,7 +236,7 @@ Porcupine models for CAS and Range.
 5. Session expiry is deterministic: all replicas have the same session table hash across 10,000 sim seeds.
 6. Every limit in D-11 has a boundary test (at the limit passes, one over fails).
 
-**Exit evidence** (tag `v0.3.0` proposed at `f65ae13`, the #19 merge: the first green `main` with all M4 features, before M5 landed; the M4 checker coverage of #18 merged after M5 and ships in `v0.4.0`)
+**Exit evidence** (tag `v0.3.0` at `f65ae13`, the #19 merge: the first green `main` with all M4 features, before M5 landed; the M4 checker coverage of #18 merged after the M5 merge and ships in `v0.5.0`)
 
 | # | Evidence |
 |---|---|
@@ -268,7 +268,7 @@ receiving snapshots, plus sim support.
 4. Under steady writes, the WAL stays bounded (old segments are deleted after snapshots).
 5. e2e linearizability still passes with follower-wipe faults. Exactly-once holds across a snapshot boundary.
 
-**Exit evidence** (tag `v0.4.0` proposed at `24ca8e7`, the #17 merge)
+**Exit evidence** (tag `v0.4.0` at `24ca8e7`, the #17 merge)
 
 | # | Evidence |
 |---|---|
@@ -301,7 +301,7 @@ ignored. Random never-reused member IDs (D-38). A node with an empty disk can't 
 4. Leadership transfer moves the leader to the target, and a failed transfer aborts cleanly.
 5. A second config change while one is pending is rejected with `FAILED_PRECONDITION`.
 
-**Exit evidence** (tag `v0.5.0` proposed at `958ae5b`, the #22 merge)
+**Exit evidence** (tag `v0.5.0` at `958ae5b`, the #22 merge)
 
 | # | Evidence |
 |---|---|
@@ -335,6 +335,17 @@ start.
 5. `nightly.yml` (long sim, long e2e, kind + chaos) is green 3 nights in a row.
 6. The v1.0 Definition of Done (§5) is met.
 
+**Exit evidence** (no tag yet: `v1.0.0` waits for the open items below)
+
+| # | Evidence |
+|---|---|
+| 1 | Every `chaos` job starts from a fresh runner: `make chaos-up` creates the kind cluster, applies `deploy/k8s/overlays/kind`, waits for the 5-pod rollout, then the in-cluster workload runs Put/Get/Delete/CAS/Range against all five members for 15 min: [run 45297525546](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45297525546/job/138121610273), [run 45299681977](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45299681977/job/138128791311), [run 45309611538](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45309611538/job/138161770788). First bring-up and the `raftkvctl put`/`get` smoke over the peer DNS names: #13 |
+| 2 | [Chaos run 45309611538](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45309611538/job/138161770788) (#26): 3 rolling restarts (`kubectl rollout restart statefulset/raftkv`) under the Porcupine-checked workload; every pod replaced, 4 leader handovers by `TimeoutNow` in 36-68 ms each (the step fails if a leader that got SIGTERM did not log the handover finishing in under 800 ms); 1,104,335 ops, verdict linearizable. Regression test for the bug this found: `internal/node` `TestShutdownHandoverUnderLoad` |
+| 3 | Seeded schedule of pod kill (one, two at once, the leader), partition (a random member, the leader), delay and loss, Porcupine over the whole history: [run 45297525546](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45297525546/job/138121610273) 975,805 ops, [run 45299681977](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45299681977/job/138128791311) 925,159 ops, [run 45309611538](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45309611538/job/138161770788) 1,104,335 ops; all linearizable (#23, #26) |
+| 4 | `cmd/raftkv-observer` `TestObserverAgainstCluster`: against an in-process cluster the leader is found, a killed leader shows in the timeline on the next poll (under 1 s) and a restarted node is reported back; `TestHTTPAndSSE` (#12). The observer is in the compose stack (`127.0.0.1:18080`) and is deployed by every kind run (`deployment.apps/raftkv-observer created` in the chaos logs). **Open:** nobody has yet looked at the page with 5 node cards against the compose or kind cluster; that check is manual |
+| 5 | **Open.** The nightly ran green on dispatch, job by job: every `sim-long` profile, `sim-race` and `e2e-long` in [run 45304037021](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45304037021), `chaos` in the three runs above; `fuzz-long` has not run in CI yet (13 targets × 60 s locally, no crashers, #21). The only scheduled run so far ([45105699174](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45105699174), 2026-11-23, before the chaos job existed and before the #11 fix) failed in `e2e-long`; the first scheduled night with every job, chaos included, is 2026-11-24 03:17 UTC. Three green scheduled nights in a row can only be shown after three nights (cron `17 3 * * *`) |
+| 6 | Walked in §5 below: met except for the open items there |
+
 ---
 
 ## 4. Risks
@@ -355,15 +366,38 @@ start.
 v1.0.0 is tagged when all of these hold, each with a link to a CI run or artifact:
 
 - [ ] M0–M7 exit criteria all met, and WBS.md fully ticked (or leftover items moved to `post-1.0` with a reason).
-- [ ] D-22 decided. No open decisions remain.
-- [ ] Sim: 10,000+ seeds on the release commit with 0 invariant violations, covering elections, replication, snapshots,
-      membership, and leadership transfer.
-- [ ] Linearizability: e2e and kind chaos runs with leader kill, pause, and partition show 0 violations.
-- [ ] Exactly-once writes verified under client retries.
-- [ ] WAL corruption, crash recovery, and snapshot-install crash tests green.
-- [ ] Runs on kind from scratch. Rolling restart, node replacement, and scale 3 ↔ 5 tried and written up.
-- [ ] Observer UI works against compose and kind.
-- [ ] `pr.yml` and `nightly.yml` green.
+      **OPEN:** M0–M6 met and tagged. M7 criteria 1-3 met; 4 (live look at the observer) and 5 (3 green nights)
+      open; WBS.md 196/201, the five open leaves are 7.4.6, 7.6.3, 7.9.1, 7.9.2 and 7.9.4 (the tag itself).
+- [x] D-22 decided. No open decisions remain. Every entry in design-decisions.md is `Decided` (D-22: Apache-2.0,
+      `LICENSE`, #2).
+- [x] Sim: 10,000+ seeds on the release commit with 0 invariant violations, covering elections, replication, snapshots,
+      membership, and leadership transfer. The `sim` job runs 500 seeds each of `full`, `snapshot` and `membership`
+      on every PR and push to `main`; the nightly runs 100,000 per profile ([run 45304037021](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45304037021):
+      `full`, `lossy`, `partition`, `crash`, `snapshot`, `membership`, plus 10,000 `full` seeds with `-race`). The
+      Raft core and the simulator have not changed since that run (#26 touched `internal/node` and `test/chaos`
+      only).
+- [x] Linearizability: e2e and kind chaos runs with leader kill, pause, and partition show 0 violations. Compose:
+      `TestLinearizableKVUnderFaults` (leader kill, SIGSTOP of leader and follower, partitions; 377,689 ops) in
+      [e2e-long](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45293603026/job/138108298752), and the membership scenarios in [run 45304037021](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45304037021).
+      kind: the three chaos runs in M7 #3 (pod kills incl. the leader, partitions incl. the leader, delay, loss, rolling
+      restarts). The checker itself is tested against a broken build (`make mutation`) in every `check` job.
+- [x] Exactly-once writes verified under client retries. `TestExactlyOnceUnderRetries`, `TestSessionDedupOnApply`,
+      `TestSessionRetryKeepsSequence` (#15), `TestExactlyOnceAcrossSnapshotBoundary` (#17), session-table determinism
+      over 10,000 seeds (M4 #5).
+- [x] WAL corruption, crash recovery, and snapshot-install crash tests green. `TestCrashMatrix`,
+      `TestMidLogCorruptionRefusesToStart` (#4), `TestKillMinus9DuringApply` (500 rounds), `TestTruncationSafety...`
+      (#9), `TestInstallCrashAtEachStep` (#17), 200 kill -9 rounds in e2e-long; all in every `check` run on `main`.
+- [x] Runs on kind from scratch. Rolling restart, node replacement, and scale 3 ↔ 5 tried and written up. kind from
+      scratch and rolling restarts: M7 #1-#2. Node replacement and scale 3 → 5 → 3 under load on compose (M6 #2-#3),
+      written up in system-design.md 7.6-7.8. On Kubernetes, scaling and disk replacement are not supported in v1
+      (system-design.md 7.9, a listed limitation).
+- [ ] Observer UI works against compose and kind. **OPEN:** tested in-process (M7 #4) and deployed in both; nobody has
+      looked at the live page against the compose or kind cluster yet.
+- [ ] `pr.yml` and `nightly.yml` green. `pr.yml` is green on `main` at the release code ([run 45313583354](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45313583354) at
+      `ae48dc0`, the #26 merge; #27 changes docs only). **OPEN:** `nightly.yml` is green job by job on dispatch (M7 #5) but not yet for three scheduled
+      nights in a row.
 - [ ] Docs match what was built. README quick start works on a clean machine. Known limitations listed (one Raft
-      group, no Watch or transactions, no TLS or auth).
-- [ ] `CHANGELOG.md` has a `1.0.0` section. `memory.md` has a lessons-learned section.
+      group, no Watch or transactions, no TLS or auth). Docs pass and README quick start and limitations: #27.
+      **OPEN:** the quick start has not been run on a clean machine (every command, target and port was checked
+      against the Makefile, the compose file and the manifests, but not executed).
+- [x] `CHANGELOG.md` has a `1.0.0` section. `memory.md` has a lessons-learned section (#27).
