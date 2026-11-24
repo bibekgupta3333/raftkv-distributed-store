@@ -107,9 +107,18 @@ func newForwarder() *forwarder { return &forwarder{conns: map[string]*grpc.Clien
 
 var errForwarderClosed = errors.New("server: shutting down")
 
-// client returns a KV client for addr once its connection is ready. A
-// connection that is not ready cannot have carried the request.
+// client returns a KV client for addr once its connection is ready.
 func (f *forwarder) client(ctx context.Context, addr string) (raftkvv1.KVClient, error) {
+	conn, err := f.conn(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	return raftkvv1.NewKVClient(conn), nil
+}
+
+// conn returns the connection to addr once it is ready. A connection that is
+// not ready cannot have carried the request.
+func (f *forwarder) conn(ctx context.Context, addr string) (*grpc.ClientConn, error) {
 	f.mu.Lock()
 	if f.closed {
 		f.mu.Unlock()
@@ -140,7 +149,7 @@ func (f *forwarder) client(ctx context.Context, addr string) (raftkvv1.KVClient,
 			return nil, errors.New("no connection to " + addr)
 		}
 	}
-	return raftkvv1.NewKVClient(conn), nil
+	return conn, nil
 }
 
 func (f *forwarder) close() {

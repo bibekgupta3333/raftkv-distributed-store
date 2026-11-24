@@ -160,7 +160,7 @@ func (r *raft) ackReadRound(from uint64, ctx []byte) {
 // starts the next one. It reports whether the round finished.
 func (r *raft) maybeFinishReadRound() bool {
 	rd := r.ro.round
-	if rd == nil || len(rd.acks) < quorumSize(len(r.peers)) {
+	if rd == nil || !r.voterQuorum(rd.acks) {
 		return false
 	}
 	r.ro.round = nil
@@ -173,6 +173,19 @@ func (r *raft) maybeFinishReadRound() bool {
 	}
 	r.maybeStartReadRound()
 	return true
+}
+
+// voterQuorum reports whether the voters in acks form a majority of the
+// voters. Learners never count (D-06), nor does a leader whose own removal is
+// pending.
+func (r *raft) voterQuorum(acks map[uint64]bool) bool {
+	n := 0
+	for _, id := range r.conf.Voters {
+		if acks[id] {
+			n++
+		}
+	}
+	return n >= quorumSize(len(r.conf.Voters))
 }
 
 // readRoundCtx is the context heartbeats carry: the in-flight round's.

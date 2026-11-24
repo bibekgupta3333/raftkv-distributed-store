@@ -749,6 +749,7 @@ type ClusterConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Members       []*Member              `protobuf:"bytes,1,rep,name=members,proto3" json:"members,omitempty"`
 	ConfigIndex   uint64                 `protobuf:"varint,2,opt,name=config_index,json=configIndex,proto3" json:"config_index,omitempty"`
+	Removed       []uint64               `protobuf:"varint,3,rep,packed,name=removed,proto3" json:"removed,omitempty"` // IDs removed so far: never reused (D-38), their messages ignored (D-31)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -795,6 +796,13 @@ func (x *ClusterConfig) GetConfigIndex() uint64 {
 		return x.ConfigIndex
 	}
 	return 0
+}
+
+func (x *ClusterConfig) GetRemoved() []uint64 {
+	if x != nil {
+		return x.Removed
+	}
+	return nil
 }
 
 type AppendEntriesRequest struct {
@@ -1837,10 +1845,11 @@ const file_raftkv_v1_raft_proto_rawDesc = "" +
 	"\n" +
 	"ConfChange\x12-\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x19.raftkv.v1.ConfChangeTypeR\x04type\x12)\n" +
-	"\x06member\x18\x02 \x01(\v2\x11.raftkv.v1.MemberR\x06member\"_\n" +
+	"\x06member\x18\x02 \x01(\v2\x11.raftkv.v1.MemberR\x06member\"y\n" +
 	"\rClusterConfig\x12+\n" +
 	"\amembers\x18\x01 \x03(\v2\x11.raftkv.v1.MemberR\amembers\x12!\n" +
-	"\fconfig_index\x18\x02 \x01(\x04R\vconfigIndex\"\xc2\x02\n" +
+	"\fconfig_index\x18\x02 \x01(\x04R\vconfigIndex\x12\x18\n" +
+	"\aremoved\x18\x03 \x03(\x04R\aremoved\"\xc2\x02\n" +
 	"\x14AppendEntriesRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x12\n" +

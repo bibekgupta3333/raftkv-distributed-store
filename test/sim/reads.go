@@ -235,14 +235,14 @@ func (c *Cluster) readLoop() {
 // linearizable read must complete on every node (followers via the leader).
 // It reports whether every node has served one.
 func (c *Cluster) readLiveness(now int64) bool {
-	if len(c.readChecked) == len(c.nodes) {
+	if c.allMembers(func(n *node) bool { return c.readChecked[n.id] }) {
 		return true
 	}
 	if c.readSent != 0 && now-c.readSent < 1000 {
 		return false
 	}
 	c.readSent = now
-	for _, n := range c.nodes {
+	for _, n := range c.members() {
 		if c.readChecked[n.id] || !n.up {
 			continue
 		}

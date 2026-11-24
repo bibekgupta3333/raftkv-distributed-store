@@ -7,6 +7,8 @@
 //	E2E_ROUNDS   override the kill/restart round count (pr 20, nightly 200)
 //	E2E_STEPS    override the schedule length (pr 6, nightly 40)
 //	E2E_LIN_CYCLES override the linearizability fault cycles (pr 1, nightly 6)
+//	E2E_WIPE_RUNS  override the wipe-and-rejoin rounds (pr 2, nightly 20)
+//	E2E_SIGTERM_ROUNDS override the SIGTERM handover rounds (pr 2, nightly 5)
 //	E2E_OUT      artifact directory (default out/e2e)
 //	E2E_KEEP     keep the cluster running after the test
 package e2e
@@ -274,13 +276,16 @@ func TestSeededFaultSchedule(t *testing.T) {
 	t.Logf("%d acknowledged entries survived %d faults", len(acked), n)
 }
 
-// WBS 5.5.1-5.5.2 (M5 exit criterion 2): with a low snapshot threshold, a
-// follower's data volume is deleted and it restarts empty under its ID. It
-// catches up through InstallSnapshot (the leader's log no longer reaches back
-// to its start) and, once the cluster is stopped, every replica's state hash
-// is identical. E2E_WIPE_RUNS rounds (pr 2, nightly 20), a different follower
-// each time.
-func TestWipedFollowerRejoinsViaSnapshot(t *testing.T) {
+// WBS 5.5.1-5.5.2 (M5 exit criterion 2) and 6.4.2 (D-32): with a low snapshot
+// threshold, a follower's data volume is deleted and it restarts empty under
+// its old member ID. Its peers saw its previous data-directory incarnation, so
+// they refuse it: it applies nothing and installs no snapshot. It is then
+// removed, and its slot rejoins as a new learner under a fresh random ID
+// (D-38); the learner catches up through InstallSnapshot (the leader's log no
+// longer reaches back to its start) and is promoted. Once the cluster is
+// stopped, every member's state hash is identical. E2E_WIPE_RUNS rounds
+// (pr 2, nightly 20), a different follower each time.
+func TestWipedFollowerRejoinsAsNewLearner(t *testing.T) {
 	runs := pick(2, 20, "E2E_WIPE_RUNS")
 	c := StartEnv(t, "wipe-follower", "RAFTKV_SNAPSHOT_ENTRIES=100", "RAFTKV_SNAPSHOT_RETAIN=10")
 	c.WaitLeader(30 * time.Second)
@@ -299,23 +304,32 @@ func TestWipedFollowerRejoinsViaSnapshot(t *testing.T) {
 		for victim == lead {
 			victim = 1 + r.IntN(NumNodes)
 		}
+		oldID := c.MemberID(victim)
 		c.Kill(victim)
 		write(150) // the leader snapshots and trims past the victim's log
 		c.Wipe(victim)
-		Eventually(t, 60*time.Second, fmt.Sprintf("node %d to install a snapshot", victim), func() bool {
+		c.RequireRefused(victim, 6*time.Second)
+		c.RemoveSlot(victim)
+		newID := c.AddLearnerSlot(victim)
+		Eventually(t, 90*time.Second, fmt.Sprintf("slot %d (learner %d) to install a snapshot", victim, newID), func() bool {
 			v, err := c.Metric(victim, "raftkv_snapshot_installs_total")
 			return err == nil && v >= 1
 		})
+		c.PromoteSlot(victim)
 		write(20)
-		c.WaitConverged(60 * time.Second)
-		t.Logf("run %d/%d: wiped node %d rejoined via snapshot", run+1, runs, victim)
+		c.WaitConverged(90 * time.Second)
+		t.Logf("run %d/%d: slot %d wiped; member %d refused, removed; rejoined as %d via snapshot", run+1, runs, victim, oldID, newID)
+	}
+	if n := len(c.Members()); n != NumNodes {
+		t.Fatalf("%d members at the end, want %d", n, NumNodes)
 	}
 	c.StopAll()
 	hashes := c.StateHashes()
+	ref := hashes[c.Live()[0]]
 	for id, h := range hashes {
-		if h != hashes[1] {
-			t.Fatalf("state hashes differ: node %d %q vs node 1 %q", id, h, hashes[1])
+		if h != ref {
+			t.Fatalf("state hashes differ: slot %d %q vs %q", id, h, ref)
 		}
 	}
-	t.Logf("all 5 replicas: %s", hashes[1])
+	t.Logf("all %d replicas: %s", len(hashes), ref)
 }

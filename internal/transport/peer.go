@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
 	raftkvv1 "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
@@ -27,6 +28,17 @@ type peer struct {
 
 	connMu sync.Mutex
 	conn   *grpc.ClientConn
+
+	// cancel stops run (set when the transport starts the peer).
+	cancel context.CancelFunc
+}
+
+// stop ends the peer's sender goroutine and closes its connection.
+func (p *peer) stop() {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	p.closeConn()
 }
 
 func newPeer(t *Transport, id uint64) *peer {
@@ -143,7 +155,7 @@ func (p *peer) session(ctx context.Context) (established bool, err error) {
 	}
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	stream, err := raftkvv1.NewRaftClient(conn).Replicate(sctx)
+	stream, err := raftkvv1.NewRaftClient(conn).Replicate(p.t.withIncarnation(sctx))
 	if err != nil {
 		return false, err
 	}
@@ -191,6 +203,13 @@ func (p *peer) write(stream raftkvv1.Raft_ReplicateClient, m raft.Message) error
 // ordered, that every earlier append was handled, so it resets the counter; an
 // append the follower ignored would otherwise leak a slot forever.
 func (p *peer) recvLoop(ctx context.Context, stream raftkvv1.Raft_ReplicateClient) error {
+	// The follower sends its data-directory incarnation in the stream
+	// header once it accepted the first request (D-32).
+	if md, err := stream.Header(); err == nil {
+		if err := p.t.observeIncarnation(p.id, parseIncarnation(md)); err != nil {
+			return err
+		}
+	}
 	for {
 		resp, err := stream.Recv()
 		if err != nil {
@@ -220,8 +239,17 @@ func (p *peer) sendVote(m raft.Message) {
 		defer cancel()
 		conn, err := p.getConn(ctx)
 		if err == nil {
-			var resp *raftkvv1.RequestVoteResponse
-			resp, err = raftkvv1.NewRaftClient(conn).RequestVote(ctx, VoteRequestToProto(cfg.ClusterID, m))
+			var (
+				resp *raftkvv1.RequestVoteResponse
+				hdr  metadata.MD
+			)
+			resp, err = raftkvv1.NewRaftClient(conn).RequestVote(p.t.withIncarnation(ctx),
+				VoteRequestToProto(cfg.ClusterID, m), grpc.Header(&hdr))
+			if err == nil {
+				// D-32: a vote from a member that lost its disk does not
+				// count; it may have voted already in this term.
+				err = p.t.observeIncarnation(p.id, parseIncarnation(hdr))
+			}
 			if err == nil {
 				cfg.Observer.MessageSent(p.id, m.Type)
 				if r := VoteResponseFromProto(resp, cfg.ID); r.From == p.id {
@@ -262,7 +290,7 @@ func (p *peer) readIndex(ctx context.Context, m raft.Message) (raft.Message, err
 	if err != nil {
 		return raft.Message{}, err
 	}
-	resp, err := raftkvv1.NewRaftClient(conn).ReadIndex(ctx, ReadIndexRequestToProto(cfg.ClusterID, m))
+	resp, err := raftkvv1.NewRaftClient(conn).ReadIndex(p.t.withIncarnation(ctx), ReadIndexRequestToProto(cfg.ClusterID, m))
 	if err != nil {
 		return raft.Message{}, err
 	}

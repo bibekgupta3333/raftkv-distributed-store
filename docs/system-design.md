@@ -300,7 +300,7 @@ sequenceDiagram
 - The follower **never** installs a snapshot at or below its `commitIndex`. The old Pebble dir stays live until an atomic rename commits the swap, so a crash leaves either old or new state.
 - After install, `appliedIndex = commitIndex = snapshot.index` and membership comes from the snapshot.
 - The core carries only `{index, term}` in `MsgSnap`; the driver streams the files out of band and reports the outcome with `ReportSnapshot` (success or failure both return the follower to Probe; a failure starts over, D-14). The follower acknowledges with a `MsgAppResp` at the snapshot index.
-- **Wiped follower (same ID).** A follower whose disk was replaced comes back empty while the leader still holds its old `match`. The follower ignores a heartbeat commit index beyond its last index, and rejects the next append at the index it had acknowledged; the leader takes that (responses arrive in order) as lost state, resets `match` to 0 and probes from scratch, which leads to a snapshot. Lowering `match` never uncommits anything. Re-joining under the same ID is still unsafe if the node had voted in the current term (D-32); M6 replaces it with a learner and a new ID.
+- **Wiped follower (same ID).** A follower whose disk was replaced comes back empty while the leader still holds its old `match`. The follower ignores a heartbeat commit index beyond its last index, and rejects the next append at the index it had acknowledged; the leader takes that (responses arrive in order) as lost state, resets `match` to 0 and probes from scratch, which leads to a snapshot. Lowering `match` never uncommits anything. Re-joining under the same ID is unsafe if the node had voted in the current term, so since M6 the peers refuse such a node before it gets this far (D-32, §7.5); it comes back as a learner with a new ID.
 
 ### 5.3 Lagging followers
 
@@ -387,6 +387,13 @@ Promoting a learner that cannot ack yet would make quorum harder to reach (6 vot
 
 ### 7.4 Removing a member, including the leader
 
+The leader may remove itself (WBS 6.1.5). From the moment it appends the entry it manages the cluster without being
+part of it: its own log no longer counts toward the quorum, and it keeps replicating until the removal commits. Then it
+sends `TimeoutNow` to the most up-to-date voter (if that voter has the whole log) and steps down, so the cluster does
+not wait an election timeout. Messages from a removed ID are ignored once its removal is **committed** on the receiver,
+not merely appended: otherwise followers would ignore the very appends that commit the removal (D-31). The one
+exception is the removed leader's final `TimeoutNow`.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -396,25 +403,80 @@ sequenceDiagram
     participant V as n3, n4, n5
 
     Op->>L: RemoveMember(n1)  (the leader itself)
-    L->>T: transfer leadership first (replicate, TimeoutNow)
+    L->>L: append ConfChange{remove n1}: voters = n2..n5 at once (D-31)
+    L->>T: append (n1's own log no longer counts)
+    L->>V: append
+    T-->>L: ack
+    V-->>L: acks -> committed by a majority of n2..n5
+    L-->>Op: OK
+    L->>T: TimeoutNow (T has the whole log)
+    L->>L: step down; on applying its removal: stop
     T->>V: RequestVote(term+1, transfer)
-    V-->>T: votes -> n2 is leader, commits no-op
-    L-->>Op: not leader: retry on n2
-    Op->>T: RemoveMember(n1)
-    T->>V: append ConfChange{remove n1} (effective on append)
-    V-->>T: acks -> committed
-    T-->>Op: OK
-    T->>T: remember n1 as removed, close its stream
-    L->>L: on applying its removal: stop Raft, refuse traffic
+    V-->>T: votes -> n2 is leader
 ```
+
+A removed node that applies its own removal stops (`raftkvd` exits 0) and refuses to start again under that ID. A
+removed node that never learns of its removal (it was cut off) keeps campaigning, and everyone ignores it.
 
 ### 7.5 Node with an empty disk (D-32)
 
-A node that lost its disk **must not rejoin under its old ID**: it forgot its vote and its acked entries.
+A node that lost its disk **must not rejoin under its old ID**: it forgot its vote and its acked entries. Three guards:
 
-1. With an empty data dir and no identity file, the node gets a **new random ID** and starts in join mode. It does not campaign.
-2. The operator runs `RemoveMember(old_id)`, then `AddLearner` → `PromoteLearner` for the new ID.
-3. Messages from the old ID are ignored from then on (D-31).
+1. **Identity without state.** The data directory's `IDENTITY` file (node ID, cluster ID) is written after the WAL
+   directory is created. A directory that still has its identity file but no WAL lost its state; the node refuses to
+   start (`ErrStateLost`, exit 78).
+2. **Data-directory incarnation.** `IDENTITY` also holds a random 64-bit incarnation, drawn when the directory is
+   created. Every node sends its incarnation on every peer request, stream and answer. A peer that sees a member come
+   back with a different incarnation knows its disk was wiped and **refuses it in both directions**, including its
+   votes: a candidate does not count a vote from a wiped member (internal/transport). Incarnations are remembered in
+   memory, so the guard holds while at least one peer that knew the old incarnation is running.
+3. **Join mode.** A replacement machine starts with `--join --node-id ID`, where `ID` is what `AddLearner` assigned
+   (D-38). The identity file records that it joined: it has no bootstrap voters, never campaigns as a learner, and
+   learns the configuration from the leader's log or snapshot.
+
+The operator removes the old ID (`raftkvctl member remove OLD`) and adds the machine back as a new learner (§7.6).
+Messages from the old ID are ignored from then on (D-31).
+
+### 7.6 How-to: replace a node
+
+With the cluster healthy (every voter up), add first so the voter count never drops:
+
+```
+raftkvctl member add-learner --peer-url node6:7000 node6     # prints: added learner id=<NEW>
+raftkvd --join --node-id <NEW> --listen :7000 --data-dir /data --peers <existing members' id=host:port>
+raftkvctl member promote --wait <NEW>                         # within 1,000 entries of the leader
+raftkvctl member remove <OLD>                                 # may be the leader: it hands over
+raftkvctl member list
+```
+
+If the old node is already dead, remove it first (so the dead node is not counted in the larger quorum), then add and
+promote. If the old node is alive and should keep its data, there is nothing to replace: restart it in place.
+
+### 7.7 How-to: scale 3 → 5 (and back)
+
+One server at a time, waiting for each command to return before the next (a second change while one is pending gets
+`FAILED_PRECONDITION / CONF_CHANGE_IN_PROGRESS`):
+
+```
+raftkvctl member add-learner --peer-url node4:7000 node4  # start node4 with --join --node-id <ID4>
+raftkvctl member promote --wait <ID4>                     # 4 voters, Q = 3
+raftkvctl member add-learner --peer-url node5:7000 node5  # start node5 with --join --node-id <ID5>
+raftkvctl member promote --wait <ID5>                     # 5 voters, Q = 3
+```
+
+Scaling down is `raftkvctl member remove <ID>` twice. `remove` refuses (`WOULD_LOSE_QUORUM`) when the remaining voters
+the leader has heard from in the last election timeout could not form a quorum; `--force` overrides that.
+
+### 7.8 How-to: transfer leadership
+
+```
+raftkvctl member transfer <ID>    # or with no ID: the most up-to-date voter
+```
+
+It prints the new leader and term. The old leader stops taking proposals and lease reads, catches the target up, sends
+`TimeoutNow`, and gives up after one election timeout (`TRANSFER_TIMEOUT`), resuming service. A leader stopped with
+SIGTERM does the same on its own before it exits (WBS 6.2.3), so planned restarts (`kubectl rollout restart`, `docker
+stop`) cost one round trip of unavailability instead of an election timeout.
 
 ---
 

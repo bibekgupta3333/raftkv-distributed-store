@@ -56,7 +56,9 @@ func TestClusterIsLinearizableWithFollowerWipes(t *testing.T) {
 	}
 }
 
-// wipeNemesis wipes a follower twice and partitions one past compaction.
+// wipeNemesis wipes a follower twice, replacing it each time by a new learner
+// (D-32: a wiped node may not come back under its old ID), and partitions one
+// past compaction.
 func wipeNemesis(t *testing.T, ctx context.Context, c *kvtest.Cluster) {
 	t.Helper()
 	step := func(d time.Duration) bool { return sleepCtx(ctx, d) }
@@ -75,14 +77,16 @@ func wipeNemesis(t *testing.T, ctx context.Context, c *kvtest.Cluster) {
 			return
 		}
 		v := follower(k)
-		t.Logf("nemesis: wipe follower %d", v)
+		t.Logf("nemesis: wipe follower %d and replace it by a new learner", v)
 		c.Stop(v)
 		c.Wipe(v)
-		if !step(1000 * time.Millisecond) {
-			c.Start(v)
+		c.RemoveMember(v, 15*time.Second)
+		if !step(500 * time.Millisecond) {
 			return
 		}
-		c.Start(v)
+		id := c.AddLearner(15 * time.Second)
+		c.Promote(id, 15*time.Second)
+		t.Logf("nemesis: %d joined as %d", v, id)
 	}
 	if !step(600 * time.Millisecond) {
 		return

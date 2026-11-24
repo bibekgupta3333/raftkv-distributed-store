@@ -106,7 +106,9 @@ func (m *MemoryStorage) ApplySnapshot(s Snapshot) error {
 // i (the applied index; D-14) and returns the snapshot's metadata. It does not
 // compact the log; call [MemoryStorage.Compact] separately (D-30). i must be in
 // the stored log and newer than the current snapshot.
-func (m *MemoryStorage) CreateSnapshot(i uint64) (Snapshot, error) {
+//
+// cs is the configuration in effect at i (WBS 6.1.6); nil records none.
+func (m *MemoryStorage) CreateSnapshot(i uint64, cs *ConfState) (Snapshot, error) {
 	if i <= m.snapshot.Index {
 		return Snapshot{}, ErrSnapOutOfDate
 	}
@@ -118,6 +120,10 @@ func (m *MemoryStorage) CreateSnapshot(i uint64) (Snapshot, error) {
 		return Snapshot{}, fmt.Errorf("raft: snapshot %d is beyond last index %d", i, m.lastIndex())
 	}
 	m.snapshot = Snapshot{Index: i, Term: m.ents[i-offset].Term}
+	if cs != nil {
+		c := cs.Clone()
+		m.snapshot.ConfState = &c
+	}
 	return m.snapshot, nil
 }
 

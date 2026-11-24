@@ -130,6 +130,12 @@ type Checker struct {
 	canon      []canonEntry // committed prefix, observed from persisted logs
 	model      []uint64     // entry hash per applied index (reference model)
 	applied    map[applyKey]uint64
+
+	// Membership (confcheck.go): the bootstrap voters, the highest commit
+	// index any node has shown, and per-node conf-change caches.
+	bootstrap  []uint64
+	maxCommit  uint64
+	confCaches map[uint64]*confCache
 }
 
 // NewChecker returns a checker for the given node IDs.
@@ -140,8 +146,14 @@ func NewChecker(ids []uint64) *Checker {
 		leaders:    map[uint64]uint64{},
 		lastLeader: map[uint64]leaderMark{},
 		applied:    map[applyKey]uint64{},
+		bootstrap:  append([]uint64(nil), ids...),
+		confCaches: map[uint64]*confCache{},
 	}
 }
+
+// AddNode makes the checker compare node id (a learner added by a membership
+// change) with the others.
+func (c *Checker) AddNode(id uint64) { c.ids = append(c.ids, id) }
 
 // CommittedLen is the length of the canonical committed sequence seen so far.
 func (c *Checker) CommittedLen() int { return len(c.canon) }
@@ -219,6 +231,10 @@ func (c *Checker) Observe(at int64, v NodeView) *Violation {
 		return vi
 	}
 	if vi := c.checkCommitted(at, v); vi != nil {
+		return vi
+	}
+	c.maxCommit = max(c.maxCommit, v.Commit)
+	if vi := c.checkConfig(at, v, c.maxCommit); vi != nil {
 		return vi
 	}
 	return c.checkLeaderCompleteness(at, v)

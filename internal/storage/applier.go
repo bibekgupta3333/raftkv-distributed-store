@@ -6,6 +6,7 @@ import (
 
 	raftkvv1 "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/command"
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/membership"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
 )
 
@@ -48,7 +49,17 @@ type ResultSink interface {
 type Applier struct {
 	store *Store
 	sink  ResultSink
+	// bootstrap is the member table written with the first batch of a
+	// state machine that has none yet, so every snapshot carries its
+	// configuration (WBS 6.1.6). nil on a node that joined (D-32): it
+	// learns the table from the log or a snapshot.
+	bootstrap  *raftkvv1.ClusterConfig
+	hasMembers bool
 }
+
+// SetBootstrap sets the member table of a cluster created from static peers
+// (see [Applier]). Call it before the first Apply.
+func (a *Applier) SetBootstrap(cfg *raftkvv1.ClusterConfig) { a.bootstrap = cfg }
 
 // NewApplier returns an Applier over store. sink may be nil.
 func NewApplier(store *Store, sink ResultSink) *Applier {
@@ -64,6 +75,9 @@ func (a *Applier) Applied() uint64 { return a.store.Applied() }
 // AppliedTerm is the term of the entry at Applied (node.AppliedTermer).
 func (a *Applier) AppliedTerm() uint64 { return a.store.AppliedTerm() }
 
+// Membership is the applied member table (node.MembershipReader, WBS 6.1.6).
+func (a *Applier) Membership() (*raftkvv1.ClusterConfig, error) { return a.store.Membership() }
+
 // Close closes the store (flushing first).
 func (a *Applier) Close() error { return a.store.Close() }
 
@@ -73,9 +87,9 @@ type pendingResult struct {
 }
 
 // Apply applies entries (a contiguous range directly after Applied) in one
-// batch: data changes and appliedIndex commit together (D-04). Entries that
-// carry no command (the leader's no-op, config changes before M6) only advance
-// appliedIndex. Apply is deterministic: no clock, no randomness, no map
+// batch: data changes and appliedIndex commit together (D-04). The leader's
+// no-op only advances appliedIndex; a conf-change entry stores the new member
+// table. Apply is deterministic: no clock, no randomness, no map
 // iteration. Any error is fatal to the node (D-33).
 func (a *Applier) Apply(entries []raft.Entry) error {
 	if len(entries) == 0 {
@@ -85,11 +99,32 @@ func (a *Applier) Apply(entries []raft.Entry) error {
 	if err != nil {
 		return err
 	}
+	if !a.hasMembers && a.bootstrap != nil {
+		cur, err := b.Membership()
+		if err != nil {
+			b.Abort()
+			return err
+		}
+		if cur == nil {
+			if err := b.SetMembership(a.bootstrap); err != nil {
+				b.Abort()
+				return err
+			}
+		}
+		a.hasMembers = true
+	}
 	var results []pendingResult
 	for _, e := range entries {
 		if err := b.Next(e.Index, e.Term); err != nil {
 			b.Abort()
 			return err
+		}
+		if e.Type == raft.EntryConfChange {
+			if err := applyConfChange(b, e); err != nil {
+				b.Abort()
+				return err
+			}
+			continue
 		}
 		if e.Type != raft.EntryNormal || len(e.Data) == 0 {
 			continue
@@ -112,6 +147,20 @@ func (a *Applier) Apply(entries []raft.Entry) error {
 		}
 	}
 	return nil
+}
+
+// applyConfChange records the member table a committed conf-change entry
+// establishes (WBS 6.1.6), in the same batch as appliedIndex (D-04).
+func applyConfChange(b *ApplyBatch, e raft.Entry) error {
+	cur, err := b.Membership()
+	if err != nil {
+		return err
+	}
+	next, _, err := membership.FromEntry(e, cur)
+	if err != nil {
+		return fmt.Errorf("storage: apply entry %d: %w", e.Index, err)
+	}
+	return b.SetMembership(next)
 }
 
 // CheckProposal reports whether data is a command Apply accepts, so a raw

@@ -10,12 +10,12 @@ import (
 
 func TestMemoryStorageCreateSnapshot(t *testing.T) {
 	st := storageWith(2, 1, 1, 2, 2, 2)
-	snap, err := st.CreateSnapshot(4)
+	snap, err := st.CreateSnapshot(4, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if snap != (Snapshot{Index: 4, Term: 2}) {
-		t.Fatalf("CreateSnapshot(4) = %+v", snap)
+		t.Fatalf("CreateSnapshot(4, nil) = %+v", snap)
 	}
 	if got, _ := st.Snapshot(); got != snap {
 		t.Fatalf("Snapshot() = %+v, want %+v", got, snap)
@@ -24,10 +24,10 @@ func TestMemoryStorageCreateSnapshot(t *testing.T) {
 	if first, _ := st.FirstIndex(); first != 1 {
 		t.Fatalf("FirstIndex = %d after CreateSnapshot, want 1", first)
 	}
-	if _, err := st.CreateSnapshot(3); !errors.Is(err, ErrSnapOutOfDate) {
+	if _, err := st.CreateSnapshot(3, nil); !errors.Is(err, ErrSnapOutOfDate) {
 		t.Fatalf("older snapshot: err = %v, want ErrSnapOutOfDate", err)
 	}
-	if _, err := st.CreateSnapshot(9); err == nil {
+	if _, err := st.CreateSnapshot(9, nil); err == nil {
 		t.Fatal("snapshot beyond the last index must fail")
 	}
 	if err := st.Compact(4); err != nil {
@@ -56,7 +56,11 @@ func TestMemoryStorageSetCompacted(t *testing.T) {
 // index, as the driver does once a snapshot exists (D-30).
 func compactLeader(t *testing.T, n *testNode, upTo uint64) Snapshot {
 	t.Helper()
-	snap, err := n.st.CreateSnapshot(upTo)
+	cs, ok := n.rn.ConfStateAt(upTo)
+	if !ok {
+		t.Fatalf("no configuration known at %d", upTo)
+	}
+	snap, err := n.st.CreateSnapshot(upTo, &cs)
 	if err != nil {
 		t.Fatal(err)
 	}

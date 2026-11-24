@@ -61,6 +61,7 @@ message ConfChange {
 message ClusterConfig {
   repeated Member members = 1;
   uint64 config_index = 2;
+  repeated uint64 removed = 3;        // IDs removed so far: never reused (D-38), their messages ignored (D-31)
 }
 
 // ---------- AppendEntries (on the Replicate stream) ----------

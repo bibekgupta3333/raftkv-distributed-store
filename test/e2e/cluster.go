@@ -57,6 +57,13 @@ type Cluster struct {
 	conns   map[int]*grpc.ClientConn
 	http    *http.Client
 	env     []string // extra compose environment (StartEnv)
+
+	// Membership (membership.go, M6). Container slot k runs member ids[k]
+	// (k until a slot is rejoined under a new ID, D-38); removed slots are
+	// not members right now and are left out of every "all nodes" helper.
+	ids     map[int]uint64
+	removed map[int]bool
+	slotEnv map[int][]string // RAFTKV_NODEk_ID / _JOIN of rejoined slots
 }
 
 // repoRoot finds the directory holding go.mod.
@@ -118,6 +125,12 @@ func StartEnv(t testing.TB, name string, env ...string) *Cluster {
 		conns:   map[int]*grpc.ClientConn{},
 		http:    &http.Client{Timeout: 2 * time.Second},
 		env:     env,
+		ids:     map[int]uint64{},
+		removed: map[int]bool{},
+		slotEnv: map[int][]string{},
+	}
+	for k := 1; k <= NumNodes; k++ {
+		c.ids[k] = uint64(k)
 	}
 	if err := os.MkdirAll(c.OutDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -136,6 +149,9 @@ func StartEnv(t testing.TB, name string, env ...string) *Cluster {
 func (c *Cluster) composeCmd(args ...string) (string, error) {
 	cmd := exec.Command("docker", append([]string{"compose", "-f", c.compose}, args...)...)
 	cmd.Env = append(append(os.Environ(), "IMAGE="+c.image), c.env...)
+	for k := 1; k <= NumNodes; k++ {
+		cmd.Env = append(cmd.Env, c.slotEnv[k]...)
+	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -164,9 +180,23 @@ func (c *Cluster) StopAll() {
 		_ = conn.Close()
 	}
 	c.conns = map[int]*grpc.ClientConn{}
-	if out, err := c.composeCmd("stop", "-t", "10",
-		"node1", "node2", "node3", "node4", "node5"); err != nil {
+	// Followers first, the leader last. A leader stopped while voters are up
+	// hands leadership over (WBS 6.2.3), and the new leader's no-op would
+	// make the logs of the stopped nodes differ.
+	lead, _ := c.Leader()
+	var first []string
+	for id := 1; id <= NumNodes; id++ {
+		if id != lead {
+			first = append(first, fmt.Sprintf("node%d", id))
+		}
+	}
+	if out, err := c.composeCmd(append([]string{"stop", "-t", "10"}, first...)...); err != nil {
 		c.t.Fatalf("compose stop: %v\n%s", err, out)
+	}
+	if lead != 0 {
+		if out, err := c.composeCmd("stop", "-t", "10", fmt.Sprintf("node%d", lead)); err != nil {
+			c.t.Fatalf("compose stop: %v\n%s", err, out)
+		}
 	}
 }
 
@@ -217,10 +247,11 @@ func parseState(id int, r io.Reader) (NodeState, error) {
 	return s, sc.Err()
 }
 
-// States scrapes every node in ids; unreachable nodes are left out.
+// States scrapes every node in ids (default: the live member slots);
+// unreachable nodes are left out.
 func (c *Cluster) States(ids ...int) map[int]NodeState {
 	if len(ids) == 0 {
-		ids = []int{1, 2, 3, 4, 5}
+		ids = c.Live()
 	}
 	out := map[int]NodeState{}
 	for _, id := range ids {
@@ -288,12 +319,13 @@ func (c *Cluster) WaitNewLeader(timeout time.Duration, old int, ids ...int) int 
 	return lead
 }
 
-// WaitConverged waits until every node in ids (all if none) reports the same
-// applied index, equal to its last and commit index, then returns that index.
+// WaitConverged waits until every node in ids (the live member slots if none)
+// reports the same applied index, equal to its last and commit index, then
+// returns that index.
 func (c *Cluster) WaitConverged(timeout time.Duration, ids ...int) uint64 {
 	c.t.Helper()
 	if len(ids) == 0 {
-		ids = []int{1, 2, 3, 4, 5}
+		ids = c.Live()
 	}
 	var idx uint64
 	Eventually(c.t, timeout, fmt.Sprintf("nodes %v to converge", ids), func() bool {
@@ -427,11 +459,11 @@ func (c *Cluster) Metric(id int, name string) (float64, error) {
 
 // StateHashes runs `raftkvctl debug state-hash` against each node's volume
 // (WBS 3.1.8) and returns its output line ("applied_index=N state_hash=H").
-// The cluster must be stopped (StopAll).
+// The cluster must be stopped (StopAll). Only live member slots are hashed.
 func (c *Cluster) StateHashes() map[int]string {
 	c.t.Helper()
 	out := map[int]string{}
-	for id := 1; id <= NumNodes; id++ {
+	for _, id := range c.Live() {
 		b, err := exec.Command("docker", "run", "--rm",
 			"-v", fmt.Sprintf("raftkv_data%d:/data", id),
 			"--entrypoint", "/usr/local/bin/raftkvctl", c.image,
@@ -458,12 +490,12 @@ type WALDump struct {
 	Summary string            // the "summary ..." line, which includes the log digest
 }
 
-// DumpWALs runs `raftkvctl debug wal-dump` against each node's volume. The
-// cluster must be stopped (StopAll).
+// DumpWALs runs `raftkvctl debug wal-dump` against each live member slot's
+// volume. The cluster must be stopped (StopAll).
 func (c *Cluster) DumpWALs() map[int]WALDump {
 	c.t.Helper()
 	out := map[int]WALDump{}
-	for id := 1; id <= NumNodes; id++ {
+	for _, id := range c.Live() {
 		cmd := exec.Command("docker", "run", "--rm",
 			"-v", fmt.Sprintf("raftkv_data%d:/data", id),
 			"--entrypoint", "/usr/local/bin/raftkvctl", c.image,

@@ -7,6 +7,7 @@ package kvtest
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -37,6 +38,12 @@ type Cluster struct {
 	nodes   map[uint64]*server.KVNode
 	cancels map[uint64]context.CancelFunc
 	dones   map[uint64]chan error
+
+	// Membership (M6): the template config and data root for joiners, and
+	// listeners reserved for nodes about to join.
+	opts     Options
+	dir      string
+	reserved map[string]net.Listener
 }
 
 // Options tune a cluster.
@@ -65,7 +72,8 @@ func New(tb testing.TB, n int, o Options) *Cluster {
 	}
 	c := &Cluster{tb: tb, now: o.Now, real: map[uint64]string{}, cfgs: map[uint64]node.Config{},
 		proxies: map[[2]uint64]*proxy{}, nodes: map[uint64]*server.KVNode{},
-		cancels: map[uint64]context.CancelFunc{}, dones: map[uint64]chan error{}}
+		cancels: map[uint64]context.CancelFunc{}, dones: map[uint64]chan error{},
+		opts: o, reserved: map[string]net.Listener{}}
 	lises := map[uint64]net.Listener{}
 	for i := 1; i <= n; i++ {
 		id := uint64(i)
@@ -90,6 +98,7 @@ func New(tb testing.TB, n int, o Options) *Cluster {
 		}
 	}
 	dir := tb.TempDir()
+	c.dir = dir
 	for _, id := range c.ids {
 		cfg := node.DefaultConfig()
 		cfg.NodeID = id
@@ -175,7 +184,7 @@ func (c *Cluster) Stop(id uint64) {
 	cancel()
 	select {
 	case err := <-done:
-		if err != nil {
+		if err != nil && !errors.Is(err, node.ErrRemoved) {
 			c.tb.Errorf("node %d stopped with error: %v", id, err)
 		}
 	case <-time.After(20 * time.Second):
@@ -185,8 +194,9 @@ func (c *Cluster) Stop(id uint64) {
 
 // Wipe deletes a stopped node's whole data directory, as if its disk were
 // replaced. Restarted, it comes back empty under the same ID and catches up
-// from the leader (by snapshot once the log is compacted, D-14). Real
-// clusters re-add such a node as a learner with a new ID (D-32, M6).
+// from the leader (by snapshot once the log is compacted, D-14), unless a
+// peer saw its old data directory's incarnation and refuses it (D-32). Real
+// clusters re-add such a node as a learner with a new ID.
 func (c *Cluster) Wipe(id uint64) {
 	c.tb.Helper()
 	if c.Node(id) != nil {
@@ -214,11 +224,72 @@ func (c *Cluster) Start(id uint64) {
 	c.startWith(id, lis)
 }
 
+// Reserve opens a listener for a node about to join (D-06) and returns its
+// address, the peer URL to pass to AddLearner.
+func (c *Cluster) Reserve() string {
+	c.tb.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		c.tb.Fatal(err)
+	}
+	c.mu.Lock()
+	c.reserved[l.Addr().String()] = l
+	c.mu.Unlock()
+	return l.Addr().String()
+}
+
+// StartJoined starts a node that joins the cluster as a learner (-join,
+// D-32) under the ID AddLearner assigned, listening on a [Cluster.Reserve]d
+// address. It reaches the other members directly (no partitionable proxy).
+func (c *Cluster) StartJoined(id uint64, addr string) {
+	c.tb.Helper()
+	c.mu.Lock()
+	lis := c.reserved[addr]
+	delete(c.reserved, addr)
+	c.mu.Unlock()
+	if lis == nil {
+		c.tb.Fatalf("StartJoined: %s was not reserved", addr)
+	}
+	cfg := node.DefaultConfig()
+	cfg.NodeID, cfg.Join, cfg.ListenAddr = id, true, addr
+	cfg.DataDir = filepath.Join(c.dir, fmt.Sprint("n", id))
+	cfg.TickInterval = c.opts.Tick
+	cfg.LeaseReads = c.opts.LeaseReads
+	if c.opts.SnapshotEntries > 0 {
+		cfg.SnapshotEntries = c.opts.SnapshotEntries
+		cfg.SnapshotRetainEntries = c.opts.SnapshotRetainEntries
+	}
+	cfg.WALSegmentBytes = c.opts.WALSegmentBytes
+	for _, o := range c.ids {
+		cfg.Peers = append(cfg.Peers, node.PeerConfig{ID: o, Addr: c.real[o]})
+	}
+	c.mu.Lock()
+	c.cfgs[id] = cfg
+	c.real[id] = addr
+	c.mu.Unlock()
+	c.ids = append(c.ids, id)
+	c.startWith(id, lis)
+}
+
+// Forget stops node id (a removed member) and drops it from the cluster's
+// member list, so Leader, StateHashes and Close ignore it.
+func (c *Cluster) Forget(id uint64) {
+	c.tb.Helper()
+	c.Stop(id)
+	c.ids = slices.DeleteFunc(c.ids, func(x uint64) bool { return x == id })
+}
+
 // Close stops every node and proxy. Safe to call twice.
 func (c *Cluster) Close() {
 	for _, id := range c.ids {
 		c.Stop(id)
 	}
+	c.mu.Lock()
+	for a, l := range c.reserved {
+		_ = l.Close()
+		delete(c.reserved, a)
+	}
+	c.mu.Unlock()
 	for _, p := range c.proxies {
 		p.close()
 	}

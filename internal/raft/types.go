@@ -15,8 +15,8 @@ const (
 	// EntryNormal carries an opaque state-machine command (or nothing, for the
 	// leader's no-op, see system-design T6).
 	EntryNormal EntryType = iota
-	// EntryConfChange is reserved for membership changes (M6, D-06, D-31). The
-	// core stores and replicates it like any entry but attaches no meaning yet.
+	// EntryConfChange is a membership change (D-06, D-31): Data is an
+	// [EncodeConfChange] payload. It takes effect when appended.
 	EntryConfChange
 )
 
@@ -95,7 +95,7 @@ type SoftState struct {
 
 // MessageType is the kind of a peer message.
 //
-// Types for leadership transfer (M6) will be appended after the existing ones.
+// New types are appended after the existing ones.
 type MessageType uint8
 
 const (
@@ -134,7 +134,15 @@ const (
 	// out of band and reports the outcome with [RawNode.ReportSnapshot]. The
 	// follower answers with a MsgAppResp whose Index is its new match index.
 	MsgSnap
+	// MsgTimeoutNow is the leader's order to a caught-up voter to start an
+	// election at once (leadership transfer, D-06, system-design 7.3). The
+	// target skips PreVote, and its MsgVote carries [TransferContext] so
+	// voters skip the leader-stickiness rule T5.
+	MsgTimeoutNow
 )
+
+// TransferContext is the Context of a MsgVote sent because of MsgTimeoutNow.
+var TransferContext = []byte("transfer")
 
 func (t MessageType) String() string {
 	names := [...]string{
@@ -143,7 +151,7 @@ func (t MessageType) String() string {
 		MsgVote: "MsgVote", MsgVoteResp: "MsgVoteResp",
 		MsgPreVote: "MsgPreVote", MsgPreVoteResp: "MsgPreVoteResp",
 		MsgReadIndex: "MsgReadIndex", MsgReadIndexResp: "MsgReadIndexResp",
-		MsgSnap: "MsgSnap",
+		MsgSnap: "MsgSnap", MsgTimeoutNow: "MsgTimeoutNow",
 	}
 	if int(t) < len(names) && names[t] != "" {
 		return names[t]
@@ -151,7 +159,7 @@ func (t MessageType) String() string {
 	return fmt.Sprintf("MessageType(%d)", uint8(t))
 }
 
-func (t MessageType) valid() bool { return t >= MsgApp && t <= MsgSnap }
+func (t MessageType) valid() bool { return t >= MsgApp && t <= MsgTimeoutNow }
 
 // Message is a peer-to-peer message. It is a plain Go value; the transport
 // (M2) is responsible for encoding it. Fields not used by a given Type are
@@ -191,10 +199,14 @@ type Message struct {
 // Snapshot describes the state machine as of log index Index, whose entry has
 // term Term (D-14). The core handles only this metadata; the state itself (a
 // Pebble checkpoint in the real node) lives outside the core, which stays free
-// of I/O (D-01). Membership joins the metadata with M6.
+// of I/O (D-01).
 type Snapshot struct {
 	Index uint64
 	Term  uint64
+	// ConfState is the configuration in effect at Index (WBS 6.1.6). nil
+	// means unknown (a snapshot written before M6): the node keeps the
+	// configuration it has.
+	ConfState *ConfState
 }
 
 // IsEmpty reports whether s is the zero Snapshot (no snapshot).
@@ -257,6 +269,18 @@ var (
 	// ErrSnapshotTemporarilyUnavailable means the storage has no snapshot
 	// to send right now; the leader tries again later.
 	ErrSnapshotTemporarilyUnavailable = errors.New("raft: snapshot is temporarily unavailable")
+	// ErrConfChangePending means the last configuration change is not
+	// committed yet; only one may be in flight (D-06). Retry later.
+	ErrConfChangePending = errors.New("raft: a configuration change is already in progress")
+	// ErrConfChangeTooEarly means the leader has not committed an entry of
+	// its own term yet, so it may not change the configuration (system-design
+	// 7.1 rule 2). Retry shortly.
+	ErrConfChangeTooEarly = errors.New("raft: leader has not committed in its term yet")
+	// ErrTransferInProgress means the leader is handing leadership over and
+	// takes no proposals until the transfer ends (system-design 7.3).
+	ErrTransferInProgress = errors.New("raft: leadership transfer in progress")
+	// ErrTransferTarget means a leadership transfer target is not a voter.
+	ErrTransferTarget = errors.New("raft: transfer target is not a voter")
 )
 
 // NotLeaderError is returned by Propose on a follower that knows the leader.

@@ -361,10 +361,10 @@ return 503 with the reason otherwise.
 
 | RPC | Precondition | Behaviour | Retry behaviour | Typical errors |
 |-----|--------------|-----------|-----------------|----------------|
-| `AddLearner` | No change in flight; peer URL not in use | Assign a random ID, propose `ADD_LEARNER`, return after commit. The learner then catches up | Same peer URL already a learner → returns it with OK | `CONF_CHANGE_IN_PROGRESS`, `ALREADY_EXISTS` |
-| `PromoteLearner` | Target is a learner within 1,000 entries of the leader | Propose `PROMOTE_LEARNER`. Voter count +1 | Already a voter → OK | `LEARNER_NOT_CAUGHT_UP`, `NOT_FOUND` |
-| `RemoveMember` | No change in flight | Propose `REMOVE_MEMBER`. If the target is the leader, transfer leadership first | `NOT_FOUND` after an `OUTCOME_UNKNOWN` means it worked | `WOULD_LOSE_QUORUM`, `CONF_CHANGE_IN_PROGRESS` |
-| `TransferLeadership` | Target is a voter | Stop proposals, catch up the target, send `TimeoutNow`, return when a new leader appears. Fail after one election timeout | Target is already leader → OK | `TRANSFER_TIMEOUT`, `NOT_FOUND`, `TARGET_IS_LEARNER` |
+| `AddLearner` | No change in flight; peer URL not in use | Assign a random ID, propose `ADD_LEARNER`, return after commit. The learner then catches up | Same peer URL already a learner → returns it with OK | `CONF_CHANGE_IN_PROGRESS`, `MEMBER_EXISTS` |
+| `PromoteLearner` | Target is a learner within 1,000 entries of the leader | Propose `PROMOTE_LEARNER`. Voter count +1 | Already a voter → OK | `LEARNER_NOT_CAUGHT_UP`, `MEMBER_NOT_FOUND` |
+| `RemoveMember` | No change in flight | Propose `REMOVE_MEMBER`. The leader may remove itself: it hands over with `TimeoutNow` once the removal commits | `MEMBER_NOT_FOUND` after an `OUTCOME_UNKNOWN` means it worked | `WOULD_LOSE_QUORUM`, `CONF_CHANGE_IN_PROGRESS` |
+| `TransferLeadership` | Target is a voter | Stop proposals, catch up the target, send `TimeoutNow`, return when a new leader appears. Fail after one election timeout | Target is already leader → OK | `TRANSFER_TIMEOUT`, `MEMBER_NOT_FOUND`, `TARGET_IS_LEARNER` |
 | `ListMembers` | none | Config at `revision` (LINEARIZABLE) or local view (STALE) | Read-only | none |
 | `Status` | none | This member's local state | Read-only | none |
 
@@ -564,6 +564,7 @@ message ConfChange {
 message ClusterConfig {
   repeated Member members = 1;
   uint64 config_index = 2;
+  repeated uint64 removed = 3;        // IDs removed so far: never reused (D-38), their messages ignored (D-31)
 }
 
 // ---------- AppendEntries (on the Replicate stream) ----------

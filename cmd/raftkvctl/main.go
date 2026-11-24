@@ -26,6 +26,15 @@ commands:
   range [--endpoints a,b,c] [--limit N] [--keys-only] [--reverse] [--all]
       [--stale [--min-revision N]] [--page-token HEX] (START [END] | --prefix PREFIX)
       without --all, prints one page and a "more=true next=HEX" line if more remain
+  member list [--stale]
+  member add-learner --peer-url HOST:PORT [--client-url HOST:PORT] [NAME]
+      prints the ID the leader assigned; start the node with --join --node-id ID
+  member promote [--wait] ID
+      exit 5 if the learner has not caught up (without --wait)
+  member remove [--force] ID
+  member transfer [ID]      (also: leader transfer [ID])
+      move leadership to ID, or to the most up-to-date voter
+      member commands take --endpoints, --timeout and --cluster-id too
   debug state-hash -data-dir DIR
       print a stopped node's applied index and state hash; equal hashes at the
       same applied index mean equal state machines
@@ -53,6 +62,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runRange(args[1:], stdout, stderr)
 	case "debug":
 		return runDebug(args[1:], stdout, stderr)
+	case "member":
+		return runMember(args[1:], stdout, stderr)
+	case "leader":
+		if len(args) > 1 && args[1] == "transfer" {
+			return runMember(append([]string{"transfer"}, args[2:]...), stdout, stderr)
+		}
+		_, _ = fmt.Fprintln(stderr, usage)
+		return 2
 	default:
 		_, _ = fmt.Fprintf(stderr, "raftkvctl: unknown command %q\n%s\n", args[0], usage)
 		return 2
