@@ -15,10 +15,12 @@ type Weights struct {
 	CrashLeader   int // crash the current leader, restart it later
 	Degrade       int // make one link slow, lossy, duplicating, reordering
 	ResetLinks    int // remove per-link degradation
+	Membership    int // a random single-server change or leadership transfer (D-06)
 }
 
 func (w Weights) total() int {
-	return w.Partition + w.IsolateLeader + w.OneWay + w.Heal + w.Crash + w.CrashLeader + w.Degrade + w.ResetLinks
+	return w.Partition + w.IsolateLeader + w.OneWay + w.Heal + w.Crash + w.CrashLeader + w.Degrade + w.ResetLinks +
+		w.Membership
 }
 
 // Profile is a named fault mix (docs/testing.md 2.2, -faults flag).
@@ -117,6 +119,21 @@ var profiles = []Profile{
 			Crash: 5, CrashLeader: 2, Degrade: 2, ResetLinks: 2,
 		},
 		Snapshots: SnapshotPolicy{Every: [2]uint64{3, 25}, Retain: [2]uint64{0, 5}},
+	},
+	{
+		// Membership changes (WBS 6.3.1, D-06, D-31): learners added,
+		// promoted and removed, voters removed (the leader included) and
+		// leadership transferred, mixed with crashes, partitions and lossy
+		// links. Snapshots are on so new learners usually catch up by
+		// InstallSnapshot.
+		Name: "membership", Sizes: []int{3, 5}, FaultMs: 25_000,
+		Base:     Link{Drop: 0.03, Dup: 0.03, Reorder: 0.08, MinDelay: 1, MaxDelay: 40},
+		Degraded: Link{Drop: 0.30, Dup: 0.10, Reorder: 0.30, MinDelay: 5, MaxDelay: 400},
+		Weights: Weights{
+			Partition: 2, IsolateLeader: 2, OneWay: 1, Heal: 4,
+			Crash: 3, CrashLeader: 2, Degrade: 1, ResetLinks: 2, Membership: 8,
+		},
+		Snapshots: SnapshotPolicy{Every: [2]uint64{10, 60}, Retain: [2]uint64{0, 10}},
 	},
 }
 

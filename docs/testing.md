@@ -83,12 +83,21 @@ everything else.
 | INV-5 State Machine Safety | No two nodes apply different commands at the same index. |
 | INV-6 Monotonicity | `commitIndex` and `appliedIndex` never go backwards, even across restart. `applied ≤ committed ≤ lastIndex`. |
 | INV-7 Durability | A write acknowledged to a client is never lost while a quorum's synced disks survive. |
-| INV-8 Membership | At most one uncommitted config change at a time (D-06). Learners never count toward quorum. |
+| INV-8 Membership | CONF-1 "no two disjoint majorities": on every leader, the configuration at the highest known commit index and every configuration appended after it pairwise have intersecting voter majorities (so at most one voter change is in flight, D-06). CONF-2: a leader of term T holds no conf change of term T before its commit index reaches its first entry of term T (the single-server-change bug). Checked per leader, not across all nodes: a stale node may hold a doomed configuration two servers away from the leader's, but it cannot win an election with it. |
 | INV-9 Exactly-once | A `(client_id, sequence)` is applied at most once (D-09). |
 | INV-10 Read safety | A ReadIndex read (D-05) sees state at least as new as the commit index when the read arrived. In the simulator: READ-1 (read index ≥ the highest commit index any node had when the read started) and READ-2 (a leader's read index is an entry of its own term, i.e. after its no-op). |
 | LIVE-1 Liveness | Once faults heal and a majority is connected, a leader is elected within 10 × max election timeout. Reported separately from safety failures. |
 
 At the end of each run the client history goes through Porcupine (§3).
+
+**Membership profile (WBS 6.3.1).** `-faults=membership` mixes crashes, partitions and lossy links with an operator
+that asks the leader for a random single-server change every 0.2–1.2 s (add a learner with a fresh ID and an empty
+disk, promote, remove a voter, the leader itself a third of the time, remove a learner, or transfer leadership), often
+twice in a row and right after an election, so the "one pending change" and "current-term commit first" refusals are
+exercised all the time. Snapshots are on, so learners usually catch up by InstallSnapshot. A node whose removal commits
+is either stopped for good or left running and ignored (D-31). LIVE-1 is judged on the members of the newest committed
+configuration. The planted-bug tests switch the two rules off (`raft.Config.Unsafe`) and require CONF-1 and CONF-2 to
+fire (`test/sim/membership_test.go`).
 
 **Reproducing.** Every failure prints `make sim SEED=<seed> SIM_PROFILE=<profile>`. Profiles (`pr`, `nightly`,
 `membership`, `disk`, `snapshot`) set the fault mix and run length. Failing seeds are added to
