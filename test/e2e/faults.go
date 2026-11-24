@@ -86,10 +86,11 @@ func (c *Cluster) Restart(id int) {
 	c.fault("restart", id, "", err)
 }
 
-// Wipe destroys node id's data volume, as if its disk had been replaced, and
-// starts it again empty under the same ID (WBS 5.5.2). It catches up from the
-// leader, by InstallSnapshot once the log is compacted (D-14). The container
-// is removed first (a volume in use cannot be deleted).
+// Wipe destroys slot id's data volume, as if its disk had been replaced, and
+// starts it again empty under the same member ID (WBS 5.5.2). Since M6 the
+// peers refuse it (D-32: it may have forgotten a vote); it must be removed and
+// rejoin as a new learner (RemoveSlot, AddLearnerSlot). The container is
+// removed first (a volume in use cannot be deleted).
 func (c *Cluster) Wipe(id int) {
 	c.t.Helper()
 	svc := fmt.Sprintf("node%d", id)
@@ -135,7 +136,7 @@ func (c *Cluster) Partition(group ...int) {
 		in[id] = true
 	}
 	var others []string
-	for id := 1; id <= NumNodes; id++ {
+	for _, id := range c.Live() {
 		if !in[id] {
 			ip, err := c.containerIP(id)
 			if err != nil || ip == "" {
@@ -197,14 +198,20 @@ const (
 	FaultPartition    FaultKind = "partition-minority"
 	FaultDelay        FaultKind = "netem-delay"
 	FaultLoss         FaultKind = "netem-loss"
-	FaultWipeFollower FaultKind = "wipe-follower" // kill, delete the data volume, restart empty
+	// FaultWipeFollower kills a follower and deletes its data volume. It
+	// restarts empty under its old ID and is refused (D-32), so it is then
+	// removed and its slot rejoins as a new learner, which is promoted.
+	FaultWipeFollower FaultKind = "wipe-follower"
+	// FaultReplaceFollower removes a follower and rejoins its slot (fresh
+	// volume) as a new learner with a new ID, then promotes it (D-06, M6).
+	FaultReplaceFollower FaultKind = "replace-follower"
 )
 
-// DefaultKinds are the faults of the PR schedule; NightlyKinds add
-// follower wipes (WBS 5.5.2).
+// DefaultKinds are the faults of the PR schedule; NightlyKinds add follower
+// wipes (WBS 5.5.2) and membership changes (WBS 6.5.2).
 var (
 	DefaultKinds = []FaultKind{FaultKillFollower, FaultKillLeader, FaultPause, FaultPartition, FaultDelay, FaultLoss}
-	NightlyKinds = append(append([]FaultKind(nil), DefaultKinds...), FaultWipeFollower)
+	NightlyKinds = append(append([]FaultKind(nil), DefaultKinds...), FaultWipeFollower, FaultReplaceFollower)
 )
 
 // Step is one fault of a schedule. Targets are resolved when the step runs
@@ -249,7 +256,7 @@ func (c *Cluster) Run(s Step) {
 	c.t.Helper()
 	lead := c.WaitLeader(30 * time.Second)
 	var followers []int
-	for id := 1; id <= NumNodes; id++ {
+	for _, id := range c.Live() {
 		if id != lead {
 			followers = append(followers, id)
 		}
@@ -289,6 +296,15 @@ func (c *Cluster) Run(s Step) {
 		c.Kill(f)
 		time.Sleep(s.Hold)
 		c.Wipe(f)
+		c.RequireRefused(f, 3*time.Second)
+		c.RemoveSlot(f)
+		c.AddLearnerSlot(f)
+		c.PromoteSlot(f)
+	case FaultReplaceFollower:
+		c.RemoveSlot(f)
+		time.Sleep(s.Hold)
+		c.AddLearnerSlot(f)
+		c.PromoteSlot(f)
 	}
 	time.Sleep(s.Gap)
 }

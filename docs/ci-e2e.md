@@ -48,6 +48,28 @@ A new push to the same PR cancels the old run (`concurrency` with `cancel-in-pro
 Nightly jobs run in parallel and are never cancelled mid-run. The image is built locally and loaded into kind with `kind load docker-image`,
 so nothing is pushed to a registry.
 
+### 1.3 Membership in the compose e2e (M6)
+
+The compose file has five fixed container slots (`raftkv-nodek`, hostname `nodek`, ports `1700k`/`1900k`). Slot `k`
+runs member ID `RAFTKV_NODEk_ID` (default `k`) and passes `--join=RAFTKV_NODEk_JOIN` (default `false`). Member IDs are
+random (D-38), so the harness keeps a slot -> member ID map: to rejoin a slot it removes the old member, calls
+`Cluster.AddLearner(peer_url=nodek:7000)`, and recreates the slot's container on a fresh volume with the assigned ID
+and `--join` (D-32). Leader discovery, convergence and state-hash checks only look at the slots whose member is in the
+configuration.
+
+| Test | Profile counts | Asserts |
+|---|---|---|
+| `TestWipedFollowerRejoinsAsNewLearner` | pr 2, nightly 20 (`E2E_WIPE_RUNS`) | A follower restarted on a wiped volume under its old ID is refused (applies nothing, no snapshot, D-32); removed and rejoined as a new learner it catches up by InstallSnapshot and is promoted; final state hashes equal |
+| `TestSIGTERMLeaderHandsOver` | pr 2, nightly 5 (`E2E_SIGTERM_ROUNDS`) | `docker stop` on the leader: a new leader is visible < 0.8 s after the stop returns (an election would take >= 1 s) and the old leader logged the handover (WBS 6.2.3) |
+| `TestRaftkvctlMemberSmoke` | once | `raftkvctl member list / remove / add-learner / promote --wait / transfer`, `leader transfer`, and exit code 3 for an unknown member (WBS 6.4.7) |
+| `TestReplaceNodeUnderLoad` | once | Porcupine workload while a follower and then the leader are replaced (learner -> catch up -> promote -> remove old): 0 violations, equal state hashes (WBS 6.5.1) |
+| `TestScale3To5To3UnderLoad` | once | Porcupine workload while the cluster goes 5 -> 3 -> 5 -> 3 (rejoined slots are new learners; the leader removes itself on the way down, after a transfer): 0 violations (WBS 6.5.2) |
+
+The nightly seeded fault schedule (`TestSeededFaultSchedule`, `NightlyKinds`) adds two membership faults:
+`wipe-follower` (kill, wipe, check the D-32 refusal, remove, rejoin as a new learner, promote) and `replace-follower`
+(remove a follower, rejoin its slot as a new learner, promote). At most one follower is out of the configuration at a
+time, so a majority always survives.
+
 ---
 
 ## 2. Job diagram
