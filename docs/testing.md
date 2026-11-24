@@ -167,12 +167,20 @@ Using `pgregory.net/rapid` (D-43), which shrinks failing inputs automatically.
   a pod kill and a partition aimed at the current leader (found by `raftkv-chaos leader` from the members' `/metrics`)
   once each, in a seeded order. Each step applies the experiment, checks that it took effect (`AllInjected`, or the
   killed pods are back under new UIDs), holds it 5-40 s, deletes it, waits until all five members are Ready, and
-  leaves a 5-15 s quiet gap. It then stops the workload, fetches the history with `kubectl exec` and checks it with Porcupine; a violation
+  leaves a 5-15 s quiet gap. One more step per cycle is a rolling restart (WBS 7.4.5): `kubectl rollout restart
+  statefulset/raftkv` and `kubectl rollout status`, with every member's log streamed (`kubectl logs --follow`) until
+  its old container exits, since a replaced pod has no `--previous` log. The step fails unless all five pods were
+  replaced, at least one handover happened, and every member that led at SIGTERM logged `handing leadership over
+  before shutdown` and then `shutdown handover finished` with another leader, less than 800 ms later (an election
+  timeout is at least 1 s, so a leader that only stepped down because the others elected someone fails). Every run
+  does at least two rolling restarts, the missing ones after the schedule. It then stops the workload, fetches the history with `kubectl exec` and checks it with Porcupine; a violation
   or a checker timeout fails the run. Artifacts in `out/chaos/`: `seed.txt`, `fault-log.txt`, `history.jsonl`,
-  `summary.txt`, pod logs (current and previous container), events and, on failure, the Porcupine HTML.
+  `summary.txt`, pod logs (current and previous container), `rollout-N/` (each member's streamed log for rolling
+  restart N), events and, on failure, the Porcupine HTML.
 - The node ID is 1 + the pod ordinal (`--node-id-from-ordinal=$(POD_NAME)`), so a restarted pod keeps its ID and PVC.
-  A pod whose PVC is lost must not come back under the same ID (D-32); replacing a disk waits for membership
-  changes (M6).
+  A pod whose PVC is lost must not come back under the same ID (D-32). Membership changes need IDs that `AddLearner`
+  assigns, which no pod ordinal can carry, so scaling the StatefulSet and replacing a disk are not supported on
+  Kubernetes in v1 (system-design 7.9).
 
 ---
 

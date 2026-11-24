@@ -17,9 +17,17 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9100"
     spec:
-      # 7.1.5: SIGTERM already shuts the node down gracefully (WAL synced,
-      # gRPC drained). Leadership transfer before shutdown is M6 work; until
-      # then a killed leader costs one election timeout (1-2 s, D-08).
+      # WBS 7.1.5: the worst-case shutdown budget, all bounded by raftkvd:
+      #   preStop sleep                                   2 s
+      #   leader handover (WBS 6.2.3), capped at 2 x
+      #   election timeout + 2 ticks                      2.2 s
+      #   gRPC GracefulStop, then hard stop               2 s
+      #   /metrics server shutdown                        2 s
+      #   WAL tail fsync and close                        < 1 s
+      # about 9 s. 30 s leaves room for a slow disk; running out of it means
+      # SIGKILL, which is safe (D-33) but costs an election timeout. A
+      # handover normally takes tens of milliseconds: the rolling-restart
+      # chaos step (WBS 7.4.5) fails if one takes 800 ms or more.
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
@@ -70,7 +78,8 @@ spec:
               # (TimeoutNow to the most up-to-date voter) and waits up to about
               # two election timeouts before it exits (WBS 6.2.3), well inside
               # terminationGracePeriodSeconds. The image is FROM scratch, so
-              # this is the built-in sleep action, not a shell.
+              # this is the built-in sleep action (Kubernetes 1.30+), not a
+              # shell, and no exec hook could call raftkvctl anyway.
               sleep: {seconds: 2}
           resources:
             requests: {cpu: 100m, memory: 128Mi}

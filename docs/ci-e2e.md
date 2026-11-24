@@ -42,7 +42,7 @@ A new push to the same PR cancels the old run (`concurrency` with `cancel-in-pro
 | `sim-long` | 4 shards of random seeds for ~2 h each, all profiles (`nightly`, `membership`, `disk`, `snapshot`). Base seed = run ID, logged | 150 min |
 | `fuzz-long` | `make fuzz FUZZTIME=3m`: each of the 13 fuzz targets for 3 min (WBS 7.5.1); crasher inputs uploaded as an artifact | 75 min |
 | `e2e-long` | 30 min docker-compose run with the full fault mix, then one run against the deliberately broken build, which **must** fail with a violation (`testing.md` §3.4) | 90 min |
-| `chaos` | Create kind (pinned), install Chaos Mesh (pinned chart), deploy `deploy/k8s/`, run a seeded `PodChaos` + `NetworkChaos` schedule for 15 min (`chaos_duration` input) under the workload, check the history with Porcupine; artifacts uploaded on failure | 60 min |
+| `chaos` | Create kind (pinned), install Chaos Mesh (pinned chart), deploy `deploy/k8s/`, run a seeded `PodChaos` + `NetworkChaos` + rolling-restart schedule for 15 min (`chaos_duration` input) under the workload, checking that each restarted leader handed over, check the history with Porcupine; artifacts uploaded on failure | 60 min |
 | `report-failures` | On failure: open or update a GitHub issue with the repro command | 10 min |
 
 Nightly jobs run in parallel and are never cancelled mid-run. The image is built locally and loaded into kind with `kind load docker-image`,
