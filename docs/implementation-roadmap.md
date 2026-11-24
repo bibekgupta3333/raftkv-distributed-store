@@ -100,6 +100,15 @@ committed (D-43), `pr.yml`, `CHANGELOG.md`, `memory.md`, stub binaries.
 3. CI fails if the generated proto code is out of date (checked once with a throwaway change).
 4. `raftkvd --version` prints the version and git SHA.
 
+**Exit evidence** (tag `v0.0.1` proposed at `ba3564d`, the #3 merge)
+
+| # | Evidence |
+|---|---|
+| 1 | `make all` = `fmt-check lint build test`; the `check` job runs it on a clean checkout of `main` after #3: [run 45095167889](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45095167889) |
+| 2 | `pr.yml` green on `main` at `ba3564d` (#2 + #3): [run 45095167889](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45095167889) |
+| 3 | Throwaway PR #24 hand-edited `api/raftkv/v1/kv.pb.go`; `check` failed at the drift step `make proto && git diff --exit-code`: [job](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45302923577/job/138139641149). Closed unmerged |
+| 4 | `cmd/raftkvd` `TestVersionAndConfigErrors`; the `check` job now runs `./bin/raftkvd --version` and asserts the git SHA is in the output (this PR) |
+
 ### M1 — Raft core + deterministic simulator (5 weeks)
 
 **Goal.** A pure Raft state machine (D-01: `Tick`/`Step`/`Ready`/`Advance`, no I/O) shown to be correct by a
@@ -123,6 +132,17 @@ Figure 8 tests. `nightly.yml` with a long sim run.
 4. After faults stop, a leader is elected and every new proposal commits (liveness check, all seeds).
 5. PreVote test: a rejoining partitioned node does not raise the term. CheckQuorum test: an isolated leader steps down.
 6. `go test -race ./internal/raft/...` is clean.
+
+**Exit evidence** (tag `v0.1.0-alpha` proposed at `19e2169`, the #7 merge)
+
+| # | Evidence |
+|---|---|
+| 1 | Nightly `sim-long` (full) 100,000 seeds, 5 nodes (sizes 3 and 5), drops, reorder, duplication, partitions, crash/restart, 0 violations: [job](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45293603026/job/138108299167); plus `lossy`, `partition`, `crash` profiles in the same run. With `-race`: 10,000 seeds of `full`, 0 violations, [sim-race job](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45302500294/job/138138220494) |
+| 2 | `test/sim` `TestSimDeterminism` (same seed twice gives the same trace hash), `TestSimNetworkDeterministic`; in every `check` run |
+| 3 | `internal/raft` `TestFigure8OldTermEntryNotCommittedByCounting`, `TestLogMaybeCommitOnlyCurrentTerm` (#5) |
+| 4 | Post-heal liveness (leader elected, proposal and a linearizable read commit) is checked for every seed of every profile; `TestSimPlantedLiveness` proves the check fires. Same runs as #1 |
+| 5 | `TestDisruptiveRejoinPreVoteOnVsOff`, `TestPreCandidateDoesNotBumpTerm`, `TestCheckQuorumLeaderIsolation`, `TestCheckQuorumLeaderStepsDownWithoutQuorum` (#5) |
+| 6 | `make race` (`go test -race ./...`) in `check`, green on `main` at `19e2169`: [run 45098567571](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45098567571) |
 
 ### M2 — WAL + gRPC transport + real 5-process cluster (4 weeks)
 
@@ -148,6 +168,17 @@ Dockerfile and a 5-node docker-compose cluster. An e2e harness with kill, pause,
 5. `/metrics` shows term, leader, commit index, and fsync timing.
 6. The short e2e job with faults is green in `pr.yml`. Sim still passes 10,000 seeds.
 
+**Exit evidence** (tag `v0.1.0` proposed at `c1cd66d`, the #8 merge)
+
+| # | Evidence |
+|---|---|
+| 1 | `internal/wal` `TestCrashMatrix` (every byte offset of the last 2 records, many random logs), `TestTornTailIsCut`, `TestMidLogCorruptionRefusesToStart`, `TestRecordDetectsEveryBitFlip` (#4); WAL decoder fuzzing nightly (#21) |
+| 2 | `TestKillRestartRoundsLoseNoCommittedEntry`, nightly profile: "200 rounds, 400 acknowledged entries all present on 5 nodes", [e2e-long](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45293603026/job/138108298752) |
+| 3 | `TestLeaderElectedOnStart`, `TestNewLeaderAfterLeaderKill`, same e2e-long run and every `e2e-short` |
+| 4 | `TestMinorityStopsCommittingAndLogsMatchAfterHeal` (WAL digests equal after heal), same runs |
+| 5 | `internal/node` `TestMetricsEndpoint`, `TestMetricsListener` (term, state, leader, commit/applied, fsync histogram) (#6) |
+| 6 | `e2e-short` green on `main`, e.g. [run 45293576762](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45293576762); sim: 100,000 seeds per profile in [nightly 45293603026](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45293603026) |
+
 ### M3 — Pebble state machine + basic KV (2.5 weeks)
 
 **Goal.** A working replicated KV store: `Put`, `Get`, `Delete` go through the Raft log into Pebble (D-02) with exact
@@ -170,6 +201,15 @@ wired into e2e.
    recovery is exact.
 3. **e2e linearizability check passes** (Porcupine, 0 violations) under leader kill, follower kill, and partition.
 4. No acknowledged write is lost across 100 leader kills.
+
+**Exit evidence** (tag `v0.2.0` proposed at `78b7830`, the #11 merge: the first green `main` with M3, since `fbe79c0` (#9) broke the compose e2e)
+
+| # | Evidence |
+|---|---|
+| 1 | `internal/storage` `TestKillMinus9DuringApply` (500 rounds outside `-short`, state hash vs reference model), `TestCrashCloneRecoveryByReplay` (#9); in every `check` run, e.g. [run 45293576762](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45293576762) |
+| 2 | `TestTruncationSafetyWithUnflushedMemtables`, `TestTruncationNeverPassesDurableApplied`, `TestDurableAppliedAdvancesOnlyAfterFlush` (#9) |
+| 3 | Porcupine, 0 violations. Leader kill, follower kill, partitions: in-process 5-node gRPC `TestClusterIsLinearizableUnderFaults` (#9). Docker e2e `TestLinearizableKVUnderFaults` (leader kill, SIGSTOP, partitions; 377,689 ops in [e2e-long](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45293603026/job/138108298752)) (#18). Follower and two-pod kills under Porcupine on kind: [chaos run](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45299681977/job/138128791311), 925,159 ops (#23) |
+| 4 | Nightly [e2e-long](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45293603026/job/138108298752): 96 of the 200 kill-restart rounds killed the current leader (counted from the uploaded node logs) with every acknowledged entry present afterwards, plus 6 leader kills under Porcupine and 1 in `TestNewLeaderAfterLeaderKill`: 103 leader kills, no acknowledged write lost |
 
 ### M4 — Linearizable reads, client sessions, full KV API (3.5 weeks)
 
@@ -196,6 +236,17 @@ Porcupine models for CAS and Range.
 5. Session expiry is deterministic: all replicas have the same session table hash across 10,000 sim seeds.
 6. Every limit in D-11 has a boundary test (at the limit passes, one over fails).
 
+**Exit evidence** (tag `v0.3.0` proposed at `f65ae13`, the #19 merge: the first green `main` with all M4 features, before M5 landed; the M4 checker coverage of #18 merged after M5 and ships in `v0.4.0`)
+
+| # | Evidence |
+|---|---|
+| 1 | `TestLinearizableKVUnderFaults` (leader kill, SIGSTOP leader and follower, partitions; half the workers read from a fixed follower): 377,689 ops, `fail=0`, [e2e-long](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45293603026/job/138108298752). Checker validity: `make mutation` (`TestCheckerCatchesBrokenReadPath`) in the same job and in every `check` |
+| 2 | Sim `TestSimReadPartitionedOldLeader`, READ-1/READ-2 on every seed of every profile ([nightly](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45293603026)); docker `TestOldLeaderServesNoStaleRead` in the same e2e-long run (#14, #18) |
+| 3 | `TestSimLeaseDriftBeyondBoundIsCaught`, `TestSimLeaseDriftWithinBound`, `TestSimLeaseOffByDefault` (#14) |
+| 4 | `internal/server` `TestExactlyOnceUnderRetries`, `internal/storage` `TestSessionDedupOnApply`, `pkg/client` `TestSessionRetryKeepsSequence` (#15) |
+| 5 | `TestSessionTableDeterministic -session-seeds=10000` (apply-path property test; the sim's state machine is opaque bytes): nightly `sim-race` step, [run 45304037021](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45304037021); `TestSessionExpiryReplicasAgree` at cluster level (#15) |
+| 6 | `TestLimitBoundaries` (key 4096/4097, value 1 MiB/+1, Range limit 1000/1001, 4 MiB page), `TestRangePageKeyLimit` (#15, #19) |
+
 ### M5 — Snapshots + follower catch-up (2.5 weeks)
 
 **Goal.** Keep disk use bounded with log compaction, and bring a lagging or wiped follower back with a snapshot (D-14).
@@ -216,6 +267,16 @@ receiving snapshots, plus sim support.
 3. `kill -9` at each install step always restarts into the old state or the new one, never a mix.
 4. Under steady writes, the WAL stays bounded (old segments are deleted after snapshots).
 5. e2e linearizability still passes with follower-wipe faults. Exactly-once holds across a snapshot boundary.
+
+**Exit evidence** (tag `v0.4.0` proposed at `24ca8e7`, the #17 merge)
+
+| # | Evidence |
+|---|---|
+| 1 | Nightly `sim-long` (snapshot profile: threshold 3-25 entries, crashes and lost transfers during install) 100,000 seeds, 0 violations: [job](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45293603026/job/138108299207); `TestSimPlantedCorruptSnapshot` |
+| 2 | Nightly e2e `TestWipedFollowerRejoinsViaSnapshot`: "run 20/20 ... all 5 replicas: applied_index=3551 state_hash=7378…", [e2e-long](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45293603026/job/138108298752). Since M6 (#22) the same scenario runs as `TestWipedFollowerRejoinsAsNewLearner` (D-32) |
+| 3 | `internal/snapshot` `TestInstallCrashAtEachStep`, `internal/server` `TestRecoveryFinishesInstallWithoutWALMarker` (#17) |
+| 4 | `internal/server` `TestWALBoundedUnderSteadyWrites`: 900 writes, peak WAL 18,688 bytes in 2 segments (#17) |
+| 5 | Follower wipes under Porcupine: in-process 5-node gRPC `TestClusterIsLinearizableWithFollowerWipes` (2 wipes + partition past compaction, 6 installs) in every `check`; the docker Porcupine workload has no wipe fault, the nightly fault schedule does (`TestSeededFaultSchedule`, 7 follower wipes in the run above). `TestExactlyOnceAcrossSnapshotBoundary` (#17) |
 
 ### M6 — Membership changes + leadership transfer (3 weeks)
 
@@ -239,6 +300,16 @@ ignored. Random never-reused member IDs (D-38). A node with an empty disk can't 
 3. Scale 3 → 5 → 3 under load: 0 violations.
 4. Leadership transfer moves the leader to the target, and a failed transfer aborts cleanly.
 5. A second config change while one is pending is rejected with `FAILED_PRECONDITION`.
+
+**Exit evidence** (tag `v0.5.0` proposed at `958ae5b`, the #22 merge)
+
+| # | Evidence |
+|---|---|
+| 1 | Sim `membership` profile (add, promote, remove incl. the leader, transfer, with crashes, partitions, lossy links, snapshots), ConfigOverlap and ConfigEarly invariants: 10,000 seeds in #22; nightly 100,000 seeds, [run 45304037021](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45304037021). Planted bugs caught: `TestSimPlantedConcurrentConfChanges`, `TestSimPlantedEarlyConfChange` |
+| 2 | Docker `TestReplaceNodeUnderLoad`, in-process `TestReplaceNodeUnderLoadIsLinearizable`: 0 violations; [e2e-short on #22](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45302403630/job/138137889891), nightly [run 45304037021](https://github.com/bibekgupta3333/raftkv-distributed-store/actions/runs/45304037021) |
+| 3 | Docker `TestScale3To5To3UnderLoad`, in-process `TestScale3To5To3UnderLoadIsLinearizable`: 0 violations, same runs |
+| 4 | `internal/raft` `TestTransferLeadership`, `TestTransferLeadershipAbortsAfterElectionTimeout`; `internal/server` `TestRepeatedTransfers`, `TestGracefulShutdownHandsLeadershipOver`; docker `TestSIGTERMLeaderHandsOver` |
+| 5 | `internal/server` `TestSecondConfChangeRejectedWhilePending` (`FAILED_PRECONDITION` / `CONF_CHANGE_IN_PROGRESS`); core `TestOnlyOnePendingConfChange` |
 
 ### M7 — Kubernetes, observer UI, chaos tests, v1.0 (3.5 weeks)
 

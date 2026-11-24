@@ -13,6 +13,9 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: make fmt-check lint build test race
+      # M0 exit criterion 4, WBS 0.2.4: the binary is stamped with its version and git SHA.
+      - name: raftkvd --version
+        run: ./bin/raftkvd --version | tee /dev/stderr | grep -F "($(git rev-parse --short HEAD))"
       # testing.md 3.4, WBS 4.6.1: the checker must catch a deliberately broken read path.
       - run: make mutation
       - name: proto drift check
