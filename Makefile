@@ -9,6 +9,7 @@ E2E_PROFILE ?= pr
 SEEDS   ?= 500
 FAULTS  ?= full
 TRACEDIR ?= out/sim
+SIMRACE ?=
 
 .PHONY: all fmt fmt-check lint build test race proto clean help tools sim e2e e2e-image mutation cluster-up cluster-down cluster-logs fuzz docs-check
 
@@ -42,8 +43,8 @@ test: ## unit tests
 race: ## unit tests with race detector
 	go test -race ./...
 
-sim: ## deterministic simulator: SEEDS=500 SEED=1 (first seed) FAULTS=full
-	go test ./test/sim/... -run Sim -seeds=$(SEEDS) -start=$(SEED) -faults=$(FAULTS) -tracedir=$(TRACEDIR) -timeout=60m
+sim: ## deterministic simulator: SEEDS=500 SEED=1 (first seed) FAULTS=full [SIMRACE=-race]
+	go test $(SIMRACE) ./test/sim/... -run Sim -seeds=$(SEEDS) -start=$(SEED) -faults=$(FAULTS) -tracedir=$(TRACEDIR) -timeout=60m
 
 proto: ## regenerate protobuf code
 	go tool buf generate
