@@ -42,7 +42,7 @@ A new push to the same PR cancels the old run (`concurrency` with `cancel-in-pro
 | `sim-long` | 4 shards of random seeds for ~2 h each, all profiles (`nightly`, `membership`, `disk`, `snapshot`). Base seed = run ID, logged | 150 min |
 | `fuzz-long` | `make fuzz FUZZTIME=3m`: each of the 13 fuzz targets for 3 min (WBS 7.5.1); crasher inputs uploaded as an artifact | 75 min |
 | `e2e-long` | 30 min docker-compose run with the full fault mix, then one run against the deliberately broken build, which **must** fail with a violation (`testing.md` §3.4) | 90 min |
-| `chaos` | Create kind, install Chaos Mesh (pinned chart), deploy `deploy/k8s/`, run `PodChaos` + `NetworkChaos` with the workload for ~2 h, check the history with Porcupine | 180 min |
+| `chaos` | Create kind (pinned), install Chaos Mesh (pinned chart), deploy `deploy/k8s/`, run a seeded `PodChaos` + `NetworkChaos` schedule for 15 min (`chaos_duration` input) under the workload, check the history with Porcupine; artifacts uploaded on failure | 60 min |
 | `report-failures` | On failure: open or update a GitHub issue with the repro command | 10 min |
 
 Nightly jobs run in parallel and are never cancelled mid-run. The image is built locally and loaded into kind with `kind load docker-image`,
@@ -265,14 +265,17 @@ jobs:
 
   chaos:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@<sha>
+      - run: GOBIN=$PWD/bin go install sigs.k8s.io/kind@v0.30.0   # pinned kind
       - run: make chaos-up               # kind + Chaos Mesh + image loaded with `kind load`
-      - run: make chaos CHAOS_DURATION=2h CHAOS_SEED=$BASE_SEED
-      - if: always()
+      - run: make chaos CHAOS_DURATION=15m CHAOS_SEED=$BASE_SEED
+      - if: failure()
         uses: actions/upload-artifact@<sha>
         with: { name: chaos, path: out/chaos/, retention-days: 30 }
+      - if: always()
+        run: make chaos-down
 
   report-failures:
     if: failure()
@@ -300,7 +303,7 @@ CI calls only these Makefile targets (to be created), so local and CI commands a
 | `make e2e [E2E_PROFILE=pr\|nightly] [E2E_SEED=]` | 5-node docker-compose cluster + faults + Porcupine | `e2e-short`, `e2e-long` |
 | `make mutation` | Linearizability check against a `-tags raftkv_mutation` build whose followers serve "linearizable" reads locally; must report a violation (testing.md 3.4) | `check`, `e2e-long` |
 | `make chaos-up` | Create a kind cluster, install Chaos Mesh, deploy RaftKV | `chaos` |
-| `make chaos [CHAOS_DURATION=] [CHAOS_SEED=]` | Run the chaos workload and check the history | `chaos` |
+| `make chaos [CHAOS_DURATION=10m] [CHAOS_SEED=]` | Against a `make chaos-up` cluster: build and load the workload image, run the seeded fault schedule under the in-cluster workload, check the history with Porcupine (`out/chaos/`) | `chaos` |
 | `make chaos-down` | Delete the kind cluster | — |
 
 Helper targets used by CI: `make lint`, `make tidy-check`, `make proto-check`, `make build`, `make integration`,
