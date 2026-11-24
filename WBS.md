@@ -58,7 +58,7 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 0.3.3 Commit generated code and add a drift check (`make proto && git diff --exit-code`) (D-43) → CI fails on stale generated code (#2, #3)
 - [x] **0.4 CI and exit review**
   - [x] 0.4.1 `.github/workflows/pr.yml`: Go cache, `make fmt-check lint build test race`, buf lint, proto drift check → green on `main` (#2)
-  - [x] 0.4.2 M0 exit review: link evidence for each roadmap M0 exit criterion, update CHANGELOG.md and memory.md, tag `v0.0.1` → all criteria linked, tag exists (#24 drift proof, #PR; evidence in implementation-roadmap.md M0) (tag pending, see PR)
+  - [x] 0.4.2 M0 exit review: link evidence for each roadmap M0 exit criterion, update CHANGELOG.md and memory.md, tag `v0.0.1` → all criteria linked, tag exists (#24 drift proof, #25; evidence in implementation-roadmap.md M0) (tag pending, see PR)
 
 ---
 
@@ -109,9 +109,9 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 1.8.2 Disruptive rejoin with PreVote on vs off (off shows term inflation) → both behaviors asserted (#5)
   - [x] 1.8.3 Leader isolation with CheckQuorum → step-down asserted (#5)
 - [x] **1.9 M1 exit review**
-  - [x] 1.9.1 Run 10,000 seeds with the full fault profile, race detector clean → 0 violations, CI run linked (#PR; nightly sim-race run 45302500294: 10,000 seeds, full profile, -race, 0 violations)
-  - [x] 1.9.2 Update architecture.md / system-design.md Raft core sections to match the code → diff reviewed (#PR)
-  - [x] 1.9.3 Update CHANGELOG.md and memory.md (core API, sim usage, bugs the sim found), tag `v0.1.0-alpha` → diff reviewed, tag exists (#PR) (tag pending, see PR)
+  - [x] 1.9.1 Run 10,000 seeds with the full fault profile, race detector clean → 0 violations, CI run linked (#25; nightly sim-race run 45302500294: 10,000 seeds, full profile, -race, 0 violations)
+  - [x] 1.9.2 Update architecture.md / system-design.md Raft core sections to match the code → diff reviewed (#25)
+  - [x] 1.9.3 Update CHANGELOG.md and memory.md (core API, sim usage, bugs the sim found), tag `v0.1.0-alpha` → diff reviewed, tag exists (#25) (tag pending, see PR)
 
 ---
 
@@ -159,9 +159,9 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 2.6.6 Test: 200 rounds of kill -9 and restart, no committed entry lost → passes (#8, #11; nightly e2e-long run 45293603026: 200 rounds, 400 acked entries on all 5 nodes)
   - [x] 2.6.7 Add the short e2e job to `pr.yml` and a long e2e job to `nightly.yml` → both green (#8, #11; e2e-short green on main, nightly e2e-long green in run 45293603026)
 - [x] **2.9 M2 exit review**
-  - [x] 2.9.1 Re-run sim 10,000 seeds and link evidence for every M2 exit criterion → all linked (#PR; evidence in implementation-roadmap.md M2)
-  - [x] 2.9.2 Update storage-design.md (WAL as built), system-design.md (node loop), ci-e2e.md (jobs) → diffs reviewed (#PR)
-  - [x] 2.9.3 Update CHANGELOG.md and memory.md (WAL format, fsync gotchas, e2e tips), tag `v0.1.0` → diff reviewed, tag exists (#PR) (tag pending, see PR)
+  - [x] 2.9.1 Re-run sim 10,000 seeds and link evidence for every M2 exit criterion → all linked (#25; evidence in implementation-roadmap.md M2)
+  - [x] 2.9.2 Update storage-design.md (WAL as built), system-design.md (node loop), ci-e2e.md (jobs) → diffs reviewed (#25)
+  - [x] 2.9.3 Update CHANGELOG.md and memory.md (WAL format, fsync gotchas, e2e tips), tag `v0.1.0` → diff reviewed, tag exists (#25) (tag pending, see PR)
 
 ---
 
@@ -190,8 +190,8 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 3.4.2 Porcupine KV model split per key, checker with a timeout (timeout = fail), HTML view on failure → known-bad history detected (#9)
   - [x] 3.4.3 Wire the recorder into e2e with leader kill, follower kill, and partition → checked histories, 0 violations (#9 in-process, #18 docker e2e, #23 kind chaos with pod kills; 0 violations)
 - [x] **3.9 M3 exit review**
-  - [x] 3.9.1 Link evidence for every M3 exit criterion; update storage-design.md (key schema, durability) and api-design.md (implemented RPCs) → linked, diffs reviewed (#PR; evidence in implementation-roadmap.md M3)
-  - [x] 3.9.2 Update CHANGELOG.md and memory.md, tag `v0.2.0` → diff reviewed, tag exists (#PR) (tag pending, see PR)
+  - [x] 3.9.1 Link evidence for every M3 exit criterion; update storage-design.md (key schema, durability) and api-design.md (implemented RPCs) → linked, diffs reviewed (#25; evidence in implementation-roadmap.md M3)
+  - [x] 3.9.2 Update CHANGELOG.md and memory.md, tag `v0.2.0` → diff reviewed, tag exists (#25) (tag pending, see PR)
 
 ---
 
@@ -227,8 +227,8 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 4.6.1 Porcupine models for CAS and Range → known-bad histories detected (#18)
   - [x] 4.6.2 e2e mixing Put/Get/Delete/CAS/Range with leader and follower reads under leader kill, pause, partition → 0 violations, runs nightly (#18)
 - [x] **4.9 M4 exit review**
-  - [x] 4.9.1 Link evidence for every M4 exit criterion; update api-design.md (final API) and system-design.md (read path, sessions) → linked, diffs reviewed (#18, #PR; evidence in implementation-roadmap.md M4)
-  - [x] 4.9.2 Update CHANGELOG.md and memory.md, tag `v0.3.0` → diff reviewed, tag exists (#PR) (tag pending, see PR)
+  - [x] 4.9.1 Link evidence for every M4 exit criterion; update api-design.md (final API) and system-design.md (read path, sessions) → linked, diffs reviewed (#18, #25; evidence in implementation-roadmap.md M4)
+  - [x] 4.9.2 Update CHANGELOG.md and memory.md, tag `v0.3.0` → diff reviewed, tag exists (#25) (tag pending, see PR)
 
 ---
 
@@ -256,8 +256,8 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 5.5.1 Wiped follower rejoins via snapshot and its state hash matches (20 runs); long-partitioned follower catches up past compaction → all pass (#17)
   - [x] 5.5.2 Add follower-wipe to the e2e fault driver and nightly; linearizability still passes → 0 violations (#17)
 - [x] **5.9 M5 exit review**
-  - [x] 5.9.1 Link evidence for every M5 exit criterion; add snapshot metrics (size, duration, installs) and update storage-design.md → linked, diff reviewed (#17, #PR; evidence in implementation-roadmap.md M5)
-  - [x] 5.9.2 Update CHANGELOG.md and memory.md, tag `v0.4.0` → diff reviewed, tag exists (#PR) (tag pending, see PR)
+  - [x] 5.9.1 Link evidence for every M5 exit criterion; add snapshot metrics (size, duration, installs) and update storage-design.md → linked, diff reviewed (#17, #25; evidence in implementation-roadmap.md M5)
+  - [x] 5.9.2 Update CHANGELOG.md and memory.md, tag `v0.4.0` → diff reviewed, tag exists (#25) (tag pending, see PR)
 
 ---
 
@@ -288,8 +288,8 @@ release tags are pending; the proposed tag commits are listed in the PR that tic
   - [x] 6.5.1 Replace a node under load (learner → catch up → promote → remove old) → 0 linearizability violations (#22)
   - [x] 6.5.2 Scale 3 → 5 → 3 under load, plus membership changes in the nightly fault mix → 0 violations, nightly green (#22)
 - [x] **6.9 M6 exit review**
-  - [x] 6.9.1 Link evidence for every M6 exit criterion; write how-tos "replace a node", "scale 3 → 5", "transfer leadership" in system-design.md → linked, diff reviewed (#22 how-tos in system-design §7.6–7.8, #PR; evidence in implementation-roadmap.md M6)
-  - [x] 6.9.2 Update CHANGELOG.md and memory.md, tag `v0.5.0` → diff reviewed, tag exists (#PR) (tag pending, see PR)
+  - [x] 6.9.1 Link evidence for every M6 exit criterion; write how-tos "replace a node", "scale 3 → 5", "transfer leadership" in system-design.md → linked, diff reviewed (#22 how-tos in system-design §7.6–7.8, #25; evidence in implementation-roadmap.md M6)
+  - [x] 6.9.2 Update CHANGELOG.md and memory.md, tag `v0.5.0` → diff reviewed, tag exists (#25) (tag pending, see PR)
 
 ---
 
