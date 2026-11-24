@@ -160,7 +160,7 @@ chaos-image: ## build the in-cluster chaos workload image as raftkv-chaos:kind
 chaos: chaos-image $(KIND) ## fault schedule + Porcupine check on a `make chaos-up` cluster: CHAOS_DURATION=10m CHAOS_SEED=n
 	$(KIND) load docker-image $(CHAOS_IMAGE) --name $(KIND_CLUSTER)
 	CHAOS_DURATION=$(CHAOS_DURATION) CHAOS_SEED=$(CHAOS_SEED) CHAOS_IMAGE=$(CHAOS_IMAGE) \
-		CHAOS_KUBE_CONTEXT=$(KIND_CTX) go test -tags chaos -count=1 -timeout 240m -v -run TestChaos ./test/chaos/...
+		CHAOS_KUBE_CONTEXT=$(KIND_CTX) go test -tags chaos -count=1 -timeout 240m -v -run TestChaos ./test/chaos
 
 chaos-down: kind-down ## delete the kind cluster (Chaos Mesh and all experiments go with it)
 
