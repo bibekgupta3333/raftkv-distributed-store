@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 
+	raftkvv1 "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/lease"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/observability"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
@@ -133,6 +134,15 @@ type Node struct {
 	observer Observer
 	services []func(grpc.ServiceRegistrar)
 
+	// Membership (membership.go, D-06, D-23). members is the applied member
+	// table; removedAt is when this node applied its own removal.
+	identity   Identity
+	book       *transport.AddressBook
+	members    atomic.Pointer[raftkvv1.ClusterConfig]
+	confCh     chan *confReq
+	transferCh chan *transferReq
+	removedAt  time.Time
+
 	status atomic.Pointer[raft.Status]
 	term   atomic.Uint64
 
@@ -176,11 +186,15 @@ func New(cfg Config, opts Options) (*Node, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	if err := EnsureIdentity(cfg.DataDir, Identity{NodeID: cfg.NodeID, ClusterID: cfg.ClusterID}); err != nil {
+	ident, err := EnsureIdentity(cfg.DataDir, Identity{NodeID: cfg.NodeID, ClusterID: cfg.ClusterID, Joined: cfg.Join})
+	if err != nil {
 		return nil, err
 	}
 
 	n := &Node{
+		identity:     ident,
+		confCh:       make(chan *confReq),
+		transferCh:   make(chan *transferReq),
 		cfg:          cfg,
 		inbox:        make(chan raft.Message, inboxSize),
 		propCh:       make(chan *proposal, inboxSize),
@@ -238,7 +252,7 @@ func New(cfg Config, opts Options) (*Node, error) {
 	n.store = store
 	if n.snaps != nil {
 		if l := n.snaps.Latest(); l != nil {
-			store.SetSnapshot(raft.Snapshot{Index: l.GetLastIncludedIndex(), Term: l.GetLastIncludedTerm()})
+			store.SetSnapshot(snapshotOf(l))
 		}
 	}
 	if store.TruncatedBytes > 0 {
@@ -254,7 +268,18 @@ func New(cfg Config, opts Options) (*Node, error) {
 		return nil, err
 	}
 
-	rcfg := raft.DefaultConfig(cfg.NodeID, cfg.PeerIDs(), store,
+	if err := n.loadMembers(ident.Joined); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	for _, id := range n.members.Load().GetRemoved() {
+		if id == cfg.NodeID {
+			_ = store.Close()
+			return nil, fmt.Errorf("%w: node %d; start a new node with -join under the ID AddLearner assigns", ErrRemoved, id)
+		}
+	}
+
+	rcfg := raft.DefaultConfig(cfg.NodeID, n.bootstrapIDs(ident.Joined), store,
 		rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), cfg.NodeID))) // D-24: randomness is injected, here
 	rcfg.ElectionTick, rcfg.HeartbeatTick = cfg.ElectionTick, cfg.HeartbeatTick
 	rcfg.Applied = n.applier.Applied()
@@ -268,8 +293,10 @@ func New(cfg Config, opts Options) (*Node, error) {
 		_ = store.Close()
 		return nil, err
 	}
+	n.book = book
 	if n.tr, err = transport.New(transport.Config{
 		ID: cfg.NodeID, ClusterID: cfg.ClusterID, Peers: book, Handler: n,
+		Incarnation: ident.Incarnation, OnPeerWiped: n.onPeerWiped, // D-32
 		Logger:   observability.Component(n.log, "transport"),
 		Observer: n.metrics, MaxMsgBytes: cfg.MaxMsgBytes,
 		OnUnreachable: n.reportUnreachable,
@@ -278,6 +305,7 @@ func New(cfg Config, opts Options) (*Node, error) {
 		_ = store.Close()
 		return nil, err
 	}
+	n.syncTransport(n.members.Load()) // members added at run time (D-06)
 
 	if n.lis = opts.Listener; n.lis == nil {
 		if n.lis, err = net.Listen("tcp", cfg.EffectiveListenAddr()); err != nil {
@@ -402,8 +430,12 @@ func (n *Node) RegisterService(f func(grpc.ServiceRegistrar)) { n.services = app
 // ClusterID is this node's cluster ID.
 func (n *Node) ClusterID() uint64 { return n.cfg.ClusterID }
 
-// PeerAddr returns the configured address of member id, or "".
-func (n *Node) PeerAddr(id uint64) string { return n.cfg.PeerAddrs()[id] }
+// PeerAddr returns the peer address of member id, or "": a configured peer or
+// one learned from the membership (D-06).
+func (n *Node) PeerAddr(id uint64) string {
+	a, _ := n.book.Addr(id)
+	return a
+}
 
 // Addr is the peer gRPC address the node listens on.
 func (n *Node) Addr() string { return n.lis.Addr().String() }
@@ -598,13 +630,31 @@ func (n *Node) Run(ctx context.Context) error {
 func (n *Node) loop(ctx context.Context) error {
 	ticker := time.NewTicker(n.cfg.TickInterval)
 	defer ticker.Stop()
+	done := ctx.Done()
+	var handoverUntil time.Time // set while a shutdown hands leadership over
 	for {
 		select {
-		case <-ctx.Done():
-			return nil
+		case <-done:
+			// WBS 6.2.3: a leader hands over before it stops, so the
+			// cluster does not wait an election timeout for a new one.
+			if !n.startHandover() {
+				return nil
+			}
+			done, handoverUntil = nil, time.Now().Add(n.transferTimeout())
 		case <-ticker.C:
 			n.rn.Tick()
 			n.maybeRenewLease()
+			if !handoverUntil.IsZero() && (n.rn.Status().State != raft.StateLeader || time.Now().After(handoverUntil)) {
+				n.log.Info("shutdown handover finished", "component", "node", "leader", n.rn.Status().Lead)
+				return nil
+			}
+			if !n.removedAt.IsZero() && time.Since(n.removedAt) > 3*n.cfg.TickInterval {
+				return ErrRemoved // system-design 7.4: give the handover a few ticks
+			}
+		case req := <-n.confCh:
+			n.handleConfChange(req)
+		case req := <-n.transferCh:
+			n.handleTransfer(req)
 		case m := <-n.inbox:
 			n.step(m)
 		case id := <-n.unreach:
@@ -632,6 +682,26 @@ func (n *Node) loop(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// startHandover begins a leadership transfer at shutdown if this node leads
+// and another voter exists. It reports whether the loop should wait for it.
+func (n *Node) startHandover() bool {
+	st := n.rn.Status()
+	if st.State != raft.StateLeader || len(st.Config.Voters) < 2 {
+		return false
+	}
+	n.revokeLease() // D-25
+	if err := n.rn.TransferLeadership(raft.None); err != nil {
+		n.log.Warn("shutdown handover not started", "component", "node", "err", err)
+		return false
+	}
+	n.log.Info("handing leadership over before shutdown", "component", "node", "to", n.rn.Status().LeadTransferee)
+	if err := n.processReady(); err != nil {
+		n.log.Warn("shutdown handover", "component", "node", "err", err)
+		return false
+	}
+	return true
 }
 
 func (n *Node) step(m raft.Message) {
@@ -677,6 +747,9 @@ func (n *Node) handleProposal(p *proposal) {
 func (n *Node) processReady() error {
 	for n.rn.HasReady() {
 		rd := n.rn.Ready()
+		if n.lease != nil && hasConfChange(rd.Entries) {
+			n.revokeLease() // D-25: the voter set may change
+		}
 		// (1) Persist before anything is acknowledged (D-33, storage-design 2.1).
 		if err := n.persist(rd); err != nil {
 			return fmt.Errorf("persist: %w", err)
@@ -741,6 +814,7 @@ func (n *Node) apply(ents []raft.Entry) error {
 	if err != nil {
 		return err
 	}
+	n.applyMembership(ents) // D-06: the member table and the transport follow
 	n.notifyApplied()
 	n.waitMu.Lock()
 	defer n.waitMu.Unlock()
@@ -758,6 +832,15 @@ func (n *Node) apply(ents []raft.Entry) error {
 		}
 	}
 	return nil
+}
+
+func hasConfChange(ents []raft.Entry) bool {
+	for _, e := range ents {
+		if e.Type == raft.EntryConfChange {
+			return true
+		}
+	}
+	return false
 }
 
 func (n *Node) failWaiters(err error) {

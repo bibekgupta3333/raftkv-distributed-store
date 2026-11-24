@@ -44,14 +44,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "raftkvd:", err)
 		if errors.Is(err, node.ErrIdentityMismatch) || errors.Is(err, wal.ErrCorrupt) ||
-			errors.Is(err, node.ErrAppliedOutsideLog) {
+			errors.Is(err, node.ErrAppliedOutsideLog) || errors.Is(err, node.ErrStateLost) || errors.Is(err, node.ErrRemoved) {
 			return exitConfig
 		}
 		return exitFailed
 	}
 	// Blocks until SIGTERM or SIGINT, then shuts down gracefully (D-33: any
 	// fsync error inside exits immediately instead).
-	if err := node.RunUntilSignal(n.Node); err != nil {
+	if err := node.RunUntilSignal(n.Node); errors.Is(err, node.ErrRemoved) {
+		_, _ = fmt.Fprintln(stderr, "raftkvd:", err)
+		return exitOK // D-31: a removed member stops for good
+	} else if err != nil {
 		_, _ = fmt.Fprintln(stderr, "raftkvd:", err)
 		return exitFailed
 	}

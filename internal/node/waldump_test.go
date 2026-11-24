@@ -24,9 +24,14 @@ func TestDumpWALComparesReplicas(t *testing.T) {
 	for id, n := range c.nodes {
 		waitUntil(t, 10*time.Second, fmt.Sprintf("node %d applied", id), func() bool { return len(commandsOf(n)) == 5 })
 	}
+	// Followers first: a stopping leader hands leadership over (WBS 6.2.3),
+	// and the new leader's no-op would make the logs differ.
 	for id := range c.nodes {
-		c.stop(id)
+		if id != lead.ID() {
+			c.stop(id)
+		}
 	}
+	c.stop(lead.ID())
 
 	var summaries []string
 	for id := uint64(1); id <= 3; id++ {

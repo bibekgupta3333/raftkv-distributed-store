@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 
 	raftkvv1 "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1"
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/membership"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/node"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/snapshot"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/storage"
@@ -21,13 +22,17 @@ type KVNode struct {
 // closes the KV service's forwarding connections.
 type nodeObserver struct {
 	*Tracker
-	kv *KV
+	kv      *KV
+	cluster *Cluster
 }
 
 func (o *nodeObserver) OnStop() {
 	o.Tracker.OnStop()
 	if o.kv != nil {
 		o.kv.Close()
+	}
+	if o.cluster != nil {
+		o.cluster.Close()
 	}
 }
 
@@ -42,7 +47,8 @@ func OpenKVNode(cfg node.Config, opts node.Options) (*KVNode, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	if err := node.EnsureIdentity(cfg.DataDir, node.Identity{NodeID: cfg.NodeID, ClusterID: cfg.ClusterID}); err != nil {
+	ident, err := node.EnsureIdentity(cfg.DataDir, node.Identity{NodeID: cfg.NodeID, ClusterID: cfg.ClusterID, Joined: cfg.Join})
+	if err != nil {
 		return nil, err
 	}
 	smDir := filepath.Join(cfg.DataDir, node.StateDir)
@@ -54,13 +60,15 @@ func OpenKVNode(cfg node.Config, opts node.Options) (*KVNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	members := make([]*raftkvv1.Member, 0, len(cfg.Peers))
-	for _, p := range cfg.Peers {
-		members = append(members, &raftkvv1.Member{Id: p.ID, PeerUrl: p.Addr, Role: raftkvv1.MemberRole_VOTER})
+	// WBS 6.1.6: a bootstrapped cluster's state machine records its initial
+	// member table; a node that joined (D-32) learns it from the leader.
+	var bootstrap *raftkvv1.ClusterConfig
+	if !ident.Joined {
+		bootstrap = membership.Bootstrap(cfg.PeerAddrs())
 	}
 	snaps, err := snapshot.Open(snapshot.Config{
 		Dir: filepath.Join(cfg.DataDir, node.SnapDir), StateDir: smDir, Store: store,
-		ClusterID: cfg.ClusterID, Members: members,
+		ClusterID: cfg.ClusterID, Members: bootstrap.GetMembers(),
 	})
 	if err != nil {
 		_ = store.Close()
@@ -68,7 +76,9 @@ func OpenKVNode(cfg node.Config, opts node.Options) (*KVNode, error) {
 	}
 	opts.Snapshots = snaps
 	tracker := NewTracker()
-	opts.Applier = storage.NewApplier(store, tracker)
+	applier := storage.NewApplier(store, tracker)
+	applier.SetBootstrap(bootstrap)
+	opts.Applier = applier
 	obs := &nodeObserver{Tracker: tracker}
 	opts.Observer = obs
 	n, err := node.New(cfg, opts)
@@ -79,6 +89,8 @@ func OpenKVNode(cfg node.Config, opts node.Options) (*KVNode, error) {
 	kv := New(n, store, tracker)
 	obs.kv = kv
 	n.RegisterService(kv.Register)
-	n.RegisterService(NewCluster(n, store).Register) // Status only until M6 (D-48)
+	cl := NewCluster(n, store) // D-23
+	obs.cluster = cl
+	n.RegisterService(cl.Register)
 	return &KVNode{Node: n, Store: store, Tracker: tracker, KV: kv}, nil
 }
