@@ -19,6 +19,36 @@ import (
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
 )
 
+// BootstrapIDs is the member table a bootstrapped state machine records: every
+// static peer is a voter. It holds no addresses, because each node may see its
+// peers at different addresses and the state machine must be identical on
+// every replica (D-04, D-18); nodes fill addresses in from their own peer list
+// ([FillAddrs]).
+func BootstrapIDs(ids []uint64) *raftkvv1.ClusterConfig {
+	cfg := &raftkvv1.ClusterConfig{}
+	for _, id := range ids {
+		cfg.Members = append(cfg.Members, &raftkvv1.Member{Id: id, Role: raftkvv1.MemberRole_VOTER})
+	}
+	sortMembers(cfg)
+	return cfg
+}
+
+// FillAddrs returns a copy of cfg in which every member listed in addrs (this
+// node's own view of its configured peers) takes that peer address: a node
+// reaches its configured peers the way it was told to.
+func FillAddrs(cfg *raftkvv1.ClusterConfig, addrs map[uint64]string) *raftkvv1.ClusterConfig {
+	out := proto.CloneOf(cfg)
+	for _, m := range out.GetMembers() {
+		if a, ok := addrs[m.GetId()]; ok {
+			if m.GetClientUrl() == "" || m.GetClientUrl() == m.GetPeerUrl() {
+				m.ClientUrl = a
+			}
+			m.PeerUrl = a
+		}
+	}
+	return out
+}
+
 // Bootstrap returns the member table of a cluster created from static peers
 // (node ID -> peer address): every peer is a voter.
 func Bootstrap(peers map[uint64]string) *raftkvv1.ClusterConfig {

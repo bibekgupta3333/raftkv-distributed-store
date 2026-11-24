@@ -77,10 +77,10 @@ func (n *Node) loadMembers(joined bool) error {
 	if table == nil {
 		table = &raftkvv1.ClusterConfig{}
 		if !joined {
-			table = membership.Bootstrap(n.cfg.PeerAddrs())
+			table = membership.BootstrapIDs(n.cfg.PeerIDs())
 		}
 	}
-	n.members.Store(table)
+	n.members.Store(membership.FillAddrs(table, n.cfg.PeerAddrs()))
 	return nil
 }
 
@@ -115,6 +115,9 @@ func (n *Node) applyMembership(ents []raft.Entry) {
 			continue
 		}
 		next, cc, err := membership.FromEntry(e, n.members.Load())
+		if err == nil {
+			next = membership.FillAddrs(next, n.cfg.PeerAddrs())
+		}
 		if err != nil {
 			// The applier accepted it, so this cannot happen; keep the
 			// old table rather than stop.
@@ -143,6 +146,7 @@ func (n *Node) reloadMembers() {
 	if err != nil || t == nil {
 		return
 	}
+	t = membership.FillAddrs(t, n.cfg.PeerAddrs())
 	n.members.Store(t)
 	n.syncTransport(t)
 }
@@ -316,16 +320,17 @@ func (n *Node) proposeConfChange(req *confReq) confResult {
 }
 
 // quorumAfterRemoval reports whether the voters left after removing id include
-// a quorum the leader has heard from recently (WBS 6.4.5, WOULD_LOSE_QUORUM).
+// a quorum the leader has heard from within the last election timeout (WBS
+// 6.4.5, WOULD_LOSE_QUORUM).
 func (n *Node) quorumAfterRemoval(st raft.Status, id uint64) bool {
+	window := time.Duration(n.cfg.ElectionTick) * n.cfg.TickInterval
 	var left, live int
 	for _, v := range st.Config.Voters {
 		if v == id {
 			continue
 		}
 		left++
-		pr, ok := st.Progress[v]
-		if v == n.cfg.NodeID || (ok && (pr.RecentActive || pr.Match >= st.Commit)) {
+		if v == n.cfg.NodeID || time.Since(n.lastHeard[v]) < window {
 			live++
 		}
 	}

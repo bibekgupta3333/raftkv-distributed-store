@@ -64,7 +64,7 @@ func OpenKVNode(cfg node.Config, opts node.Options) (*KVNode, error) {
 	// member table; a node that joined (D-32) learns it from the leader.
 	var bootstrap *raftkvv1.ClusterConfig
 	if !ident.Joined {
-		bootstrap = membership.Bootstrap(cfg.PeerAddrs())
+		bootstrap = membership.BootstrapIDs(cfg.PeerIDs())
 	}
 	snaps, err := snapshot.Open(snapshot.Config{
 		Dir: filepath.Join(cfg.DataDir, node.SnapDir), StateDir: smDir, Store: store,

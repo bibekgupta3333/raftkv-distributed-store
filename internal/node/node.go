@@ -142,6 +142,7 @@ type Node struct {
 	confCh     chan *confReq
 	transferCh chan *transferReq
 	removedAt  time.Time
+	lastHeard  map[uint64]time.Time // loop goroutine only
 
 	status atomic.Pointer[raft.Status]
 	term   atomic.Uint64
@@ -194,6 +195,7 @@ func New(cfg Config, opts Options) (*Node, error) {
 	n := &Node{
 		identity:     ident,
 		confCh:       make(chan *confReq),
+		lastHeard:    make(map[uint64]time.Time),
 		transferCh:   make(chan *transferReq),
 		cfg:          cfg,
 		inbox:        make(chan raft.Message, inboxSize),
@@ -705,6 +707,7 @@ func (n *Node) startHandover() bool {
 }
 
 func (n *Node) step(m raft.Message) {
+	n.lastHeard[m.From] = time.Now() // WOULD_LOSE_QUORUM check (membership.go)
 	if err := n.rn.Step(m); err != nil {
 		n.log.Debug("step failed", "component", "raft", "type", m.Type.String(), "from", m.From, "err", err)
 	}
