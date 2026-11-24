@@ -1,6 +1,6 @@
 # CI & End-to-End Testing (GitHub Actions)
 
-Status: **Implemented** (M0–M5, M7 chaos). The workflow files are the source of truth:
+Status: **Implemented** (M0–M7, v1.0). The workflow files are the source of truth:
 [`.github/workflows/pr.yml`](../.github/workflows/pr.yml) and [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml).
 This document says how CI runs the tests; what the tests do is described in `testing.md`.
 

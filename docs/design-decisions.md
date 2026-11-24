@@ -58,7 +58,7 @@ answered before the listed milestone.
 | D-35 | Packages | Decided | `internal/node` holds the driver loop and applier. `internal/server` holds only the gRPC handlers. | M1 |
 | D-36 | Peer RPCs | Decided | `Replicate` (stream), `RequestVote` (with a pre-vote flag), `InstallSnapshot` (stream), `TimeoutNow`, `ReadIndex`. | M2–M6 |
 | D-38 | Member IDs | Decided | Random 64-bit IDs, never reused. | M6 |
-| D-43 | Tooling | Decided | Generated protobuf code is committed (CI checks it is current). `pgregory.net/rapid` for property tests. | M0 |
+| D-43 | Tooling | Decided | Generated protobuf code is committed (CI checks it is current). Property tests are seeded randomized tests plus native Go fuzzing; `pgregory.net/rapid` was planned but not adopted (2026-11-24). | M0 |
 | D-46 | Kubernetes probes | Decided | Ready = knows the leader and has caught up. Alive = the driver loop responds. | M7 |
 | D-47 | Chaos tests | Decided | Chaos Mesh `PodChaos` (kill) and `NetworkChaos` (partition, delay, loss) on kind. | M7 |
 | D-48 | Observer UI | Decided | A read-only `cmd/raftkv-observer` that polls `Cluster.Status` every 500 ms and serves one HTML page over SSE. No build step, no auth (localhost only). | M7 |
@@ -77,14 +77,21 @@ api/raftkv/v1/        .proto files
 internal/raft/        consensus core (pure, deterministic)
 internal/node/        driver loop + applier
 internal/wal/         write-ahead log
+internal/walstore/    WAL-backed raft.Storage
 internal/storage/     Pebble state machine
 internal/snapshot/    snapshots
 internal/transport/   gRPC peer transport
 internal/server/      gRPC handlers
+internal/command/     command envelope stored in log entries
+internal/membership/  core config <-> proto ClusterConfig
+internal/lease/       lease arithmetic (D-25)
+internal/observability/ logs, metrics, traces (D-17)
+pkg/client/           Go client library (sessions, leader discovery)
 test/sim/             deterministic simulator
 test/e2e/             docker-compose cluster tests
 test/linearizability/ history recorder + Porcupine checker
-test/chaos/           Chaos Mesh manifests
+test/chaos/           Chaos Mesh manifests + chaos driver
+deploy/compose/       5-node compose cluster, Prometheus, Grafana, observer
 deploy/k8s/           Kubernetes manifests
 ```
 

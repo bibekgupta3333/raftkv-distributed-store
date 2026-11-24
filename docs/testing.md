@@ -1,6 +1,6 @@
 # Testing & Correctness
 
-Status: **Draft design**. No code exists yet. This document says how RaftKV is tested and how we show it is correct.
+Status: **Implemented** (v1.0). This document says how RaftKV is tested and how we show it is correct.
 It builds on `design-decisions.md`, mainly **D-18** (correctness testing) and **D-19** (CI). CI wiring is in
 `ci-e2e.md`.
 
@@ -44,7 +44,7 @@ flowchart TB
 | Layer | Location | What it covers | Runs |
 |---|---|---|---|
 | Unit + fuzz | `internal/**/..._test.go` | Per-package logic, codecs | Every PR (`-race`) |
-| Property | `internal/raft`, `internal/wal`, `internal/storage` | Invariants over generated inputs | Every PR |
+| Property | `internal/raft`, `internal/wal`, `internal/storage` | Invariants over seeded random inputs (§2.3) | Every PR |
 | Simulation | `test/sim/` | Raft core with simulated network, disk and clock | PR: fixed seeds. Nightly: random seeds |
 | Integration | `internal/server/..._test.go` | Real Raft + WAL + Pebble + gRPC in one process | Every PR |
 | E2E | `test/e2e/` | 5 `raftkvd` containers, faults, Porcupine | PR: short. Nightly: longer |
@@ -52,7 +52,7 @@ flowchart TB
 
 ### 2.1 Unit tests and fuzzing
 
-- Table-driven tests. `go test -race -shuffle=on -count=1 ./...` must pass.
+- Table-driven tests. `make race` (`go test -race ./...`) must pass; the PR `check` job runs it.
 - Go native fuzzing (`testing.F`) for anything that decodes bytes from disk or the network (WBS 7.5.1): WAL records,
   segment headers, segment names and whole-segment replay (D-03); snapshot metadata and directory names (D-14); the
   command envelope; the state machine's value, session and cached-reply records; the Range page token; the YAML
@@ -69,12 +69,12 @@ everything else.
 
 | Component | Behaviour |
 |---|---|
-| **Scheduler** | One goroutine and an event queue ordered by `(virtual_time, seq)`. All randomness comes from one `math/rand/v2` source seeded by `SEED`. No wall clock, no unsorted map iteration. Same seed + same commit = identical event trace (CI checks this by running one seed twice and comparing trace hashes). |
-| **Clock** | Virtual time. Each node gets `Tick()` at its own slightly jittered rate, so randomized election timeouts (D-08) interact realistically. |
-| **Network** | Per-link queues with delay, drop, duplicate, reorder and partitions (symmetric, one-way, "leader can reach only one follower"). Messages are Protobuf-encoded at the boundary so encoding bugs show up too. |
-| **Disk** | Writes stay in a volatile buffer until `fsync`. A crash throws away un-synced data, optionally keeping a torn prefix. Can inject `EIO`/`ENOSPC`. The D-04 "applied index in the same batch" rule is modelled atomically. |
-| **Fault plan** | Per seed: crash/restart, pause, partitions, lossy links, disk errors, membership changes (D-06), leadership transfer, snapshots (thresholds lowered so they happen often). |
-| **Clients** | Simulated clients send KV ops (D-10) with sessions (D-09), retry with the same `(client_id, sequence)`, and record a history in the same format as real runs (§3.1). |
+| **Scheduler** | One goroutine and an event queue ordered by `(virtual_time, seq)`. All randomness comes from one `math/rand/v2` PCG source seeded by the seed. No wall clock, no unsorted map iteration. Same seed + same commit = identical event trace (`TestSimDeterminism` runs one seed twice and compares trace hashes). |
+| **Clock** | Virtual time. Each node gets `Tick()` from its own timer, so randomized election timeouts (D-08) interact realistically. |
+| **Network** | Per-link delay, drop, duplicate and reorder, a degraded mode with much worse numbers, symmetric partitions, an isolated leader, and one-way blocks of a single link. Messages are passed as Go values (no protobuf encoding). |
+| **Disk** | A node's disk holds only what a `Ready` asked to persist, and only after a simulated fsync delay; a crash drops everything volatile, including a `Ready` whose persist was pending. No torn writes or I/O errors here: those are covered by the WAL's fault-injecting file shim (`internal/wal`). |
+| **Fault plan** | Per profile (`none`, `lossy`, `partition`, `crash`, `full`, `lease`, `snapshot`, `membership`): crash/restart (the leader too), partitions, one-way blocks and lossy links; `snapshot` and `membership` add very low snapshot thresholds, and `membership` adds single-server changes and leadership transfers (D-06). |
+| **Clients** | A workload proposes opaque commands at random nodes and issues ReadIndex reads; a reference model of the applied sequence checks every apply. The simulator's state machine is opaque bytes, so sessions (D-09) are tested on the real apply path instead (`TestSessionTableDeterministic`, §2.3). |
 
 **Invariants checked after every event** (a failure stops the run and dumps the trace):
 
@@ -86,9 +86,9 @@ everything else.
 | INV-4 Leader Completeness | An entry committed in term T is in the log of every leader of a later term. |
 | INV-5 State Machine Safety | No two nodes apply different commands at the same index. |
 | INV-6 Monotonicity | `commitIndex` and `appliedIndex` never go backwards, even across restart. `applied ≤ committed ≤ lastIndex`. |
-| INV-7 Durability | A write acknowledged to a client is never lost while a quorum's synced disks survive. |
+| INV-7 Durability | A write acknowledged to a client is never lost while a quorum's synced disks survive. Checked by the e2e kill-restart rounds and by Porcupine (an acked write that disappears is a violation), not by the simulator. |
 | INV-8 Membership | CONF-1 "no two disjoint majorities": on every leader, the configuration at the highest known commit index and every configuration appended after it pairwise have intersecting voter majorities (so at most one voter change is in flight, D-06). CONF-2: a leader of term T holds no conf change of term T before its commit index reaches its first entry of term T (the single-server-change bug). Checked per leader, not across all nodes: a stale node may hold a doomed configuration two servers away from the leader's, but it cannot win an election with it. |
-| INV-9 Exactly-once | A `(client_id, sequence)` is applied at most once (D-09). |
+| INV-9 Exactly-once | A `(client_id, sequence)` is applied at most once (D-09). Checked on the real apply path and in integration tests (`TestSessionDedupOnApply`, `TestExactlyOnceUnderRetries`), not by the simulator. |
 | INV-10 Read safety | A ReadIndex read (D-05) sees state at least as new as the commit index when the read arrived. In the simulator: READ-1 (read index ≥ the highest commit index any node had when the read started) and READ-2 (a leader's read index is an entry of its own term, i.e. after its no-op). |
 | LIVE-1 Liveness | Once faults heal and a majority is connected, a leader is elected within 10 × max election timeout. Reported separately from safety failures. |
 
@@ -103,21 +103,22 @@ is either stopped for good or left running and ignored (D-31). LIVE-1 is judged 
 configuration. The planted-bug tests switch the two rules off (`raft.Config.Unsafe`) and require CONF-1 and CONF-2 to
 fire (`test/sim/membership_test.go`).
 
-**Reproducing.** Every failure prints `make sim SEED=<seed> SIM_PROFILE=<profile>`. Profiles (`pr`, `nightly`,
-`membership`, `disk`, `snapshot`) set the fault mix and run length. Failing seeds are added to
-`test/sim/seeds/regressions.txt`, which runs on every PR.
+**Reproducing.** Every failure prints its repro command (`make sim SEEDS=1 SEED=<seed> FAULTS=<profile>`) and writes
+a JSONL trace (`go run ./test/sim/cmd/simtrace <trace>` pretty-prints it). Failing seeds are added to
+`test/sim/regressions/seeds.txt`, which every sim run replays.
 
 ### 2.3 Property tests
 
-Using `pgregory.net/rapid` (D-43), which shrinks failing inputs automatically.
+As built these are seeded randomized Go tests plus native fuzzing (§2.1); `pgregory.net/rapid` was not adopted
+(D-43), so there is no automatic shrinking. A failing case prints its seed.
 
-| Target | Property |
-|---|---|
-| Raft core | Random message sequences never break INV-1..INV-6. |
-| WAL (D-03) | For any sequence of appends, fsyncs and truncations followed by a crash at any byte, recovery returns exactly the synced records, never a corrupted one. CRC32C catches every single-bit flip. |
-| State machine (D-04, D-09) | Replaying the same committed entries into a fresh Pebble, with crashes between batches, always gives the same state and `appliedIndex`. Duplicate session entries are no-ops. |
-| KV vs model | Random op sequences on the real state machine match a plain in-memory map (Put/Get/Delete/CAS/Range, D-10/D-11). |
-| Snapshot (D-14) | `install(create(state)) == state`. An interrupted transfer that starts over gives the same result. |
+| Target | Property | Tests |
+|---|---|---|
+| Raft core | Random fault schedules never break INV-1..INV-6 | The simulator (§2.2) |
+| WAL (D-03) | A crash or corruption at any byte offset of the last records gives exactly the synced prefix or a clear corruption error, never bad data. CRC32C catches every single-bit flip | `TestCrashMatrix`, `TestRecordDetectsEveryBitFlip` |
+| State machine (D-04, D-09) | Replaying the committed entries after a `kill -9` during apply gives the same state hash and `appliedIndex` as a reference model. Replicas expire sessions identically | `TestKillMinus9DuringApply`, `TestSessionTableDeterministic` (1,000 seeds per PR, 10,000 nightly) |
+| Decoders | Never panic, and round-trip what they accept | Fuzz targets (§2.1) |
+| Snapshot (D-14) | A crash at each install step leaves the old state or the new one. An interrupted transfer starts over | `TestInstallCrashAtEachStep`, `TestReceiveRejectsAndRestarts` |
 
 ### 2.4 Integration tests
 
@@ -130,21 +131,15 @@ Using `pgregory.net/rapid` (D-43), which shrinks failing inputs automatically.
 
 ### 2.5 End-to-end tests (docker-compose)
 
-- `test/e2e/docker-compose.yml`: 5 `raftkvd` containers, each with its own volume and `NET_ADMIN` (for `iptables`/
-  `tc` inside the container), plus one harness container that runs the clients, history recorder, fault injector
-  and checker.
-- Harness exit codes (shared by sim, e2e and chaos; CI uses them, see `ci-e2e.md`):
-
-| Code | Meaning |
-|---|---|
-| 0 | Pass: history linearizable, invariants held, cluster healthy at the end |
-| 1 | **Correctness violation** (linearizability, invariant, data loss) |
-| 2 | Infrastructure error (container didn't start, Docker API failed) |
-| 3 | Checker timed out. **Not a pass** |
-| 4 | Liveness failure (cluster didn't recover after faults healed) |
-
-- After the workload stops, every node must reach the same `appliedIndex` and the same state digest (a hash over a
-  full Range scan).
+- `deploy/compose/docker-compose.yml`: 5 `raftkvd` containers (the e2e image, built with `-tags debugpropose`), each
+  with its own volume and `NET_ADMIN` (for `iptables`/`tc` inside the container). The harness is `go test -tags e2e
+  ./test/e2e` on the host (`make e2e`): it starts the five nodes and runs the clients, history recorder, fault driver
+  and checker in the test process, talking to the nodes on `127.0.0.1:17001-17005`. Tests and profile sizes:
+  `ci-e2e.md` 1.3.
+- Results are plain `go test` pass/fail: a linearizability violation, a checker timeout, lost data or a cluster that
+  does not recover all fail the test. There are no separate exit codes.
+- After the workload stops, the nodes must reach the same applied index and the same state hash
+  (`raftkvctl debug state-hash`) or, in the log tests, the same WAL digest.
 
 ### 2.6 Chaos tests (kind + Chaos Mesh)
 
@@ -289,7 +284,7 @@ applied and applied late, paged scans that see newer state on later pages).
 ### 3.4 Keeping the check tractable, and testing the checker
 
 Porcupine's search grows quickly with concurrency. Checked workloads use a small key space with few keys per
-partition and a few concurrent clients per key, and the checker gets a 60 s timeout (timeout = failure, exit code 3).
+partition and a few concurrent clients per key, and the checker gets a 60 s timeout (a timeout fails the test).
 For longer runs the e2e workload moves every client to fresh keys at the start of each fault cycle
 (`Workload.NextEpoch`): operations of different epochs never share a partition, so each cycle is checked separately,
 which has the effect of cutting the history at quiet points.
@@ -312,24 +307,23 @@ before the e2e runs count as evidence.
 |---|---|---|---|
 | **kill -9 leader** | E: `docker kill -s KILL <leader>`. C: `PodChaos` targeting the current leader. S: crash event | S I E C | Failover, no acknowledged write lost (INV-7), client retries deduplicated (D-09) |
 | **kill -9 follower** | `docker kill -s KILL`, `PodChaos` | S I E C | 4/5 keeps quorum; recovery from WAL + Pebble on restart (D-03, D-04) |
-| **Pause (SIGSTOP / SIGCONT)** | E: `docker pause` / `unpause` (or `kill -STOP` / `-CONT`). S: node stops getting ticks and messages | S E | A deposed leader that wakes up must not serve stale reads or accept writes (CheckQuorum D-08, ReadIndex D-05) |
-| **Network partition** | E: `iptables` DROP rules inside containers (symmetric, one-way, leader isolated). C: `NetworkChaos action: partition` | S I E C | Minority leader steps down, majority elects, no split brain (INV-1); PreVote stops a one-way-cut node disrupting the cluster |
+| **Pause (SIGSTOP / SIGCONT)** | E: `docker kill -s STOP` / `-s CONT` (leader or follower). The simulator has no pause; a long partition of the leader is its closest model | E | A deposed leader that wakes up must not serve stale reads or accept writes (CheckQuorum D-08, ReadIndex D-05) |
+| **Network partition** | E: `iptables` DROP rules inside containers, both directions (a group, the leader isolated). C: `NetworkChaos action: partition` (one member, or the leader). S: symmetric splits, isolated leader, one-way blocks | S I E C | Minority leader steps down, majority elects, no split brain (INV-1); PreVote stops a one-way-cut node disrupting the cluster (simulator only) |
 | **Packet delay / loss** | E: `tc qdisc ... netem delay 50ms 20ms loss 10%`. C: `NetworkChaos action: delay` / `loss` | S E C | Elections stay stable, gRPC streams reconnect, replication recovers |
-| **Node restart** | Clean stop + start (`docker restart`, `PodChaos pod-kill` so the StatefulSet recreates it) | S I E C | Rejoin with the same identity and PVC, catch-up via log or snapshot (D-14) |
-| **Disk full** *(optional)* | E: data dir on a small tmpfs (`--tmpfs /data:size=256m`), then fill it. S: injected `ENOSPC` | S (E optional) | Node crashes on write/fsync error (D-33) and never acks an unpersisted entry; recovers once space is freed |
+| **Node restart** | Clean stop + start (`docker stop`/`start`; on kind `PodChaos pod-kill` and the rolling restart, so the StatefulSet recreates the pod) | S I E C | Rejoin with the same identity and PVC, catch-up via log or snapshot (D-14); a stopping leader hands over first (WBS 6.2.3, 7.4.5) |
+| **Disk full** *(optional)* | Not run. Write and fsync errors in general are injected by the WAL's file shim (`TestFsyncErrorIsFatalAndNotRetried`, `TestWriteErrorIsFatal`) | Unit | Node crashes on write/fsync error (D-33) and never acks an unpersisted entry |
 
-The simulator also covers things the real layers don't (duplicate/reordered messages, torn writes, membership
-changes during faults).
+The simulator also covers things the real layers don't (duplicate/reordered messages, one-way partitions, membership
+changes during faults); the WAL crash matrix covers torn writes.
 
 ---
 
 ## 5. What "passing" means
 
-- **Every e2e and nightly chaos run must report 0 linearizability violations** (exit code 0). Exit code 3
-  (checker timeout) is not a pass.
+- **Every e2e and nightly chaos run must report 0 linearizability violations.** A checker timeout is not a pass.
 - **Failing seeds and histories are saved as CI artifacts**: the seed and repro command, the history and fault log,
   the Porcupine HTML visualization of the failing key, node logs and data directories (see `ci-e2e.md`).
-- A failing simulator seed becomes a regression seed in `test/sim/seeds/regressions.txt` as part of the fix.
+- A failing simulator seed becomes a regression seed in `test/sim/regressions/seeds.txt` as part of the fix.
 
 ---
 
@@ -337,11 +331,12 @@ changes during faults).
 
 Testing is "done" for v1.0 (M7) when:
 
-- [ ] The simulator has every component in §2.2 and the same-seed determinism check passes in CI.
-- [ ] INV-1..INV-10 and LIVE-1 are implemented, and each has a test showing it catches a deliberately broken core.
-- [ ] The Porcupine KV+CAS model (§3.3), including indeterminate ops, is implemented and catches the deliberately
-      broken build (§3.4).
-- [ ] Every fault in §4 marked for E or C has run in a passing run (disk-full is optional).
-- [ ] Property tests and fuzz targets exist and run in CI.
+- [x] The simulator has every component in §2.2 and the same-seed determinism check passes in CI.
+- [x] INV-1..INV-6, INV-8, INV-10 and LIVE-1 are checked by the simulator, each with a planted-bug test
+      (`test/sim/planted_test.go`, `membership_test.go`, `read_test.go`); INV-7 and INV-9 are checked outside it (§2.2).
+- [x] The Porcupine KV+CAS+Range model (§3.3), including indeterminate ops, is implemented and catches the
+      deliberately broken build (§3.4).
+- [x] Every fault in §4 marked for E or C has run in a passing run (disk-full is optional and was not run).
+- [x] Property tests and fuzz targets exist and run in CI.
 - [ ] `pr.yml` and `nightly.yml` from `ci-e2e.md` run green, with 0 violations, and `make test / sim / e2e / chaos`
-      reproduce CI locally.
+      reproduce CI locally. Green job by job; three green scheduled nights in a row are still to come (WBS 7.4.6).

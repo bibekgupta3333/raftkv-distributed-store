@@ -7,7 +7,7 @@ matter; speed does not. Don't add benchmarks, performance tuning, or production-
 
 ## Current phase
 
-**Implementation: M0–M3 done, M4–M7 in progress.** See the progress table in `WBS.md`.
+**v1.0: M0–M7 implemented.** The open release items are in `WBS.md` and the Definition of Done walk in `docs/implementation-roadmap.md` §5.
 
 ## Sources of truth
 
@@ -45,5 +45,12 @@ Run `make help` for the full list. Variables in parentheses are optional.
 - `make proto`: regenerate protobuf code (commit the result, D-43)
 - `make e2e-image`: build the e2e node image (`-tags debugpropose`, iptables, tc)
 - `make cluster-up` / `make cluster-down` / `make cluster-logs`: 5-node docker-compose cluster plus Prometheus
+  (`:19090`), Grafana (`:13000`) and the observer (`:18080`)
 - `make e2e` (`E2E_PROFILE=pr|nightly E2E_SEED=n E2E_ROUNDS=n`): docker-compose e2e tests
+- `make mutation`: the linearizability checker must catch a deliberately broken read path
+- `make fuzz` (`FUZZTIME=60s FUZZ=<target>`): native fuzz targets
+- `make docs-check`: `docs/configuration.md` must list every flag and YAML key
+- `make kind-up` / `make kind-status` / `make kind-down`: 5-pod StatefulSet on kind
+- `make chaos-up`, `make chaos` (`CHAOS_DURATION=10m CHAOS_SEED=n`), `make chaos-down`: Chaos Mesh fault schedule
+  with the Porcupine check
 - `make clean`: remove build output

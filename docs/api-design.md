@@ -238,7 +238,7 @@ Failover takes at least one election timeout (1–2 s, D-08). Deadlines are size
 | Cluster admin changes | 10 s | 30 s |
 | `Status` | 1 s | 1 s |
 
-These are the intended budgets. As of M4, `pkg/client` uses one per-attempt timeout for every RPC
+These are the intended budgets. As built, `pkg/client` uses one per-attempt timeout for every RPC
 (`Config.AttemptTimeout`, default 2 s) and a 10 s total (`Config.DefaultTimeout`) when the caller's context has no
 deadline; a caller's deadline always wins. A waiting `Get` or `Range` gives up 20 ms (at most a tenth of the budget)
 before the caller's deadline, so the client sees the server's reason (`READ_INDEX_TIMEOUT`, `REVISION_NOT_REACHED`)
