@@ -7,6 +7,8 @@
 //
 // The chaos driver (WBS 7.4.4, build tag chaos, `make chaos`) runs a seeded
 // schedule of those manifests while the workload in client/ (an in-cluster
-// pod) records a history, then checks the history with Porcupine. See
-// TestChaos and docs/testing.md 2.6.
+// pod) records a history, then checks the history with Porcupine. Rolling
+// restarts of the StatefulSet (WBS 7.4.5) are steps of the same schedule; the
+// leader handover check reads the members' logs (handover.go). See TestChaos
+// and docs/testing.md 2.6.
 package chaos
