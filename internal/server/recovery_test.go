@@ -30,7 +30,7 @@ func TestRecoveryFinishesInstallWithoutWALMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Peers = []node.PeerConfig{{ID: 1, Addr: "127.0.0.1:1"}, {ID: 2, Addr: lis.Addr().String()}, {ID: 3, Addr: "127.0.0.1:3"}}
-	if err := node.EnsureIdentity(dir, node.Identity{NodeID: 2, ClusterID: 1}); err != nil {
+	if _, err := node.EnsureIdentity(dir, node.Identity{NodeID: 2, ClusterID: 1}); err != nil {
 		t.Fatal(err)
 	}
 

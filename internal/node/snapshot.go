@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	raftkvv1 "github.com/bibekgupta3333/raftkv-distributed-store/api/raftkv/v1"
+	"github.com/bibekgupta3333/raftkv-distributed-store/internal/membership"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/raft"
 	"github.com/bibekgupta3333/raftkv-distributed-store/internal/snapshot"
 )
@@ -100,7 +101,7 @@ func (n *Node) ReceiveSnapshot(ctx context.Context, meta *raftkvv1.SnapshotMetad
 	req := &installReq{
 		msg: raft.Message{
 			Type: raft.MsgSnap, From: meta.GetLeaderId(), To: n.cfg.NodeID, Term: meta.GetTerm(),
-			Snapshot: &raft.Snapshot{Index: meta.GetLastIncludedIndex(), Term: meta.GetLastIncludedTerm()},
+			Snapshot: ptr(snapshotOf(meta)),
 		},
 		staged: staged,
 		done:   make(chan installResult, 1),
@@ -137,7 +138,7 @@ func (n *Node) handleInstall(req *installReq) {
 // persist fsyncs it together with the HardState (commit = snapshot index).
 func (n *Node) installSnapshot(s raft.Snapshot) error {
 	req := n.pendingInstall
-	if req == nil || req.msg.Snapshot == nil || *req.msg.Snapshot != s {
+	if req == nil || req.msg.Snapshot == nil || req.msg.Snapshot.Index != s.Index || req.msg.Snapshot.Term != s.Term {
 		return fmt.Errorf("node: the core asked to install snapshot %d/%d, which was not received", s.Index, s.Term)
 	}
 	start := time.Now()
@@ -148,6 +149,7 @@ func (n *Node) installSnapshot(s raft.Snapshot) error {
 		return fmt.Errorf("install snapshot %d: wal: %w", s.Index, err)
 	}
 	n.pendingInstall, n.installed = nil, req
+	n.reloadMembers()     // WBS 6.1.6: the snapshot carries the member table
 	n.needSnapshot = true // a local copy to serve if this node becomes leader
 	n.metrics.SnapshotInstalled(time.Since(start))
 	n.log.Info("snapshot installed", "component", "snapshot", "index", s.Index, "term", s.Term,
@@ -195,7 +197,7 @@ func (n *Node) maybeSnapshot() error {
 		return fmt.Errorf("create snapshot: %w", err)
 	}
 	n.needSnapshot = false
-	n.store.SetSnapshot(raft.Snapshot{Index: meta.GetLastIncludedIndex(), Term: meta.GetLastIncludedTerm()})
+	n.store.SetSnapshot(snapshotOf(meta))
 	var size uint64
 	for _, f := range meta.GetFiles() {
 		size += f.GetSize()
@@ -212,6 +214,20 @@ func (n *Node) maybeSnapshot() error {
 		"term", meta.GetLastIncludedTerm(), "bytes", size, "took", time.Since(start), "wal_trimmed_to", trimmed)
 	return nil
 }
+
+// snapshotOf is the core's view of a snapshot's metadata, membership included
+// (WBS 6.1.6). A snapshot without a member table leaves the configuration
+// as the node has it.
+func snapshotOf(meta *snapshot.Meta) raft.Snapshot {
+	s := raft.Snapshot{Index: meta.GetLastIncludedIndex(), Term: meta.GetLastIncludedTerm()}
+	if cfg := meta.GetConfig(); len(cfg.GetMembers()) > 0 {
+		cs := membership.ConfState(cfg)
+		s.ConfState = &cs
+	}
+	return s
+}
+
+func ptr[T any](v T) *T { return &v }
 
 // failWaitersUpTo fails ProposeAndWait callers whose entries are at or below
 // index.

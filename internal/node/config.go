@@ -40,8 +40,15 @@ type Config struct {
 	ListenAddr string `yaml:"listen_addr"`
 	// MetricsAddr serves /metrics; empty disables it.
 	MetricsAddr string `yaml:"metrics_addr"`
-	// Peers is the static membership including this node (D-06 comes in M6).
+	// Peers are the bootstrap members including this node, or, with Join,
+	// the members of the cluster being joined (only their addresses are
+	// used). Members added later are learned from the log (D-06).
 	Peers []PeerConfig `yaml:"peers"`
+	// Join makes a node with an empty data directory join an existing
+	// cluster as a learner under NodeID, the ID AddLearner assigned (D-32,
+	// D-38), instead of bootstrapping a new cluster from Peers. It is
+	// recorded in the data directory on first start.
+	Join bool `yaml:"join"`
 
 	// TickInterval is the wall-clock length of one logical Raft tick (D-24).
 	// With the default 100 ms and ElectionTick 10, elections time out in
@@ -135,8 +142,11 @@ func (c Config) Validate() error {
 		}
 		self = self || p.ID == c.NodeID
 	}
-	if len(c.Peers) > 0 && c.NodeID != 0 && !self {
+	switch {
+	case len(c.Peers) > 0 && c.NodeID != 0 && !self && !c.Join:
 		bad("node_id %d is not listed in peers", c.NodeID)
+	case c.Join && !self && c.ListenAddr == "":
+		bad("join: listen is required when node_id %d is not listed in peers", c.NodeID)
 	}
 	if c.ListenAddr != "" {
 		if _, _, err := net.SplitHostPort(c.ListenAddr); err != nil {
@@ -291,6 +301,7 @@ func LoadConfig(args []string, out io.Writer) (Config, error) {
 	snapEntries := fs.Uint64("snapshot-entries", 0, "entries applied between snapshots (D-14, default 100000)")
 	snapRetain := fs.Uint64("snapshot-retain-entries", 0, "entries kept in the WAL below the snapshot (default 10000)")
 	walSegment := fs.Int64("wal-segment-bytes", 0, "WAL segment size in bytes (default 64 MiB)")
+	join := fs.Bool("join", false, "join an existing cluster as a learner under -node-id (the ID AddLearner assigned, D-32)")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -352,6 +363,8 @@ func LoadConfig(args []string, out io.Writer) (Config, error) {
 			cfg.SnapshotRetainEntries = *snapRetain
 		case "wal-segment-bytes":
 			cfg.WALSegmentBytes = *walSegment
+		case "join":
+			cfg.Join = *join
 		}
 	})
 	if flagErr != nil {

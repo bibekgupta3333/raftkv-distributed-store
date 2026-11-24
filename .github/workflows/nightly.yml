@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        faults: [full, lossy, partition, crash, snapshot]
+        faults: [full, lossy, partition, crash, snapshot, membership]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

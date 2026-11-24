@@ -30,6 +30,9 @@ type Hooks struct {
 	View func(v *NodeView)
 	// Install may rewrite the snapshot content a node installs (D-14).
 	Install func(id uint64, ents []raft.Entry) []raft.Entry
+	// Config may change a node's raft.Config before it starts (planted
+	// membership bugs use raft.Config.Unsafe).
+	Config func(id uint64, cfg *raft.Config)
 }
 
 // Stats summarises one run.
@@ -50,6 +53,9 @@ type Stats struct {
 	Snapshots      int   // snapshots taken (D-14)
 	SnapsSent      int   // InstallSnapshot transfers started
 	SnapsInstalled int   // snapshots installed from a leader
+	ConfChanges    int   // membership changes accepted by a leader (D-06)
+	ConfRejected   int   // membership changes refused (pending, too early, ...)
+	Transfers      int   // leadership transfers requested
 	LeaderAfterMs  int64 // heal to stable leader, -1 if never
 	CommitAfterMs  int64 // heal to marker applied on all nodes, -1 if never
 	Net            NetStats
@@ -92,6 +98,12 @@ type Cluster struct {
 	snapPayloads map[snapKey][]raft.Entry
 	snapXfers    map[snapXfer]bool // value: delivered
 
+	// membership (membership.go): the newest committed configuration and
+	// the highest leader term seen
+	conf           raft.ConfState
+	confIndex      uint64
+	lastLeaderTerm uint64
+
 	// liveness
 	faultEnd      int64
 	leaderAt      int64
@@ -119,6 +131,7 @@ func NewCluster(seed uint64, p Profile, h Hooks, record bool) *Cluster {
 		c.ids = append(c.ids, uint64(i))
 	}
 	c.checker = NewChecker(c.ids)
+	c.conf = raft.ConfState{Voters: append([]uint64(nil), c.ids...)}
 	c.net = NewNetwork(c.sched, rng, p.Base, c.deliver)
 	c.net.Filter = h.Filter
 	if h.Message != nil {
@@ -216,6 +229,9 @@ func (c *Cluster) onRestore(n *node, ents []raft.Entry) {
 
 // deliver hands an arrived message to its destination node (if it is up).
 func (c *Cluster) deliver(m raft.Message) {
+	if m.To == 0 || m.To > uint64(len(c.nodes)) {
+		return // no such node (never created)
+	}
 	n := c.nodes[m.To-1]
 	if !n.up {
 		c.addTrace(Event{Kind: "lost", Node: m.From, Peer: m.To, Msg: m.Type.String(), Note: "node down"})
@@ -242,6 +258,10 @@ func (c *Cluster) onApply(n *node, e raft.Entry) {
 	if v := c.checker.OnApply(c.sched.Now(), n.id, n.inc, e); v != nil {
 		c.fail(v)
 	}
+	if e.Type == raft.EntryConfChange {
+		c.onConfApplied(e)
+		return
+	}
 	if len(e.Data) < 8 {
 		return // leader no-op
 	}
@@ -265,6 +285,9 @@ func (c *Cluster) observe() {
 		}
 		v := n.view()
 		c.maxCommit = max(c.maxCommit, v.Commit) // READ-1 baseline, before any planted rewrite
+		if v.State == raft.StateLeader {
+			c.onNewLeader(n, v.Term)
+		}
 		if c.hooks.View != nil {
 			c.hooks.View(&v)
 		}
@@ -352,6 +375,9 @@ func (c *Cluster) Run() Result {
 	if c.profile.Weights.total() > 0 {
 		c.sched.After(500, c.chaos)
 	}
+	if c.profile.Weights.Membership > 0 {
+		c.sched.After(300, c.membershipLoop)
+	}
 	c.sched.After(c.faultEnd, c.heal)
 	horizon := c.faultEnd + 2*livenessMs + 5_000
 	for c.violation == nil && !c.done && c.sched.Now() <= horizon && c.sched.Step() {
@@ -384,7 +410,7 @@ func (c *Cluster) leader() *node {
 	var best *node
 	var bestTerm uint64
 	for _, n := range c.nodes {
-		if !n.up {
+		if !n.up || n.removed {
 			continue
 		}
 		if st := n.rn.Status(); st.State == raft.StateLeader && (best == nil || st.Term > bestTerm) {
@@ -448,7 +474,7 @@ func (c *Cluster) crashNode(n *node) {
 }
 
 func (c *Cluster) restartNode(n *node) {
-	if n.up {
+	if n.up || n.retired {
 		return
 	}
 	n.start()
@@ -516,6 +542,8 @@ func (c *Cluster) chaos() {
 			c.net.SetLink(a, b, c.profile.Degraded)
 			c.addTrace(Event{Kind: "degrade", Node: a, Peer: b})
 		}
+	case pick(w.Membership):
+		c.membershipAction()
 	default:
 		c.net.ResetLinks()
 		c.addTrace(Event{Kind: "reset-links"})
@@ -568,7 +596,7 @@ func (c *Cluster) monitor() {
 		}
 	}
 	if c.leaderAt >= 0 {
-		if len(c.markerApplied) == len(c.nodes) {
+		if c.allMembers(func(n *node) bool { return c.markerApplied[n.id] }) {
 			if c.stats.CommitAfterMs < 0 {
 				c.stats.CommitAfterMs = now - healAt
 			}
@@ -605,9 +633,20 @@ func (c *Cluster) monitor() {
 	c.sched.After(100, c.monitor)
 }
 
+// allMembers reports whether f holds for every member of the newest
+// committed configuration (LIVE-1 ignores removed nodes).
+func (c *Cluster) allMembers(f func(n *node) bool) bool {
+	for _, n := range c.members() {
+		if !f(n) {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Cluster) isHighestTerm(l *node) bool {
 	lt := l.rn.Status().Term
-	for _, n := range c.nodes {
+	for _, n := range c.members() {
 		if n.up && n.rn.Status().Term > lt {
 			return false
 		}

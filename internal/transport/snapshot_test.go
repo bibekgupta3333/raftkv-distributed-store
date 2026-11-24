@@ -136,15 +136,16 @@ func TestInstallSnapshotRefusedReportsFailure(t *testing.T) {
 	}
 }
 
-// D-31: a snapshot whose metadata names an unknown leader is refused.
-func TestInstallSnapshotUnknownLeaderRefused(t *testing.T) {
+// D-31: a snapshot whose metadata names a removed leader is refused.
+func TestInstallSnapshotRemovedLeaderRefused(t *testing.T) {
 	send := newFakeSnaps(2)
 	send.leaderID = 99
 	snaps := map[uint64]*fakeSnaps{1: send, 2: newFakeSnaps(0)}
 	c := newCluster(t, 2, func(cfg *transport.Config) { cfg.Snapshots = snaps[cfg.ID] })
+	c[2].tr.RemovePeer(99)
 	c[1].tr.Send([]raft.Message{snapMsg()})
 	if _, failed := send.waitReport(t); !failed {
-		t.Fatal("a snapshot from an unknown leader must be refused")
+		t.Fatal("a snapshot from a removed leader must be refused")
 	}
 	if snaps[2].meta != nil {
 		t.Fatal("the handler must not see a refused stream")

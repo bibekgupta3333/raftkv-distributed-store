@@ -49,6 +49,11 @@ type node struct {
 	prefix []raft.Entry
 	// snapEvery and snapRetain are this node's snapshot policy (0: none).
 	snapEvery, snapRetain uint64
+
+	// Membership (membership.go). joiner: started empty with no bootstrap
+	// voters (D-32). removed: its removal committed. retired: stopped for
+	// good, never restarted.
+	joiner, removed, retired bool
 }
 
 func newNode(c *Cluster, id uint64) *node {
@@ -69,7 +74,14 @@ func newNode(c *Cluster, id uint64) *node {
 // seeded from the cluster source.
 func (n *node) start() {
 	c := n.c
-	cfg := raft.DefaultConfig(n.id, c.ids, n.store, rand.New(rand.NewPCG(c.rng.Uint64(), n.id)))
+	var peers []uint64 // a joiner learns the configuration from the leader
+	if !n.joiner {
+		peers = c.checker.bootstrap
+	}
+	cfg := raft.DefaultConfig(n.id, peers, n.store, rand.New(rand.NewPCG(c.rng.Uint64(), n.id)))
+	if h := c.hooks.Config; h != nil {
+		h(n.id, &cfg)
+	}
 	snap, _ := n.store.Snapshot()
 	// The state machine restarts from the snapshot and replays the log
 	// after it (storage-design 5).
@@ -121,7 +133,11 @@ func (n *node) maybeSnapshot() {
 	if applied < snap.Index+n.snapEvery {
 		return
 	}
-	s, err := n.store.CreateSnapshot(applied)
+	cs, ok := n.rn.ConfStateAt(applied)
+	if !ok {
+		panic("sim: no configuration known at the applied index")
+	}
+	s, err := n.store.CreateSnapshot(applied, &cs) // WBS 6.1.6: membership in the metadata
 	if err != nil {
 		panic("sim: CreateSnapshot: " + err.Error())
 	}

@@ -14,8 +14,8 @@ import (
 )
 
 // raftServer is the server side of the Raft peer service (WBS 2.2.1).
-// Replicate and RequestVote exist since M2 and ReadIndex since M4; the other
-// RPCs return Unimplemented until their milestones (D-36).
+// Replicate and RequestVote exist since M2, ReadIndex since M4,
+// InstallSnapshot since M5 and TimeoutNow since M6 (D-36).
 type raftServer struct {
 	raftkvv1.UnimplementedRaftServer
 	t *Transport
@@ -99,8 +99,11 @@ func (s *raftServer) Replicate(stream raftkvv1.Raft_ReplicateServer) error {
 		}
 		if in == nil { // first request: authenticate the leader and register
 			leader = req.GetLeaderId()
-			if err := t.checkSender(req.GetClusterId(), leader); err != nil {
-				return status.Error(codes.PermissionDenied, err.Error()) // D-31: unknown senders are refused
+			if err := t.checkSender(ctx, req.GetClusterId(), leader); err != nil {
+				return refusedStatus(err) // D-31, D-32: removed or wiped senders are refused
+			}
+			if t.cfg.Incarnation != 0 {
+				_ = stream.SendHeader(t.incarnationMD())
 			}
 			in = &inboundStream{out: make(chan raft.Message, t.cfg.QueueSize), cancel: cancel}
 			t.mu.Lock()
@@ -146,9 +149,10 @@ func (s *raftServer) Replicate(stream raftkvv1.Raft_ReplicateServer) error {
 // treats it as no vote.
 func (s *raftServer) RequestVote(ctx context.Context, req *raftkvv1.RequestVoteRequest) (*raftkvv1.RequestVoteResponse, error) {
 	t := s.t
-	if err := t.checkSender(req.GetClusterId(), req.GetCandidateId()); err != nil {
-		return nil, status.Error(codes.PermissionDenied, err.Error())
+	if err := t.checkSender(ctx, req.GetClusterId(), req.GetCandidateId()); err != nil {
+		return nil, refusedStatus(err)
 	}
+	t.setIncarnationHeader(ctx)
 	k := voteKey{candidate: req.GetCandidateId(), pre: req.GetPreVote()}
 	ch, done := t.registerVote(k)
 	defer done()
@@ -174,9 +178,10 @@ func (s *raftServer) RequestVote(ctx context.Context, req *raftkvv1.RequestVoteR
 // DEADLINE_EXCEEDED. Either way the follower retries.
 func (s *raftServer) ReadIndex(ctx context.Context, req *raftkvv1.ReadIndexRequest) (*raftkvv1.ReadIndexResponse, error) {
 	t := s.t
-	if err := t.checkSender(req.GetClusterId(), req.GetFrom()); err != nil {
-		return nil, status.Error(codes.PermissionDenied, err.Error())
+	if err := t.checkSender(ctx, req.GetClusterId(), req.GetFrom()); err != nil {
+		return nil, refusedStatus(err)
 	}
+	t.setIncarnationHeader(ctx)
 	ch, done := t.registerReadIndex(readKey{from: req.GetFrom(), ctx: string(req.GetRequestCtx())})
 	defer done()
 	ctx, cancel := context.WithTimeout(ctx, t.cfg.ReadIndexTimeout)

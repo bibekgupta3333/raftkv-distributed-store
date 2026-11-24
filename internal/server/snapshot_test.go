@@ -62,9 +62,11 @@ func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 	}
 }
 
-// WBS 5.5.1 (M5 exit criterion 2): delete a follower's data directory and
-// restart it; it catches up through a snapshot and its state hash matches.
-// 20 runs (5 with -short).
+// WBS 5.5.1 (M5 exit criterion 2) and 6.4.2 (D-32): delete a follower's data
+// directory and restart it under its old ID: the peers recognise the new
+// data-directory incarnation and refuse it, so it never catches up. Removed
+// and added back as a new learner, it catches up through a snapshot and its
+// state hash matches. 20 runs (5 with -short).
 func TestWipedFollowerRejoinsViaSnapshot(t *testing.T) {
 	runs := 20
 	if testing.Short() {
@@ -84,10 +86,19 @@ func TestWipedFollowerRejoinsViaSnapshot(t *testing.T) {
 				t.Fatalf("leader's WAL was never trimmed (first index %d)", first)
 			}
 			c.Start(victim)
-			n := c.Node(victim)
-			waitFor(t, 30*time.Second, "the wiped node to install a snapshot", func() bool {
+			old := c.Node(victim)
+			putN(t, cl, "x", 5)
+			time.Sleep(300 * time.Millisecond) // many heartbeat rounds at a 10 ms tick
+			if old.Metrics().SnapshotInstalls() > 0 || old.Status().Commit > 0 {
+				t.Fatalf("the wiped node caught up under its old ID (D-32): %+v", old.Status())
+			}
+			c.RemoveMember(victim, 30*time.Second)
+			id := c.AddLearner(30 * time.Second)
+			n := c.Node(id)
+			waitFor(t, 30*time.Second, "the new learner to install a snapshot", func() bool {
 				return n.Metrics().SnapshotInstalls() >= 1
 			})
+			c.Promote(id, 30*time.Second)
 			putN(t, cl, "c", 10)
 			requireSameState(t, c)
 			if n.SnapshotIndex() == 0 {

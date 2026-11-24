@@ -484,13 +484,20 @@ func TestReadyContractViolationsPanic(t *testing.T) {
 
 func TestStepFiltering(t *testing.T) {
 	st := NewMemoryStorage()
+	// Node 9 was removed (D-31): its ID is a tombstone in the configuration.
+	if err := st.ApplySnapshot(Snapshot{Index: 1, Term: 1, ConfState: &ConfState{Voters: []uint64{1, 2, 3}, Removed: []uint64{9}}}); err != nil {
+		t.Fatal(err)
+	}
 	rn := newLone(t, 1, []uint64{1, 2, 3}, st)
 	if err := rn.Step(Message{Type: MessageType(0), From: 2, To: 1}); !errors.Is(err, ErrUnknownMessage) {
 		t.Fatalf("err = %v, want ErrUnknownMessage", err)
 	}
-	// Unknown sender and wrong destination are ignored without effect.
+	// A removed sender, a zero sender and a wrong destination are ignored
+	// without effect.
 	for _, m := range []Message{
 		{Type: MsgVote, From: 9, To: 1, Term: 5},
+		{Type: MsgApp, From: 9, To: 1, Term: 5},
+		{Type: MsgVote, From: 0, To: 1, Term: 5},
 		{Type: MsgVote, From: 2, To: 3, Term: 5},
 	} {
 		if err := rn.Step(m); err != nil {

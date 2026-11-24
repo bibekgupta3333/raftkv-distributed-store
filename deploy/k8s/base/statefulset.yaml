@@ -64,11 +64,13 @@ spec:
             failureThreshold: 3
           lifecycle:
             preStop:
-              # WBS 7.1.5 (partial): give the endpoints controller a moment
-              # to take the pod out of the client Service before SIGTERM
-              # starts the graceful shutdown. The image is FROM scratch, so
-              # this uses the built-in sleep action, not a shell. M6 replaces
-              # it with a leadership transfer.
+              # WBS 7.1.5: give the endpoints controller a moment to take the
+              # pod out of the client Service before SIGTERM. The leadership
+              # transfer itself needs no hook: on SIGTERM a leader hands over
+              # (TimeoutNow to the most up-to-date voter) and waits up to about
+              # two election timeouts before it exits (WBS 6.2.3), well inside
+              # terminationGracePeriodSeconds. The image is FROM scratch, so
+              # this is the built-in sleep action, not a shell.
               sleep: {seconds: 2}
           resources:
             requests: {cpu: 100m, memory: 128Mi}

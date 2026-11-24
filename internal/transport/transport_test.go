@@ -243,9 +243,10 @@ func TestServerRejectsOversizeMessage(t *testing.T) {
 	}
 }
 
-// The transport refuses senders outside the address book and wrong clusters (D-31).
-func TestServerRefusesUnknownSenderAndWrongCluster(t *testing.T) {
+// The transport refuses removed senders and wrong clusters (D-31).
+func TestServerRefusesRemovedSenderAndWrongCluster(t *testing.T) {
 	c := newCluster(t, 2)
+	c[2].tr.RemovePeer(99)
 	conn, err := grpc.NewClient("passthrough:///"+c[2].addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +256,7 @@ func TestServerRefusesUnknownSenderAndWrongCluster(t *testing.T) {
 	defer cancel()
 	client := raftkvv1.NewRaftClient(conn)
 	for name, req := range map[string]*raftkvv1.RequestVoteRequest{
-		"unknown candidate": {ClusterId: 7, Term: 1, CandidateId: 99},
+		"removed candidate": {ClusterId: 7, Term: 1, CandidateId: 99},
 		"wrong cluster":     {ClusterId: 8, Term: 1, CandidateId: 1},
 	} {
 		if _, err := client.RequestVote(ctx, req); status.Code(err) != codes.PermissionDenied {

@@ -46,6 +46,7 @@ not read ([storage-design.md](storage-design.md) §10).
 | `--snapshot-entries` | `snapshot_entries` | `100000` | Entries applied between two snapshots (D-14). Must be positive. |
 | `--snapshot-retain-entries` | `snapshot_retain_entries` | `10000` | Entries kept in the WAL below the snapshot index, so briefly lagging followers catch up from the log ([storage-design.md](storage-design.md) §1.8). |
 | `--wal-segment-bytes` | `wal_segment_bytes` | `0` (= 64 MiB) | WAL segment rollover size (D-03). Trimming deletes whole segments, so this is the granularity of reclaimed disk. |
+| `--join` | `join` | `false` | Join an existing cluster as a learner under `--node-id`, the ID `AddLearner` assigned (D-32, D-38), instead of bootstrapping from `--peers` (which then only supplies the members' addresses). Recorded in the data directory on first start. |
 | `--version` | | | Print the version and exit. |
 
 ### raftkvd YAML config file
@@ -72,6 +73,7 @@ Durations use Go syntax (`100ms`, `2s`).
 | `snapshot_entries` | uint64 | `--snapshot-entries` | `100000` |
 | `snapshot_retain_entries` | uint64 | `--snapshot-retain-entries` | `10000` |
 | `wal_segment_bytes` | int64 | `--wal-segment-bytes` | `0` (64 MiB) |
+| `join` | bool | `--join` | `false` |
 
 Example (the Kubernetes ConfigMap, `deploy/k8s/base/configmap.yaml`; the node ID comes from the pod name):
 
@@ -92,12 +94,14 @@ peers:
 ```
 raftkvctl --version
 raftkvctl put|get|del|cas|range [flags] ARGS
+raftkvctl member list|add-learner|promote|remove|transfer [flags] ARGS
 raftkvctl debug state-hash|wal-dump --data-dir DIR [flags]
 ```
 
 Flags go after the subcommand. Exit codes ([api-design.md](api-design.md) §9): `0` success, `1` usage or
 `INVALID_ARGUMENT`, `2` unavailable or deadline (also bad flags), `3` key not found (`get`), `4` compare failed (`cas`,
-the current value is printed), `6` `FAILED_PRECONDITION`, `7` a write's outcome is unknown (it may have been applied).
+the current value is printed), `5` learner not caught up (`member promote` without `--wait`), `6` `FAILED_PRECONDITION`,
+`7` a write's outcome is unknown (it may have been applied).
 
 Environment: `RAFTKV_ENDPOINTS` is the default for `--endpoints`.
 
@@ -152,6 +156,65 @@ and one action.
 | `--min-revision` | `0` | With `--stale`, wait until the member has applied this index. |
 | `--page-token` | none | Continue from a previous page (hex). |
 | `--hex` | `false` | Print values as hex. |
+
+### raftkvctl member list
+
+`member list`: the applied member table (ID, role, name, peer and client URL, `*` on the leader) and `config_index`
+(D-23).
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--endpoints` | as for `put` | Comma-separated member addresses. Any member answers; followers forward admin calls to the leader. |
+| `--timeout` | `10s` | Overall deadline for the request. |
+| `--cluster-id` | `0` | Refuse servers of another cluster. |
+| `--stale` | `false` | Answer from one member's local view instead of after a linearizable read barrier. |
+
+### raftkvctl member add-learner
+
+`member add-learner --peer-url HOST:PORT [NAME]`: adds a non-voting member and prints the random ID the leader assigned
+(D-38). Start the new node with `--join --node-id ID` (D-32). Adding the same peer URL again returns the same learner.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--endpoints` | as for `put` | Comma-separated member addresses. |
+| `--timeout` | `10s` | Overall deadline for the request. |
+| `--cluster-id` | `0` | Refuse servers of another cluster. |
+| `--peer-url` | none (required) | The new member's peer address (`host:port`). |
+| `--client-url` | the peer URL | The new member's client address. |
+
+### raftkvctl member promote
+
+`member promote ID`: turns a learner within 1,000 entries of the leader into a voter (system-design §7.2).
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--endpoints` | as for `put` | Comma-separated member addresses. |
+| `--timeout` | `10s` | Overall deadline for the request (and for `--wait`). |
+| `--cluster-id` | `0` | Refuse servers of another cluster. |
+| `--wait` | `false` | Retry while the learner is catching up instead of exiting 5. |
+
+### raftkvctl member remove
+
+`member remove ID`: removes a voter or learner; its ID is never reused (D-31, D-38). Removing the leader is allowed: it
+hands leadership over once the removal commits.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--endpoints` | as for `put` | Comma-separated member addresses. |
+| `--timeout` | `10s` | Overall deadline for the request. |
+| `--cluster-id` | `0` | Refuse servers of another cluster. |
+| `--force` | `false` | Remove even if the remaining voters could not form a quorum right now (`WOULD_LOSE_QUORUM`). |
+
+### raftkvctl member transfer
+
+`member transfer [ID]` (alias `leader transfer [ID]`): moves leadership to voter `ID`, or to the most up-to-date voter,
+and prints the new leader and term. Fails with `TRANSFER_TIMEOUT` after one election timeout (system-design §7.3).
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--endpoints` | as for `put` | Comma-separated member addresses. |
+| `--timeout` | `10s` | Overall deadline for the request. |
+| `--cluster-id` | `0` | Refuse servers of another cluster. |
 
 ### raftkvctl debug state-hash
 

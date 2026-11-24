@@ -66,7 +66,7 @@ func TestRefusesUnknownOnDiskFormat(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "d")
-			if err := node.EnsureIdentity(dir, node.Identity{NodeID: 1, ClusterID: 1}); err != nil {
+			if _, err := node.EnsureIdentity(dir, node.Identity{NodeID: 1, ClusterID: 1}); err != nil {
 				t.Fatal(err)
 			}
 			tc.prepare(t, dir)

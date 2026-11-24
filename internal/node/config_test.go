@@ -116,18 +116,26 @@ func TestIdentityBootstrapAndMismatch(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "data")
 	want := node.Identity{NodeID: 2, ClusterID: 9}
 
-	if err := node.EnsureIdentity(dir, want); err != nil {
+	first, err := node.EnsureIdentity(dir, want)
+	if err != nil {
 		t.Fatalf("first start: %v", err)
 	}
+	if first.NodeID != 2 || first.ClusterID != 9 || first.Incarnation == 0 {
+		t.Fatalf("first identity = %+v, want a random incarnation", first)
+	}
 	got, ok, err := node.ReadIdentity(dir)
-	if err != nil || !ok || got != want {
+	if err != nil || !ok || got != first {
 		t.Fatalf("ReadIdentity = %+v, %v, %v", got, ok, err)
 	}
-	if err := node.EnsureIdentity(dir, want); err != nil {
+	again, err := node.EnsureIdentity(dir, want)
+	if err != nil {
 		t.Fatalf("restart with the same identity: %v", err)
 	}
+	if again != first {
+		t.Fatalf("restart changed the identity: %+v -> %+v", first, again)
+	}
 	for _, bad := range []node.Identity{{NodeID: 3, ClusterID: 9}, {NodeID: 2, ClusterID: 10}} {
-		if err := node.EnsureIdentity(dir, bad); !errors.Is(err, node.ErrIdentityMismatch) {
+		if _, err := node.EnsureIdentity(dir, bad); !errors.Is(err, node.ErrIdentityMismatch) {
 			t.Errorf("EnsureIdentity(%+v) = %v, want ErrIdentityMismatch", bad, err)
 		}
 	}
@@ -142,8 +150,61 @@ func TestIdentityRefusesWALWithoutIdentity(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, node.WALDir, "wal-0000000000000001-0000000000000001.seg"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := node.EnsureIdentity(dir, node.Identity{NodeID: 1, ClusterID: 1}); !errors.Is(err, node.ErrIdentityMismatch) {
+	if _, err := node.EnsureIdentity(dir, node.Identity{NodeID: 1, ClusterID: 1}); !errors.Is(err, node.ErrIdentityMismatch) {
 		t.Fatalf("err = %v, want ErrIdentityMismatch", err)
+	}
+}
+
+// D-32 (WBS 6.4.2): a data directory that kept its identity file but lost its
+// WAL is refused: the node forgot its votes and acknowledged entries.
+func TestIdentityRefusesLostState(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := node.EnsureIdentity(dir, node.Identity{NodeID: 1, ClusterID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(dir, node.WALDir)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := node.EnsureIdentity(dir, node.Identity{NodeID: 1, ClusterID: 1}); !errors.Is(err, node.ErrStateLost) {
+		t.Fatalf("err = %v, want ErrStateLost", err)
+	}
+}
+
+// D-32: a wiped data directory gets a new incarnation, which is how peers
+// recognise a member that came back empty under its old ID.
+func TestIdentityNewIncarnationAfterWipe(t *testing.T) {
+	dir := t.TempDir()
+	a, err := node.EnsureIdentity(dir, node.Identity{NodeID: 1, ClusterID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	b, err := node.EnsureIdentity(dir, node.Identity{NodeID: 1, ClusterID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Incarnation == b.Incarnation {
+		t.Fatal("a recreated data directory kept its incarnation")
+	}
+}
+
+// An identity file written before M6 gets an incarnation on the next start.
+func TestIdentityUpgradeAddsIncarnation(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, node.WALDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, node.IdentityFile), []byte(`{"node_id":1,"cluster_id":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := node.EnsureIdentity(dir, node.Identity{NodeID: 1, ClusterID: 1})
+	if err != nil || got.Incarnation == 0 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if again, _ := node.EnsureIdentity(dir, node.Identity{NodeID: 1, ClusterID: 1}); again.Incarnation != got.Incarnation {
+		t.Fatal("the incarnation was not persisted")
 	}
 }
 
@@ -152,7 +213,7 @@ func TestIdentityCorruptFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, node.IdentityFile), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := node.EnsureIdentity(dir, node.Identity{NodeID: 1, ClusterID: 1}); err == nil {
+	if _, err := node.EnsureIdentity(dir, node.Identity{NodeID: 1, ClusterID: 1}); err == nil {
 		t.Fatal("a corrupt identity file must be refused, not overwritten")
 	}
 }

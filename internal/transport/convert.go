@@ -145,6 +145,8 @@ func VoteRequestToProto(clusterID uint64, m raft.Message) *raftkvv1.RequestVoteR
 		LastLogIndex: m.Index,
 		LastLogTerm:  m.LogTerm,
 		PreVote:      m.Type == raft.MsgPreVote,
+		// Set after TimeoutNow: voters skip the leader-stickiness check.
+		LeadershipTransfer: isTransferVote(m),
 	}
 }
 
@@ -154,7 +156,7 @@ func VoteRequestFromProto(r *raftkvv1.RequestVoteRequest, to uint64) raft.Messag
 	if r.GetPreVote() {
 		typ = raft.MsgPreVote
 	}
-	return raft.Message{
+	m := raft.Message{
 		Type:    typ,
 		To:      to,
 		From:    r.GetCandidateId(),
@@ -162,6 +164,10 @@ func VoteRequestFromProto(r *raftkvv1.RequestVoteRequest, to uint64) raft.Messag
 		Index:   r.GetLastLogIndex(),
 		LogTerm: r.GetLastLogTerm(),
 	}
+	if r.GetLeadershipTransfer() && typ == raft.MsgVote {
+		m.Context = raft.TransferContext
+	}
+	return m
 }
 
 // VoteResponseToProto converts a MsgVoteResp or MsgPreVoteResp.

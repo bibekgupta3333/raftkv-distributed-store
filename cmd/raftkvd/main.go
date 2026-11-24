@@ -52,7 +52,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	// Blocks until SIGTERM or SIGINT, then shuts down gracefully (D-33: any
 	// fsync error inside exits immediately instead).
-	if err := node.RunUntilSignal(n.Node); err != nil {
+	if err := node.RunUntilSignal(n.Node); errors.Is(err, node.ErrRemoved) {
+		_, _ = fmt.Fprintln(stderr, "raftkvd:", err)
+		return exitOK // D-31: a removed member stops for good
+	} else if err != nil {
 		_, _ = fmt.Fprintln(stderr, "raftkvd:", err)
 		return exitFailed
 	}
@@ -67,6 +70,7 @@ func refusesToStart(err error) bool {
 	for _, target := range []error{
 		node.ErrIdentityMismatch, wal.ErrCorrupt, node.ErrAppliedOutsideLog,
 		wal.ErrFormatVersion, storage.ErrSchemaVersion, snapshot.ErrFormat,
+		node.ErrStateLost, node.ErrRemoved, // D-32, D-31
 	} {
 		if errors.Is(err, target) {
 			return true

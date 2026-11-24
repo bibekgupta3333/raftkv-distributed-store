@@ -29,7 +29,7 @@ func clusterClient(t *testing.T, addr string) raftkvv1.ClusterClient {
 }
 
 // D-48: Cluster.Status reports each member's local Raft view; the leader adds
-// per-follower progress. The membership RPCs stay UNIMPLEMENTED until M6.
+// per-follower progress..
 func TestClusterStatus(t *testing.T) {
 	c := kvtest.New(t, 3, kvtest.Options{})
 	lead := c.Leader(15 * time.Second)
@@ -84,9 +84,6 @@ func TestClusterStatus(t *testing.T) {
 	_, err = cc.Status(ctx, &raftkvv1.StatusRequest{Header: &raftkvv1.RequestHeader{ClusterId: 999}})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("Status with a foreign cluster ID: %v, want FAILED_PRECONDITION", err)
-	}
-	if _, err := cc.AddLearner(ctx, &raftkvv1.AddLearnerRequest{}); status.Code(err) != codes.Unimplemented {
-		t.Fatalf("AddLearner: %v, want UNIMPLEMENTED until M6", err)
 	}
 }
 

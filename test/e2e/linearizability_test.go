@@ -95,6 +95,33 @@ func linFaults(hold time.Duration) []linFault {
 func TestLinearizableKVUnderFaults(t *testing.T) {
 	cycles := pick(1, 6, "E2E_LIN_CYCLES")
 	c := Start(t, "linearizability")
+	runLinearizable(t, c, 200, func(wl *linearizability.Workload) {
+		const hold = 3 * time.Second
+		r := rand.New(rand.NewPCG(seed(), 0x4c494e)) // "LIN"
+		for cycle := range cycles {
+			faults := linFaults(hold)
+			if cycle > 0 {
+				epoch := wl.NextEpoch()
+				r.Shuffle(len(faults), func(i, j int) { faults[i], faults[j] = faults[j], faults[i] })
+				c.Faults.Logf("linearizability cycle %d/%d epoch=%d", cycle+1, cycles, epoch)
+				time.Sleep(time.Second)
+			}
+			for _, f := range faults {
+				c.Faults.Logf("linearizability fault: %s (ops so far %d)", f.name, wl.Ops())
+				f.run(c)
+				time.Sleep(3 * time.Second) // quiet gap: the cluster recovers, clients catch up
+			}
+		}
+	})
+}
+
+// runLinearizable runs the recorded Porcupine workload against the cluster's
+// five client endpoints while nemesis runs on the test goroutine, then checks
+// the history (0 violations, at least minOK successful operations, every
+// operation kind present) and that the live members still commit and
+// converge. Removed slots simply stop answering; the clients move on.
+func runLinearizable(t *testing.T, c *Cluster, minOK int, nemesis func(wl *linearizability.Workload)) {
+	t.Helper()
 	c.WaitLeader(30 * time.Second)
 
 	eps := make([]string, NumNodes)
@@ -147,23 +174,9 @@ func TestLinearizableKVUnderFaults(t *testing.T) {
 		wl.Run(runCtx, func(i int) linearizability.KV { return kvs[i] })
 	}()
 
-	const hold = 3 * time.Second
-	r := rand.New(rand.NewPCG(seed(), 0x4c494e)) // "LIN"
 	time.Sleep(2 * time.Second)
-	for cycle := range cycles {
-		faults := linFaults(hold)
-		if cycle > 0 {
-			epoch := wl.NextEpoch()
-			r.Shuffle(len(faults), func(i, j int) { faults[i], faults[j] = faults[j], faults[i] })
-			c.Faults.Logf("linearizability cycle %d/%d epoch=%d", cycle+1, cycles, epoch)
-			time.Sleep(time.Second)
-		}
-		for _, f := range faults {
-			c.Faults.Logf("linearizability fault: %s (ops so far %d)", f.name, wl.Ops())
-			f.run(c)
-			time.Sleep(3 * time.Second) // quiet gap: the cluster recovers, clients catch up
-		}
-	}
+	nemesis(wl)
+	time.Sleep(2 * time.Second) // some load on the final configuration
 	stop()
 	<-wlDone
 	c.Heal()
@@ -189,7 +202,7 @@ func TestLinearizableKVUnderFaults(t *testing.T) {
 		t.Fatalf("history is not linearizable (%s): see %s and %s", rep.Verdict, html,
 			filepath.Join(c.OutDir, "history.jsonl"))
 	}
-	if rep.Stats.OK < 200 {
+	if rep.Stats.OK < minOK {
 		t.Fatalf("only %d operations succeeded; the run proves little", rep.Stats.OK)
 	}
 	for _, kind := range []string{"put", "get", "delete", "cas-swapped", "cas-failed", "range-page"} {

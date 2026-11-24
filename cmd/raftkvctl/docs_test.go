@@ -12,11 +12,16 @@ import (
 func TestConfigurationDocRaftkvctl(t *testing.T) {
 	doc := docscheck.ReadDoc(t)
 	for heading, invocations := range map[string][][]string{
-		"### raftkvctl put, get, del":    {{"put"}, {"get"}, {"del"}},
-		"### raftkvctl cas":              {{"cas"}},
-		"### raftkvctl range":            {{"range"}},
-		"### raftkvctl debug state-hash": {{"debug", "state-hash"}},
-		"### raftkvctl debug wal-dump":   {{"debug", "wal-dump"}},
+		"### raftkvctl put, get, del":      {{"put"}, {"get"}, {"del"}},
+		"### raftkvctl cas":                {{"cas"}},
+		"### raftkvctl range":              {{"range"}},
+		"### raftkvctl debug state-hash":   {{"debug", "state-hash"}},
+		"### raftkvctl debug wal-dump":     {{"debug", "wal-dump"}},
+		"### raftkvctl member list":        {{"member", "list"}},
+		"### raftkvctl member add-learner": {{"member", "add-learner"}},
+		"### raftkvctl member promote":     {{"member", "promote"}},
+		"### raftkvctl member remove":      {{"member", "remove"}},
+		"### raftkvctl member transfer":    {{"member", "transfer"}, {"leader", "transfer"}},
 	} {
 		var flags []string
 		for _, args := range invocations {

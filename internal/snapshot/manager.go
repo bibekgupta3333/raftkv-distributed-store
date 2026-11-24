@@ -34,7 +34,10 @@ type Config struct {
 	// Store is the live state machine.
 	Store     *storage.Store
 	ClusterID uint64
-	// Members is the membership recorded in every snapshot (static until M6).
+	// Members is the bootstrap membership, recorded in snapshots of a state
+	// machine that has no member table yet (none for a node that joined).
+	// Otherwise the table applied at the snapshot's index is recorded
+	// (WBS 6.1.6).
 	Members []*raftkvv1.Member
 	// Keep is how many complete snapshots to retain (DefaultKeep if 0).
 	Keep int
@@ -198,8 +201,12 @@ func (m *Manager) seal(dir string, index, term uint64) (*Meta, error) {
 		return nil, err
 	}
 	ai, at := ro.Applied(), ro.AppliedTerm()
+	members, merr := ro.Membership() // WBS 6.1.6: the configuration at index
 	if err := ro.Close(); err != nil {
 		return nil, err
+	}
+	if merr != nil {
+		return nil, merr
 	}
 	if ai != index || at != term {
 		return nil, fmt.Errorf("snapshot: checkpoint holds applied %d/%d, want %d/%d", ai, at, index, term)
@@ -208,7 +215,12 @@ func (m *Manager) seal(dir string, index, term uint64) (*Meta, error) {
 		ClusterId:         m.cfg.ClusterID,
 		LastIncludedIndex: index,
 		LastIncludedTerm:  term,
-		Config:            &raftkvv1.ClusterConfig{Members: m.cfg.Members},
+	}
+	switch {
+	case members != nil:
+		meta.Config = members
+	case len(m.cfg.Members) > 0:
+		meta.Config = &raftkvv1.ClusterConfig{Members: m.cfg.Members} // bootstrap, before any change
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {

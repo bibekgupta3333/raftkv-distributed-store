@@ -22,19 +22,23 @@ type StatusMember interface {
 	SnapshotIndex() uint64
 }
 
-// Cluster implements raftkvv1.ClusterServer. Only Status is served; the
-// membership RPCs (AddLearner, PromoteLearner, RemoveMember,
-// TransferLeadership, ListMembers) answer UNIMPLEMENTED until M6.
+// Cluster implements raftkvv1.ClusterServer (D-23): Status here, the
+// membership RPCs in cluster_admin.go.
 type Cluster struct {
 	raftkvv1.UnimplementedClusterServer
 	member StatusMember
 	reader Reader
+	fwd    *forwarder
 }
 
-// NewCluster returns the Cluster service.
+// NewCluster returns the Cluster service. Membership RPCs need member to
+// implement [Admin] (cluster_admin.go); otherwise they answer UNIMPLEMENTED.
 func NewCluster(member StatusMember, reader Reader) *Cluster {
-	return &Cluster{member: member, reader: reader}
+	return &Cluster{member: member, reader: reader, fwd: newForwarder()}
 }
+
+// Close drops the forwarding connections.
+func (s *Cluster) Close() { s.fwd.close() }
 
 // Register adds the service to a gRPC server.
 func (s *Cluster) Register(r grpc.ServiceRegistrar) { raftkvv1.RegisterClusterServer(r, s) }

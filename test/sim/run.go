@@ -29,6 +29,9 @@ func (r Result) String() string {
 	if r.Stats.Snapshots > 0 {
 		s += fmt.Sprintf(" snapshots=%d sent=%d installed=%d", r.Stats.Snapshots, r.Stats.SnapsSent, r.Stats.SnapsInstalled)
 	}
+	if r.Stats.ConfChanges+r.Stats.ConfRejected+r.Stats.Transfers > 0 {
+		s += fmt.Sprintf(" conf=%d refused=%d transfers=%d", r.Stats.ConfChanges, r.Stats.ConfRejected, r.Stats.Transfers)
+	}
 	if r.Violation != nil {
 		s += " FAIL: " + r.Violation.Error()
 	}
