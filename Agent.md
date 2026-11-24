@@ -7,14 +7,12 @@ matter; speed does not. Don't add benchmarks, performance tuning, or production-
 
 ## Current phase
 
-**v1.0: M0–M7 implemented.** The open release items are in `WBS.md` and the Definition of Done walk in `docs/implementation-roadmap.md` §5.
+**v1.0: all milestones (M0–M7) are built.** Milestones and their scope are listed in `docs/design-decisions.md`.
 
-## Sources of truth
+## Source of truth
 
-1. `docs/design-decisions.md`: binding decisions (`D-xx`) and milestones M0–M7. Never contradict it silently. To
-   change a decision, edit its entry, log it in `CHANGELOG.md`, and update the docs that cite it.
-2. `docs/implementation-roadmap.md`: what each milestone builds and its exit criteria.
-3. `WBS.md`: the task checklist. Tick boxes in the same change that completes the work.
+`docs/design-decisions.md`: binding decisions (`D-xx`) and milestones M0–M7. Never contradict it silently. To
+change a decision, edit its entry, log it in `CHANGELOG.md`, and update the docs that cite it.
 
 ## Rules
 
@@ -28,7 +26,6 @@ matter; speed does not. Don't add benchmarks, performance tuning, or production-
 
 - `CHANGELOG.md`: add an entry under `[Unreleased]`.
 - `memory.md`: record non-obvious reasoning, gotchas, and failed approaches.
-- `WBS.md`: tick finished items and update the progress table.
 
 ## Commands
 

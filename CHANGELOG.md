@@ -9,6 +9,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 - README: a "Demo" section with real screenshots from a 5-pod kind cluster: start, replication, killing the leader,
   killing a second node, restore and catch-up, plus the Grafana dashboard (`docs/images/demo/`).
+- README rewritten: walkthrough video, overview, detailed features, architecture diagrams, write and read paths,
+  testing, observability, project layout, and a note against force-deleting pods.
+- Removed `WBS.md` and `docs/implementation-roadmap.md` now that v1.0 is built; the milestone list stays in
+  `docs/design-decisions.md`. Task IDs such as "WBS 7.4.2" in code comments are historical labels.
 
 ## [1.0.0] - 2026-11-24
 

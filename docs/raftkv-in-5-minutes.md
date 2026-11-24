@@ -3,7 +3,7 @@
 A learning project: a key-value database with Raft built from scratch. It runs on **5 nodes** (all on your laptop), keeps working when **any 2 fail**, and never loses an acknowledged write or returns a stale read.
 Status: **v1.0, built and tested** (milestones M0–M7). Speed is not a goal. Details live in the other files in [docs/](.).
 
-**Contents:** [Features](#1-features) · [Architecture](#2-architecture) · [System Design](#3-system-design) · [Database](#4-database-design) · [Sequences](#5-sequence-design) · [Observer UI](#6-observer-frontend) · [E2E Testing](#7-simple-e2e-testing) · [WBS](#8-wbs-checklist)
+**Contents:** [Features](#1-features) · [Architecture](#2-architecture) · [System Design](#3-system-design) · [Database](#4-database-design) · [Sequences](#5-sequence-design) · [Observer UI](#6-observer-frontend) · [E2E Testing](#7-simple-e2e-testing)
 
 ---
 
@@ -232,36 +232,3 @@ It runs in GitHub Actions on every PR. The observer UI (section 6) runs in the s
 - `make chaos-up && make chaos`: Chaos Mesh fault campaign on kind.
 
 Nightly CI runs a longer kind + Chaos Mesh run. Pass = 0 linearizability violations; failing histories and seeds are saved for replay.
-
-## 8. WBS (Checklist)
-
-- **M0 — Repo, tooling, proto skeleton (1 wk)**
-  - [x] Repo, Makefile, lint, CI
-  - [x] gRPC protos
-- **M1 — Raft core + simulator (5 wk)**
-  - [x] Leader election and log replication
-  - [x] Deterministic simulator with seed replay
-- **M2 — WAL + gRPC transport + multi-process cluster (4 wk)**
-  - [x] Durable WAL
-  - [x] gRPC transport between nodes
-  - [x] docker-compose cluster + e2e harness
-- **M3 — Pebble state machine + basic KV (2.5 wk)**
-  - [x] Apply committed entries to Pebble
-  - [x] Put/Get/Delete end to end
-- **M4 — Linearizable reads, sessions, full KV API (3.5 wk)**
-  - [x] ReadIndex / lease reads
-  - [x] Client sessions (exactly-once)
-  - [x] Full KV API (CAS, Range)
-- **M5 — Snapshots + follower recovery (2.5 wk)**
-  - [x] Snapshots + log compaction
-  - [x] Catch up lagging followers
-- **M6 — Membership changes + leadership transfer (3 wk)**
-  - [x] Add/remove node
-  - [x] Leadership transfer
-- **M7 — Kubernetes, observer UI, chaos, v1.0 (3.5 wk)**
-  - [x] Kubernetes on kind
-  - [x] Observer UI (D-48) + one Grafana dashboard
-  - [x] Chaos Mesh nightly run (3 green nights in a row still to come)
-
-Full 201-task checklist: [WBS.md](../WBS.md)
-

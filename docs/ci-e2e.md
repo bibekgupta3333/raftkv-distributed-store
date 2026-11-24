@@ -26,8 +26,7 @@ edges.
 | `sim` | `make sim SEEDS=500` with the `full`, `snapshot` and `membership` profiles. Every run also replays `test/sim/regressions/seeds.txt`. Failing-seed traces (`out/sim/`) are uploaded |
 | `e2e-short` | `make e2e E2E_PROFILE=pr E2E_SEED=<PR number>` (30 min timeout): the 5-node compose cluster and the `test/e2e` suite at PR sizes (table 1.3). `out/e2e/` is always uploaded (30 days) |
 
-The proto drift check was proven once with a throwaway PR that hand-edited a generated file (M0 exit criterion 3;
-see the M0 exit evidence in implementation-roadmap.md).
+The proto drift check was proven once with a throwaway PR that hand-edited a generated file (during M0).
 
 ### 1.2 `nightly.yml` jobs
 

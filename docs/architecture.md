@@ -3,7 +3,6 @@
 > Builds on [`design-decisions.md`](design-decisions.md); decision IDs (`D-xx`) refer to it.
 > Protocol behaviour: [`system-design.md`](system-design.md). API shapes: [`api-design.md`](api-design.md).
 > On-disk formats: [`storage-design.md`](storage-design.md). Tests: [`testing.md`](testing.md).
-> Delivery plan: [`implementation-roadmap.md`](implementation-roadmap.md).
 >
 > RaftKV is a learning project. Numbers below are configuration defaults, not performance targets.
 
