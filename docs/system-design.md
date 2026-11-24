@@ -127,7 +127,7 @@ sequenceDiagram
     F4-->>L: ack(match=120) frees slots
 ```
 
-Flow control (D-29): at most 256 in-flight appends per follower; at most 64 MiB of uncommitted log on the leader. Past that, `Propose` returns `ErrProposalDropped` and the client gets `RESOURCE_EXHAUSTED`.
+Flow control (D-29): at most 256 in-flight appends per follower; at most 64 MiB of uncommitted log on the leader; at most 1 MiB of entries per append message. Past the uncommitted limit, `Propose` returns `ErrProposalDropped`. The server reports that as `UNAVAILABLE` with outcome DEFINITE (never proposed), the same as having no leader, so the client backs off and retries.
 
 ### 2.4 Commit rule: only current-term entries
 
@@ -140,7 +140,7 @@ Older-term entries commit only indirectly, when a later current-term entry commi
 
 ### 2.5 Heartbeats
 
-Every tick the leader sends `Heartbeat{term, commit, ctx}`. Heartbeats reset follower timers, carry `commitIndex` to idle followers, and carry the ReadIndex context (§3.1). Replies mark `recentActive`.
+Every tick the leader sends `Heartbeat{term, commit, ctx}`. Heartbeats reset follower timers, carry the commit index to idle followers, and carry the ReadIndex context (§3.1). Replies mark `recentActive`. The commit in a heartbeat is `min(match, commitIndex)` for that follower, so a follower is never told to commit past what it holds; a follower also ignores a heartbeat commit beyond its last index (the wiped-follower case, §5.2).
 
 ---
 
@@ -315,30 +315,33 @@ The **WAL is the source of truth** (D-03). Pebble can lose its unflushed memtabl
 ### 6.1 Procedure
 
 ```
-startup(dataDir):
-  1. flock dataDir (no two processes on one volume).
-  2. Read identity (node_id, cluster_id). Missing + empty dir -> §7.5.
-  3. Open WAL: check every record's CRC32C.
+startup(dataDir):   // server.OpenKVNode + node.New; storage-design §5 has every step
+  1. Read IDENTITY (node_id, cluster_id); a mismatch with the config refuses to start.
+     Missing -> write it (bootstrap). Pebble's LOCK is the only guard against two processes.
+  2. Prepare sm/: follow sm/CURRENT, delete orphan sm/db-* and temp files; a pre-M5 flat
+     sm/ is refused. Check on-disk format versions (WAL, Pebble schema, snapshot meta).
+  3. Open Pebble at sm/CURRENT, read appliedIndex_p (= its durable applied index).
+  4. Open the snapshot store: newest complete snapshot; delete tmp-* and incoming/.
+  5. Open the WAL: check every record's CRC32C.
        - Bad record at the very end of the last segment, nothing valid after it -> torn tail:
          cut it off, fsync, log a warning.
        - Bad record anywhere else -> refuse to start (D-33). Never auto-truncate: that could drop
          entries this node already acknowledged.
-  4. Load the newest valid snapshot metadata.
-  5. Open Pebble, read appliedIndex_p. Check WAL firstIndex - 1 <= appliedIndex_p <= WAL lastIndex,
-     else fail-stop.
-  6. Rebuild the core: HardState from WAL, log = snapshot + WAL entries,
-     commit = max(HardState.commit, snapshot.index).
-  7. Re-apply (appliedIndex_p, commit] through the normal applier BEFORE serving clients.
-  8. Start as follower with a fresh random timeout. Entries above commit stay; the leader
-     will confirm or overwrite them.
-  9. Ready for clients once it knows the leader and has caught up (D-46).
+  6. Reconcile: appliedIndex_p above the WAL (or a term mismatch at it) means an install
+     crashed after the CURRENT swap -> write the missing reset marker, raise commit and term.
+     appliedIndex_p < WAL firstIndex - 1 (D-30 broken) -> fail-stop.
+     commit = max(HardState.commit, appliedIndex_p).
+  7. Start the core as a follower with a fresh random timeout, applied = appliedIndex_p.
+     The Ready loop re-applies (appliedIndex_p, commit] in order. Entries above commit stay;
+     the leader will confirm or overwrite them.
+  8. Ready for clients once it knows the leader and has caught up (D-46).
 ```
 
 ### 6.2 Why replay is exact
 
 - `appliedIndex_p` names the last entry in Pebble. Replay starts at the next one, so nothing is applied twice.
 - Entries in `(appliedIndex_p, commit]` were applied before the crash but lost with the memtable. Apply is deterministic, so redoing them gives the same result.
-- **WAL trim rule (D-30):** the WAL must never drop an entry above Pebble's **flushed** `appliedIndex`, or step 7 would find a gap. So the snapshotter flushes first and trims only to `min(snapIndex, flushedAppliedIndex)`.
+- **WAL trim rule (D-30):** the WAL must never drop an entry above Pebble's **flushed** `appliedIndex`, or step 7 would find a gap. So the node flushes first and trims only to `min(snapIndex, flushedAppliedIndex) − retainTail`.
 
 ### 6.3 Torn writes and corruption
 

@@ -70,6 +70,10 @@ jobs:
           SEED="${BASE:-$(( (GITHUB_RUN_ID % 1000000) * 1000000 ))}"
           echo "profile=full first seed=$SEED seeds=10000 race=on"
           make sim SEEDS=10000 SEED="$SEED" FAULTS=full SIMRACE=-race
+      # M4 exit criterion 5 (WBS 4.3.6): identical session-table hashes across
+      # replicas for 10,000 seeds crossing the expiry time (PR CI runs 1,000).
+      - name: session table determinism, 10,000 seeds
+        run: go test ./internal/storage/ -run TestSessionTableDeterministic -session-seeds=10000 -count=1 -v -timeout=30m
       - name: upload failing-seed traces
         if: failure()
         uses: actions/upload-artifact@v4

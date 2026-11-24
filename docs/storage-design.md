@@ -36,8 +36,8 @@ Little-endian.
 | 0 | 8 | `magic` | ASCII `RKVWAL01`: `RKVWAL` plus the format version as two digits (§10) |
 | 8 | 8 | `seq` | must match the file name |
 | 16 | 8 | `first_index` | must match the file name |
-| 24 | 8 | `cluster_id` | must match `META` |
-| 32 | 8 | `member_id` | must match `META` |
+| 24 | 8 | `cluster_id` | must match the node's `cluster_id` (config and `IDENTITY`) |
+| 32 | 8 | `member_id` | must match the node's ID (config and `IDENTITY`) |
 | 40 | 20 | `reserved` | zero |
 | 60 | 4 | `header_crc` | CRC32C over bytes `[0, 60)` |
 
@@ -55,7 +55,7 @@ Records start at offset 64 and are **8-byte aligned**.
 | 9 | 3 | `reserved` | zero |
 | 12 | 8 | `term` | Raft term (meaning depends on type) |
 | 20 | 8 | `index` | Raft index (meaning depends on type) |
-| 28 | `L` | `payload` | protobuf |
+| 28 | `L` | `payload` | type-specific bytes (§1.4) |
 | 28+`L` | 0–7 | padding | zeros to the next 8-byte boundary |
 
 The CRC covers `length`, so a flipped length bit is caught. `term` and `index` are in the fixed header, so recovery can scan without decoding protobuf.
@@ -64,8 +64,8 @@ The CRC covers `length`, so a flipped length bit is caught. `term` and `index` a
 
 | `type` | Name | `term` / `index` | Payload | Written when |
 |--------|------|------------------|---------|--------------|
-| 1 | `ENTRY` | entry term / index | `raftkv.v1.Entry` ([api-design.md](api-design.md) §8.1) | Each appended log entry |
-| 2 | `HARD_STATE` | term / commit | `HardState{term, voted_for, commit}` | When term or vote changes, and with any Ready that advanced commit |
+| 1 | `ENTRY` | entry term / index | 4-byte entry type (uint32 LE) ‖ entry data (an encoded `Command` since M3) | Each appended log entry |
+| 2 | `HARD_STATE` | term / commit | 8-byte `voted_for` (uint64 LE) | When term or vote changes, and with any Ready that advanced commit |
 | 3 | `SNAPSHOT_MARKER` | snapshot term / index | 8-byte flags: bit 0 = reset (install). `config` joins with M6 | After a snapshot is installed (reset: drop every entry) or the log is trimmed (drop entries ≤ index) |
 | 4 | `MEMBERSHIP` | config entry's term / index | `ClusterConfig` | In every segment preamble, so deleting old segments never loses the config |
 | 5–255 | reserved | | | Unknown type is corruption, never skipped |
@@ -165,7 +165,10 @@ How it is enforced:
    - after our own synchronous `db.Flush()`: read the last applied batch's index `a` first, flush, then set `durableAppliedIndex = max(durableAppliedIndex, a)`.
 
    Pebble's background flushes are not counted. That is conservative and simple.
-2. **Trimming computes its own bound.** It always does flush → update → compute → delete. `wal.Truncate(upTo)` asserts `upTo ≤ durableAppliedIndex` and `upTo ≤ snapshotIndex` and **panics** otherwise, so a caller bug cannot delete needed entries.
+2. **Trimming computes its own bound.** It always does flush → update → compute → delete (`storage.TruncateWAL`,
+   `storage.TruncationBound`). `walstore.CompactTo(upTo)` refuses (`ErrBeyondSnapshot`) to trim past the local
+   snapshot, so a caller bug cannot delete entries no snapshot covers. The node trims to
+   `min(snapshotIndex, durableAppliedIndex) − snapshot_retain_entries` right after taking a snapshot.
 3. **Snapshot install** sets both values to the installed index. The installed Pebble dir is fully on disk.
 4. **Backstop.** Recovery checks `A ≥ S` (§5 step 6). A violation is fatal and points straight at an INV-TRUNC bug.
 5. **Tests.** The simulator and fault tests kill the process around flush and trim and assert recovery never hits `A < S` ([testing.md](testing.md)).
@@ -205,7 +208,7 @@ A one-byte prefix separates namespaces. Client keys can never collide with inter
 | `m/sessionClock` | uint64 LE | When a command's leader-stamped time (D-27) is above it. The session "now": the max stamped time applied, so it never goes backwards across leaders |
 | `m/membership` | `ClusterConfig` | In the batch of a conf-change entry |
 | `m/removedMembers` | list of IDs | In the batch of a `REMOVE_MEMBER` (D-31, D-38) |
-| `m/clusterID` | uint64 LE | Once, at bootstrap |
+| `m/clusterID` | uint64 LE | Not written as built: the cluster ID lives in `IDENTITY` and every WAL segment header |
 | `m/schemaVersion` | uint64 LE | Once, when the database is first opened; checked on every open (§10) |
 
 `mod_revision` is the index of the entry being applied. A failed CAS still advances `appliedIndex` but changes no user key.
@@ -285,7 +288,7 @@ After the `last=true` chunk with every file verified:
 
 ## 5. Crash recovery
 
-1. **Lock and identity.** `flock(LOCK)` so two processes never share a data dir. Read and check `META` (`cluster_id`, `member_id`). If `META` is missing: bootstrap or join as configured, but an empty data dir **never** reuses a member ID that may have voted (D-32).
+1. **Identity.** Read and check `IDENTITY` (JSON `{node_id, cluster_id}`, written once with a temp file, fsync and rename). A mismatch with the configuration refuses to start (WBS 2.3.4). There is no separate `flock`: Pebble's own `LOCK` file in the live `sm/db-*` directory is what stops two processes from sharing a data dir. If `IDENTITY` is missing: bootstrap or join as configured, but an empty data dir **never** reuses a member ID that may have voted (D-32). As of M5 this is not enforced yet: a wiped member restarts empty under its old ID (M6, WBS 6.4.2).
 2. **Clean up** temp files (§4.5, `sm/CURRENT.tmp`).
 3. **Open Pebble** at `sm/<CURRENT>`. Read `A = m/appliedIndex`, `At = m/appliedTerm`, `Cfg_sm = m/membership`. If Pebble cannot open, exit 78.
 4. **Scan the WAL** in `seq` order, checking headers and CRCs:
@@ -302,15 +305,15 @@ After the `last=true` chunk with every file verified:
 7. **Commit.** `commit = max(HS.commit, A)`. If `commit > max(lastIndex, S)`, committed entries were lost: fatal.
 8. **Start the Raft core** as a follower with `HardState`, the log, the snapshot `(S, St)`, and the config.
 9. **Re-apply** `(A, commit]` in atomic batches. Sessions make this exact.
-10. **Serve.** Start the peer listener, then the client listener. Ready once the node knows a leader and has caught up (D-46).
+10. **Serve.** Start the gRPC listener (one listener for the peer and client services). Ready once the node knows a leader and has caught up (D-46).
 
 ```mermaid
 flowchart TD
-    A0([Process start]) --> A1[flock LOCK<br/>read META]
-    A1 -->|META missing| B0{Bootstrap or join?}
-    B0 -->|initial cluster| B1[Create META, empty Pebble,<br/>WAL seg 1 with preamble] --> A8
-    B0 -->|join| B2[Create META with new member id<br/>start as learner, await snapshot] --> A8
-    A1 -->|META ok| A2[Delete temp files:<br/>snap/tmp-*, snap/incoming/*,<br/>CURRENT.tmp, orphan sm/db-*]
+    A0([Process start]) --> A1[read IDENTITY]
+    A1 -->|IDENTITY missing| B0{Bootstrap or join?}
+    B0 -->|initial cluster| B1[Create IDENTITY, empty Pebble,<br/>WAL seg 1 with preamble] --> A8
+    B0 -->|join| B2[Create IDENTITY with new member id<br/>start as learner, await snapshot] --> A8
+    A1 -->|IDENTITY ok| A2[Delete temp files:<br/>snap/tmp-*, snap/incoming/*,<br/>CURRENT.tmp, orphan sm/db-*]
     A2 --> A3[Open Pebble at sm/CURRENT<br/>read appliedIndex A, appliedTerm At]
     A3 -->|open fails| F1[[FATAL exit 78:<br/>state machine corrupt]]
     A3 --> A4[Scan WAL segments in seq order<br/>check header + CRC32C per record]
@@ -324,7 +327,7 @@ flowchart TD
     A7 -->|commit > lastIndex and > S| F4[[FATAL: committed entries lost]]
     A7 --> A8[Start Raft core as follower]
     A8 --> A9[Re-apply A+1..commit<br/>in atomic batches]
-    A9 --> A10[Start peer listener, then client listener]
+    A9 --> A10[Start the gRPC listener]
     A10 --> A11([Ready when leader known and caught up])
 ```
 
@@ -350,15 +353,15 @@ Summary:
 
 ```
 /var/lib/raftkv/                         # PVC mount (one per pod, D-16)
-├── LOCK                                 # flock; one raftkvd per dir
-├── META                                 # {cluster_id, member_id}; written once, CRC'd, fsynced
+├── IDENTITY                             # JSON {node_id, cluster_id}; written once, fsynced, then renamed into place
 ├── wal/
 │   ├── wal-0000000000000027-00000000004a1c21.seg   # sealed
 │   ├── wal-0000000000000028-00000000004b9e7f.seg   # sealed
 │   └── wal-0000000000000029-00000000004c4b41.seg   # active
 ├── sm/
 │   ├── CURRENT                          # name of the live Pebble dir (atomic-swap pointer)
-│   └── db-0000000000186a00/             # live Pebble (DisableWAL=true, so no *.log files)
+│   └── db-0000000000186a00/             # live Pebble (DisableWAL=true, so no *.log files); its LOCK is the only
+│                                        # guard against two raftkvd processes on one data dir
 │       ├── MANIFEST-000412
 │       └── 000398.sst  000405.sst  ...
 └── snap/
@@ -388,7 +391,7 @@ Summary:
 | 10 | PVC lost; pod restarts empty under the same name | `META` missing for an existing member | **Refuse to bootstrap** | Prevents vote amnesia | Remove old ID, re-add as learner (D-32) |
 | 11 | Data dir from another cluster or member | `cluster_id`/`member_id` mismatch | Refuse to start | Prevents mixing logs | Fix the volume binding |
 | 12 | Disk that lies about fsync | Undetectable locally | None | Raft safety breaks only if a **majority** lie | Out of scope |
-| 13 | Two processes on one dir | `flock(LOCK)` fails | Second process exits | Safe | Fix the deployment |
+| 13 | Two processes on one dir | Pebble's `LOCK` in `sm/db-*` is held | Second process fails to open Pebble and exits | Safe | Fix the deployment |
 | 14 | Data dir written by a newer (or older, incompatible) release | Unknown WAL, schema or snapshot format version (§10) | **Refuse to start** (exit 78) | Nothing misread | Run the release that wrote it |
 
 ---
