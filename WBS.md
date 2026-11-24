@@ -23,18 +23,18 @@ tasks, and every task aims at a working, tested feature.
 
 | Milestone | Theme | Done / Leaves | Est. weeks | Status |
 |-----------|-------|---------------|------------|--------|
-| M0 | Repo setup, tooling, protos | 14/15 | 1 | In progress |
-| M1 | Raft core + deterministic simulator | 36/39 | 5 | In progress |
-| M2 | WAL + gRPC transport + real 5-process cluster | 33/38 | 4 | In progress |
-| M3 | Pebble state machine + basic KV | 17/20 | 2.5 | In progress |
-| M4 | Linearizable reads, client sessions, full KV API | 23/25 | 3.5 | In progress |
-| M5 | Snapshots + follower catch-up | 16/18 | 2.5 | In progress |
-| M6 | Membership changes + leadership transfer | 0/21 | 3 | Not started |
-| M7 | Kubernetes, observer UI, chaos tests, v1.0 | 12/25 | 3.5 | In progress |
-| **Total** | | **151/201** | **25** | |
+| M0 | Repo setup, tooling, protos | 15/15 | 1 | Done (tag pending) |
+| M1 | Raft core + deterministic simulator | 39/39 | 5 | Done (tag pending) |
+| M2 | WAL + gRPC transport + real 5-process cluster | 38/38 | 4 | Done (tag pending) |
+| M3 | Pebble state machine + basic KV | 20/20 | 2.5 | Done (tag pending) |
+| M4 | Linearizable reads, client sessions, full KV API | 25/25 | 3.5 | Done (tag pending) |
+| M5 | Snapshots + follower catch-up | 18/18 | 2.5 | Done (tag pending) |
+| M6 | Membership changes + leadership transfer | 21/21 | 3 | Done (tag pending) |
+| M7 | Kubernetes, observer UI, chaos tests, v1.0 | 16/25 | 3.5 | In progress |
+| **Total** | | **192/201** | **25** | |
 
-M0–M3 are "In progress" only because their exit reviews (release tags, linked evidence) and a few e2e leaves are
-still open; all their feature work is merged (#2–#9).
+M0–M6 are done: every exit criterion is linked in docs/implementation-roadmap.md ("Exit evidence"). Only their
+release tags are pending; the proposed tag commits are listed in the PR that ticked the exit reviews.
 
 ---
 
@@ -56,9 +56,9 @@ still open; all their feature work is merged (#2–#9).
   - [x] 0.3.1 `buf.yaml` (lint STANDARD) and `buf.gen.yaml` → `buf lint` passes (#2)
   - [x] 0.3.2 `api/raftkv/v1/kv.proto`, `cluster.proto` (D-23), `raft.proto` (D-36) with messages per api-design.md → generates and compiles (#3)
   - [x] 0.3.3 Commit generated code and add a drift check (`make proto && git diff --exit-code`) (D-43) → CI fails on stale generated code (#2, #3)
-- [ ] **0.4 CI and exit review**
+- [x] **0.4 CI and exit review**
   - [x] 0.4.1 `.github/workflows/pr.yml`: Go cache, `make fmt-check lint build test race`, buf lint, proto drift check → green on `main` (#2)
-  - [ ] 0.4.2 M0 exit review: link evidence for each roadmap M0 exit criterion, update CHANGELOG.md and memory.md, tag `v0.0.1` → all criteria linked, tag exists
+  - [x] 0.4.2 M0 exit review: link evidence for each roadmap M0 exit criterion, update CHANGELOG.md and memory.md, tag `v0.0.1` → all criteria linked, tag exists (#24 drift proof, #PR; evidence in implementation-roadmap.md M0) (tag pending, see PR)
 
 ---
 
@@ -108,10 +108,10 @@ still open; all their feature work is merged (#2–#9).
   - [x] 1.8.1 Raft paper Figure 7 divergent logs converge, Figure 8 commit hazard handled → tests pass (#5)
   - [x] 1.8.2 Disruptive rejoin with PreVote on vs off (off shows term inflation) → both behaviors asserted (#5)
   - [x] 1.8.3 Leader isolation with CheckQuorum → step-down asserted (#5)
-- [ ] **1.9 M1 exit review**
-  - [ ] 1.9.1 Run 10,000 seeds with the full fault profile, race detector clean → 0 violations, CI run linked
-  - [ ] 1.9.2 Update architecture.md / system-design.md Raft core sections to match the code → diff reviewed
-  - [ ] 1.9.3 Update CHANGELOG.md and memory.md (core API, sim usage, bugs the sim found), tag `v0.1.0-alpha` → diff reviewed, tag exists
+- [x] **1.9 M1 exit review**
+  - [x] 1.9.1 Run 10,000 seeds with the full fault profile, race detector clean → 0 violations, CI run linked (#PR; nightly sim-race run 45302500294: 10,000 seeds, full profile, -race, 0 violations)
+  - [x] 1.9.2 Update architecture.md / system-design.md Raft core sections to match the code → diff reviewed (#PR)
+  - [x] 1.9.3 Update CHANGELOG.md and memory.md (core API, sim usage, bugs the sim found), tag `v0.1.0-alpha` → diff reviewed, tag exists (#PR) (tag pending, see PR)
 
 ---
 
@@ -150,20 +150,18 @@ still open; all their feature work is merged (#2–#9).
 - [x] **2.5 Packaging and local cluster**
   - [x] 2.5.1 Multi-stage Dockerfile (non-root, static binary) → image builds, runs `--version` (#8)
   - [x] 2.5.2 `deploy/compose/docker-compose.yml` with 5 nodes plus Prometheus, and `make cluster-up/down/logs` → cluster elects a leader (#8)
-- [ ] **2.6 E2E harness (test/e2e)**
+- [x] **2.6 E2E harness (test/e2e)**
   - [x] 2.6.1 Go e2e framework: start/stop compose, find leader, wait helpers → smoke test passes (#8)
   - [x] 2.6.2 Fault driver: `kill -9`, restart, SIGSTOP/SIGCONT → each fault works on one container (#8)
   - [x] 2.6.3 Fault driver: iptables partition and heal, `tc netem` delay/loss → partition test passes (#8)
   - [x] 2.6.4 Seeded fault schedule with a timestamped fault log → fault log uploaded as a CI artifact (#8)
   - [x] 2.6.5 Tests: leader elected on start, new leader after leader kill, minority stops committing and logs match after heal → pass (#8)
-  - [ ] 2.6.6 Test: 200 rounds of kill -9 and restart, no committed entry lost → passes
-    (partial: test added in #8; the PR job runs 20 rounds, the 200-round nightly run has not passed yet)
-  - [ ] 2.6.7 Add the short e2e job to `pr.yml` and a long e2e job to `nightly.yml` → both green
-    (partial: both jobs added in #8; `e2e-long` has not had a green night yet)
-- [ ] **2.9 M2 exit review**
-  - [ ] 2.9.1 Re-run sim 10,000 seeds and link evidence for every M2 exit criterion → all linked
-  - [ ] 2.9.2 Update storage-design.md (WAL as built), system-design.md (node loop), ci-e2e.md (jobs) → diffs reviewed
-  - [ ] 2.9.3 Update CHANGELOG.md and memory.md (WAL format, fsync gotchas, e2e tips), tag `v0.1.0` → diff reviewed, tag exists
+  - [x] 2.6.6 Test: 200 rounds of kill -9 and restart, no committed entry lost → passes (#8, #11; nightly e2e-long run 45293603026: 200 rounds, 400 acked entries on all 5 nodes)
+  - [x] 2.6.7 Add the short e2e job to `pr.yml` and a long e2e job to `nightly.yml` → both green (#8, #11; e2e-short green on main, nightly e2e-long green in run 45293603026)
+- [x] **2.9 M2 exit review**
+  - [x] 2.9.1 Re-run sim 10,000 seeds and link evidence for every M2 exit criterion → all linked (#PR; evidence in implementation-roadmap.md M2)
+  - [x] 2.9.2 Update storage-design.md (WAL as built), system-design.md (node loop), ci-e2e.md (jobs) → diffs reviewed (#PR)
+  - [x] 2.9.3 Update CHANGELOG.md and memory.md (WAL format, fsync gotchas, e2e tips), tag `v0.1.0` → diff reviewed, tag exists (#PR) (tag pending, see PR)
 
 ---
 
@@ -187,14 +185,13 @@ still open; all their feature work is merged (#2–#9).
   - [x] 3.3.1 Connect to all endpoints, cache the leader, follow `NOT_LEADER` hints → unit test with fake servers (#9)
   - [x] 3.3.2 Retry on retryable codes with backoff, bounded by the deadline → unit tests (#9)
   - [x] 3.3.3 `raftkvctl put/get/del` using the client library → e2e smoke (#9)
-- [ ] **3.4 Linearizability harness (test/linearizability)**
+- [x] **3.4 Linearizability harness (test/linearizability)**
   - [x] 3.4.1 History recorder (invoke/return times, client, op, result, unknown on timeout) → unit test (#9)
   - [x] 3.4.2 Porcupine KV model split per key, checker with a timeout (timeout = fail), HTML view on failure → known-bad history detected (#9)
-  - [ ] 3.4.3 Wire the recorder into e2e with leader kill, follower kill, and partition → checked histories, 0 violations
-    (partial: #9 runs it on an in-process 5-node gRPC cluster; the docker-compose e2e wiring is still open)
-- [ ] **3.9 M3 exit review**
-  - [ ] 3.9.1 Link evidence for every M3 exit criterion; update storage-design.md (key schema, durability) and api-design.md (implemented RPCs) → linked, diffs reviewed
-  - [ ] 3.9.2 Update CHANGELOG.md and memory.md, tag `v0.2.0` → diff reviewed, tag exists
+  - [x] 3.4.3 Wire the recorder into e2e with leader kill, follower kill, and partition → checked histories, 0 violations (#9 in-process, #18 docker e2e, #23 kind chaos with pod kills; 0 violations)
+- [x] **3.9 M3 exit review**
+  - [x] 3.9.1 Link evidence for every M3 exit criterion; update storage-design.md (key schema, durability) and api-design.md (implemented RPCs) → linked, diffs reviewed (#PR; evidence in implementation-roadmap.md M3)
+  - [x] 3.9.2 Update CHANGELOG.md and memory.md, tag `v0.2.0` → diff reviewed, tag exists (#PR) (tag pending, see PR)
 
 ---
 
@@ -229,9 +226,9 @@ still open; all their feature work is merged (#2–#9).
 - [x] **4.6 Linearizability coverage**
   - [x] 4.6.1 Porcupine models for CAS and Range → known-bad histories detected (#18)
   - [x] 4.6.2 e2e mixing Put/Get/Delete/CAS/Range with leader and follower reads under leader kill, pause, partition → 0 violations, runs nightly (#18)
-- [ ] **4.9 M4 exit review**
-  - [ ] 4.9.1 Link evidence for every M4 exit criterion; update api-design.md (final API) and system-design.md (read path, sessions) → linked, diffs reviewed (partial #18: evidence list and doc diffs in the PR body)
-  - [ ] 4.9.2 Update CHANGELOG.md and memory.md, tag `v0.3.0` → diff reviewed, tag exists
+- [x] **4.9 M4 exit review**
+  - [x] 4.9.1 Link evidence for every M4 exit criterion; update api-design.md (final API) and system-design.md (read path, sessions) → linked, diffs reviewed (#18, #PR; evidence in implementation-roadmap.md M4)
+  - [x] 4.9.2 Update CHANGELOG.md and memory.md, tag `v0.3.0` → diff reviewed, tag exists (#PR) (tag pending, see PR)
 
 ---
 
@@ -258,41 +255,41 @@ still open; all their feature work is merged (#2–#9).
 - [x] **5.5 Recovery scenarios (e2e)**
   - [x] 5.5.1 Wiped follower rejoins via snapshot and its state hash matches (20 runs); long-partitioned follower catches up past compaction → all pass (#17)
   - [x] 5.5.2 Add follower-wipe to the e2e fault driver and nightly; linearizability still passes → 0 violations (#17)
-- [ ] **5.9 M5 exit review**
-  - [ ] 5.9.1 Link evidence for every M5 exit criterion; add snapshot metrics (size, duration, installs) and update storage-design.md → linked, diff reviewed (partial #17: snapshot metrics and storage-design done)
-  - [ ] 5.9.2 Update CHANGELOG.md and memory.md, tag `v0.4.0` → diff reviewed, tag exists
+- [x] **5.9 M5 exit review**
+  - [x] 5.9.1 Link evidence for every M5 exit criterion; add snapshot metrics (size, duration, installs) and update storage-design.md → linked, diff reviewed (#17, #PR; evidence in implementation-roadmap.md M5)
+  - [x] 5.9.2 Update CHANGELOG.md and memory.md, tag `v0.4.0` → diff reviewed, tag exists (#PR) (tag pending, see PR)
 
 ---
 
 ## 6. M6 — Membership changes + leadership transfer
 
-- [ ] **6.1 Raft core membership**
-  - [ ] 6.1.1 Config-change entry (add learner, promote, remove) with versioned encoding → round-trip test
-  - [ ] 6.1.2 Config takes effect when appended, rolled back if the entry is truncated (D-31) → unit tests
-  - [ ] 6.1.3 One pending change at a time, first change only after a current-term commit → unit test plus sim that reproduces the bug without the fix
-  - [ ] 6.1.4 Learners replicate but don't vote or count toward quorum → unit tests
-  - [ ] 6.1.5 Leader removal: step down after committing its own removal; messages from removed nodes ignored (D-31) → unit and sim tests
-  - [ ] 6.1.6 Membership saved in WAL and snapshot metadata → restart test
-- [ ] **6.2 Leadership transfer**
-  - [ ] 6.2.1 `TransferLeadership(target)`: pause proposals, catch up target, send `TimeoutNow` → unit test
-  - [ ] 6.2.2 Abort after one election timeout and resume; drop the lease first if lease reads are on → unit tests
-  - [ ] 6.2.3 SIGTERM on the leader transfers leadership before shutdown → e2e test
-- [ ] **6.3 Sim coverage**
-  - [ ] 6.3.1 Random membership changes mixed with crashes and partitions, with a "no two disjoint majorities" invariant → 10,000 seeds pass, planted bug detected
-- [ ] **6.4 Cluster admin service (D-23)**
-  - [ ] 6.4.1 Random 64-bit member IDs, never reused (D-38) → unit test
-  - [ ] 6.4.2 Node with an empty disk refuses its old ID and must rejoin as a new learner (D-32) → test
-  - [ ] 6.4.3 `AddLearner` with dynamic peer registration in the transport → integration test
-  - [ ] 6.4.4 `PromoteLearner` with a catch-up check → refused when lagging, accepted when caught up
-  - [ ] 6.4.5 `RemoveMember`, `TransferLeadership`, `ListMembers`, `Status` handlers → integration tests
-  - [ ] 6.4.6 Second change while one is pending → rejected with `FAILED_PRECONDITION`
-  - [ ] 6.4.7 `raftkvctl member add-learner|promote|remove|transfer|list` → e2e smoke
-- [ ] **6.5 E2E scenarios**
-  - [ ] 6.5.1 Replace a node under load (learner → catch up → promote → remove old) → 0 linearizability violations
-  - [ ] 6.5.2 Scale 3 → 5 → 3 under load, plus membership changes in the nightly fault mix → 0 violations, nightly green
-- [ ] **6.9 M6 exit review**
-  - [ ] 6.9.1 Link evidence for every M6 exit criterion; write how-tos "replace a node", "scale 3 → 5", "transfer leadership" in system-design.md → linked, diff reviewed
-  - [ ] 6.9.2 Update CHANGELOG.md and memory.md, tag `v0.5.0` → diff reviewed, tag exists
+- [x] **6.1 Raft core membership**
+  - [x] 6.1.1 Config-change entry (add learner, promote, remove) with versioned encoding → round-trip test (#22)
+  - [x] 6.1.2 Config takes effect when appended, rolled back if the entry is truncated (D-31) → unit tests (#22)
+  - [x] 6.1.3 One pending change at a time, first change only after a current-term commit → unit test plus sim that reproduces the bug without the fix (#22)
+  - [x] 6.1.4 Learners replicate but don't vote or count toward quorum → unit tests (#22)
+  - [x] 6.1.5 Leader removal: step down after committing its own removal; messages from removed nodes ignored (D-31) → unit and sim tests (#22)
+  - [x] 6.1.6 Membership saved in WAL and snapshot metadata → restart test (#22)
+- [x] **6.2 Leadership transfer**
+  - [x] 6.2.1 `TransferLeadership(target)`: pause proposals, catch up target, send `TimeoutNow` → unit test (#22)
+  - [x] 6.2.2 Abort after one election timeout and resume; drop the lease first if lease reads are on → unit tests (#22)
+  - [x] 6.2.3 SIGTERM on the leader transfers leadership before shutdown → e2e test (#22)
+- [x] **6.3 Sim coverage**
+  - [x] 6.3.1 Random membership changes mixed with crashes and partitions, with a "no two disjoint majorities" invariant → 10,000 seeds pass, planted bug detected (#22)
+- [x] **6.4 Cluster admin service (D-23)**
+  - [x] 6.4.1 Random 64-bit member IDs, never reused (D-38) → unit test (#22)
+  - [x] 6.4.2 Node with an empty disk refuses its old ID and must rejoin as a new learner (D-32) → test (#22)
+  - [x] 6.4.3 `AddLearner` with dynamic peer registration in the transport → integration test (#22)
+  - [x] 6.4.4 `PromoteLearner` with a catch-up check → refused when lagging, accepted when caught up (#22)
+  - [x] 6.4.5 `RemoveMember`, `TransferLeadership`, `ListMembers`, `Status` handlers → integration tests (#22)
+  - [x] 6.4.6 Second change while one is pending → rejected with `FAILED_PRECONDITION` (#22)
+  - [x] 6.4.7 `raftkvctl member add-learner|promote|remove|transfer|list` → e2e smoke (#22)
+- [x] **6.5 E2E scenarios**
+  - [x] 6.5.1 Replace a node under load (learner → catch up → promote → remove old) → 0 linearizability violations (#22)
+  - [x] 6.5.2 Scale 3 → 5 → 3 under load, plus membership changes in the nightly fault mix → 0 violations, nightly green (#22)
+- [x] **6.9 M6 exit review**
+  - [x] 6.9.1 Link evidence for every M6 exit criterion; write how-tos "replace a node", "scale 3 → 5", "transfer leadership" in system-design.md → linked, diff reviewed (#22 how-tos in system-design §7.6–7.8, #PR; evidence in implementation-roadmap.md M6)
+  - [x] 6.9.2 Update CHANGELOG.md and memory.md, tag `v0.5.0` → diff reviewed, tag exists (#PR) (tag pending, see PR)
 
 ---
 
@@ -303,7 +300,7 @@ still open; all their feature work is merged (#2–#9).
   - [x] 7.1.2 Headless Service for peer DNS and a client Service → DNS resolves in kind (#13)
   - [x] 7.1.3 Node ID from the pod ordinal, stable across restarts; config from a ConfigMap → restart keeps the ID (#13)
   - [x] 7.1.4 Readiness (knows leader, caught up) and liveness (driver loop responds) probes (D-46) → probe behavior checked in kind (#13)
-  - [ ] 7.1.5 `preStop` hook that transfers leadership, grace period sized for it → rolling restart test (partial #13: preStop sleep + grace period; leadership transfer waits for M6)
+  - [ ] 7.1.5 `preStop` hook that transfers leadership, grace period sized for it → rolling restart test (partial #13, #22: preStop sleep + grace period; raftkvd hands leadership over on SIGTERM since #22; the rolling restart test is open with 7.4.5)
   - [x] 7.1.6 `kind` overlay and `make kind-up` script → 5-node cluster passes the e2e smoke test (#13)
 - [x] **7.2 Observer UI (D-48)**
   - [x] 7.2.1 `cmd/raftkv-observer`: polls `Cluster.Status` on all nodes every 500 ms and serves an embedded HTML page over SSE → page shows 5 node cards against the compose cluster (#12)
@@ -315,14 +312,15 @@ still open; all their feature work is merged (#2–#9).
   - [x] 7.4.1 Install Chaos Mesh on kind (`make chaos-up`) → Chaos Mesh pods running (#13)
   - [x] 7.4.2 `PodChaos` pod-kill manifests → applied in kind (#13)
   - [x] 7.4.3 `NetworkChaos` partition, delay, and loss manifests → applied in kind (#13)
-  - [ ] 7.4.4 Chaos driver: run a fault schedule while recording histories, then run Porcupine → one automated run, 0 violations
+  - [x] 7.4.4 Chaos driver: run a fault schedule while recording histories, then run Porcupine → one automated run, 0 violations (#23; nightly chaos run 45299681977: 925,159 ops, 0 violations)
   - [ ] 7.4.5 Rolling restart of the StatefulSet under load → 0 violations, each pod hands off leadership
   - [ ] 7.4.6 Add the kind + Chaos Mesh job to `nightly.yml` → 3 green nights in a row
-- [ ] **7.5 Hardening**
-  - [ ] 7.5.1 Fuzz tests for the WAL record decoder, snapshot metadata, and command envelope, run in nightly → 0 crashers
-  - [ ] 7.5.2 On-disk format version check (WAL, snapshot, Pebble schema), refuse unknown versions → tests
+    (partial #23: job added; green on dispatch, runs 45297525546 and 45299681977; no scheduled night yet)
+- [x] **7.5 Hardening**
+  - [x] 7.5.1 Fuzz tests for the WAL record decoder, snapshot metadata, and command envelope, run in nightly → 0 crashers (#21)
+  - [x] 7.5.2 On-disk format version check (WAL, snapshot, Pebble schema), refuse unknown versions → tests (#21)
 - [ ] **7.6 Documentation**
-  - [ ] 7.6.1 Configuration reference matching `--help` → doc matches flags
+  - [x] 7.6.1 Configuration reference matching `--help` → doc matches flags (#21)
   - [ ] 7.6.2 Final pass over architecture.md, system-design.md, api-design.md, storage-design.md, testing.md, ci-e2e.md → each matches v1.0
   - [ ] 7.6.3 README quick start (compose and kind) tried on a clean machine; known limitations listed (one Raft group, no Watch/transactions, no TLS/auth) → verified
 - [ ] **7.9 M7 exit review and v1.0**

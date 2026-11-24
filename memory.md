@@ -2,6 +2,46 @@
 
 Context and reasoning that isn't obvious from the docs or git history. Newest first.
 
+## 2026-11-24 — Exit reviews M0–M6, membership, chaos, hardening (PRs #21–#24)
+
+- **Exit reviews found doc drift, not code bugs.** The design docs still described the plan: separate client/peer
+  listeners (built: one gRPC listener, `:7000`), an async applier goroutine (built: apply runs inline in the Ready
+  loop), `META` + `flock` (built: `IDENTITY` JSON; Pebble's `LOCK` is the only two-process guard), protobuf WAL
+  payloads (built: raw bytes), and a CI layout with `pr-gate` and `report-failures` that was never built.
+- **"100 leader kills" has no dedicated test.** It was counted from the nightly e2e-long artifacts: match each
+  `kill-9` in the kill-restart fault log against the latest "raft state changed ... Leader" line in the node logs
+  (96 of 200 rounds), plus the Porcupine leader kills. Re-count the same way if the evidence is ever questioned.
+- **The proto drift check was proven with a throwaway PR (#24)** that hand-edited `kv.pb.go`; the `check` job failed
+  at `make proto && git diff --exit-code`. A dispatchable workflow would have been cheaper; `pr.yml` has no
+  `workflow_dispatch`.
+- **Tags lag milestones on `main`.** M3 broke the compose e2e (#9), so `v0.2.0` goes on the #11 fix. M4's checker
+  coverage (#18) merged after M5 (#17), so `v0.3.0` is the last green commit before M5 and #18 ships in `v0.4.0`.
+- **Tombstones use the committed config (D-31).** A leader removing itself still needs followers to accept the
+  appends that commit the removal; filtering on the appended config broke exactly that. Its final `TimeoutNow` is
+  exempt (#22).
+- **Wiped-node detection is an explicit incarnation, not inference (D-32).** The M5 "reject at the acked index ⇒
+  wiped" rule gives false positives under reordering (the sim reorders, gRPC streams don't), and making it sticky
+  broke liveness in the sim. Each data dir has a random incarnation in gRPC metadata; peers remember it in memory
+  only. The core keeps the harmless reset-match-and-probe (#22).
+- **The bootstrap member table in Pebble holds no addresses.** Nodes may know peers by different addresses (kvtest
+  proxies), which broke state-hash equality; each node fills addresses from its own peer list (#22).
+- **ConfigOverlap is checked per leader**, not pairwise over all nodes: a stale node can hold a truncated config two
+  steps away but cannot win an election (#22).
+- **A stopping leader hands over and the new leader appends a no-op.** Tests that compare logs or hashes must stop
+  followers first. Anything polling `Node.Status()` after a loop request must expect it to lag the core by one
+  Ready (#22).
+- **The chaos workload runs in a pod**, not behind `kubectl port-forward` (a forward dies with its pod). The image is
+  FROM scratch, so the host drives it with `kubectl exec ... raftkv-chaos stop|cat|leader`, and the pod idles after
+  writing the history because a completed pod cannot be exec'd into (#23).
+- **Prove each chaos fault took effect.** `readyReplicas` alone can't tell "recovered" from "not killed yet"; the
+  driver waits for killed pods' UIDs to change and for `AllInjected` on network faults (#23).
+- **gRPC's DNS resolver re-resolves at most every 30 s**, so a client pinned to a just-killed member fails reads for up
+  to 30 s. Harmless: failed reads are dropped from the history (#23).
+- **Format checks:** the WAL version is checked before the header CRC (a newer layout may move the CRC).
+  `snapshot.Open` must tell "never completed" (delete) from "complete but unknown format" (refuse). `yaml.v3`
+  ignores anything after `---` unless you decode again and demand `io.EOF`. A new flag in any binary needs a row in
+  `docs/configuration.md` or `make test` fails (#21).
+
 ## 2026-11-24 — Sessions, snapshots, linearizability models (PRs #15, #17–#19)
 
 - **The session clock is replicated state** (`m/sessionClock`, max of leader-stamped times). Without it a new

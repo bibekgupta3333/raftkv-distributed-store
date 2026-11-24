@@ -6,6 +6,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 ## [Unreleased]
 
 ### Added
+- 2026-11-24: Milestone exit evidence for M0–M6 in `docs/implementation-roadmap.md` (one table per milestone, each
+  criterion linked to tests and CI runs). Nightly `sim-race` job: 10,000 `full`-profile seeds with `-race` and
+  `TestSessionTableDeterministic` at 10,000 seeds; the PR `check` job asserts `raftkvd --version` prints the git SHA.
+- 2026-11-24: Single-server membership changes (`AddLearner`, `PromoteLearner`, `RemoveMember`) with learners,
+  effective-on-append configs and one change at a time (D-06, D-31); `TransferLeadership` with `TimeoutNow`, and a
+  leader hands over on SIGTERM; `raftkvctl member list|add-learner|promote|remove|transfer` and `raftkvd --join`;
+  data-directory incarnations (D-32); simulator `membership` profile with ConfigOverlap and ConfigEarly
+  invariants (#22).
+- 2026-11-24: Chaos driver for kind + Chaos Mesh (`make chaos`): an in-cluster workload pod records a mixed KV
+  history under a seeded schedule of pod kills (random, two at once, leader), partitions (random member, leader),
+  delay and loss, then Porcupine checks it. Nightly `chaos` job (kind v0.30.0, Chaos Mesh 2.8.8, 15 min) and
+  `jobs` / `chaos_duration` dispatch inputs (#23).
+- 2026-11-24: Native Go fuzz targets for the WAL, snapshot metadata, command envelope, state-machine records, page
+  token and config; `make fuzz` and a nightly `fuzz-long` job (#21).
+- 2026-11-24: On-disk format version checks: an unknown WAL segment version (`wal.ErrFormatVersion`), Pebble schema
+  version or snapshot `format_version` makes raftkvd refuse to start with exit 78 (#21).
+- 2026-11-24: `docs/configuration.md`, a flag and YAML reference checked against `--help` by tests
+  (`make docs-check`) (#21).
 - 2026-11-24: Snapshots and log compaction (D-14, D-30): Pebble checkpoints every 100k applied entries, the 2 newest
   kept, and the WAL trimmed to min(snapshot, durable applied) minus a 10k-entry retention tail. InstallSnapshot
   streams 1 MiB CRC-checked chunks (no resume) and installs with an atomic `sm/CURRENT` swap. Snapshot metrics,
@@ -27,6 +45,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   Mesh PodChaos/NetworkChaos manifests (D-47) (#13).
 
 ### Changed
+- 2026-11-24: D-31: messages from a removed member are ignored only once its removal is committed, not when it is
+  appended, so a leader can commit its own removal (#22).
+- 2026-11-24: D-32 as built: a node that kept its `IDENTITY` file but lost its WAL refuses to start; a fully wiped
+  node is refused by its peers through a per-data-dir random incarnation sent on every message (votes included).
+  Peers keep incarnations in memory only (#22).
+- 2026-11-24: A wiped follower no longer rejoins under its old ID via snapshot; it must be removed and re-added as a
+  new learner. `ClusterConfig.removed` added to the proto; snapshot metadata records the applied member table (#22).
+- 2026-11-24: `architecture.md`, `system-design.md`, `storage-design.md`, `api-design.md` and `ci-e2e.md` now
+  describe the code as built: one gRPC listener per node, the applier inline in the Ready loop, `IDENTITY` (no
+  `META`, no `flock`), WAL record payloads, the real CI jobs and e2e profiles.
 - 2026-11-24: **Breaking:** the state machine lives in `sm/db-*` behind `sm/CURRENT`; data directories from before
   M5 are refused and must be wiped (#17).
 - 2026-11-23: `pkg/client` uses sessions and write forwarding by default and retries indeterminate writes with the
@@ -86,6 +114,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   invariant) is Decided. D-25 to D-47 amend D-11, D-12, D-23, and D-24.
 
 ### Fixed
+- 2026-11-24: A snapshot with an unknown format version was deleted at startup instead of refusing to start (#21).
+- 2026-11-24: A YAML config file with a second document (`---`) had that document silently ignored; it is now an
+  error (#21).
 - 2026-11-24: `TestLimitBoundaries` timed out under -race on CI; the 1000-key page boundary is now tested at the
   store (#19).
 - 2026-11-23: docker-compose e2e, broken since M3. The harness now proposes encoded Put commands, and the debug
