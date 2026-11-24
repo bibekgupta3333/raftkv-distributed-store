@@ -57,7 +57,9 @@ type Manager struct {
 // Open prepares the snapshot directory (storage-design 4.5): it deletes
 // in-progress creations (snap/tmp-*) and transfers (snap/incoming/*) left by a
 // crash and loads the complete snapshots. A directory whose metadata does not
-// verify is deleted; it was never complete.
+// verify is deleted; it was never complete. One whose metadata carries an
+// unknown format_version is an error wrapping ErrFormat: the node refuses to
+// start (WBS 7.5.2).
 func Open(cfg Config) (*Manager, error) {
 	if cfg.Keep <= 0 {
 		cfg.Keep = DefaultKeep
@@ -82,6 +84,12 @@ func Open(cfg Config) (*Manager, error) {
 			continue
 		}
 		meta, err := ReadMeta(path)
+		if errors.Is(err, ErrFormat) {
+			// A complete snapshot in a format this build cannot read
+			// (written by a newer release, WBS 7.5.2): refuse to start
+			// rather than delete it as if it were a crash leftover.
+			return nil, err
+		}
 		if err != nil || dirName(meta) != e.Name() {
 			if err := os.RemoveAll(path); err != nil {
 				return nil, err

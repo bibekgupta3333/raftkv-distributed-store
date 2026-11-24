@@ -57,7 +57,7 @@ Run `make help` for all targets.
 - [RaftKV in 5 minutes](docs/raftkv-in-5-minutes.md): one-page overview
 - [Design decisions](docs/design-decisions.md)
 - [Architecture](docs/architecture.md) · [System design](docs/system-design.md)
-- [API design](docs/api-design.md) · [Storage design](docs/storage-design.md)
+- [API design](docs/api-design.md) · [Storage design](docs/storage-design.md) · [Configuration reference](docs/configuration.md)
 - [Testing](docs/testing.md) · [CI and e2e](docs/ci-e2e.md)
 - [Roadmap](docs/implementation-roadmap.md) · [Task checklist](WBS.md)
 

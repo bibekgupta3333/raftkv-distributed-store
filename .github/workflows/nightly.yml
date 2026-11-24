@@ -1,6 +1,6 @@
 name: nightly
 # D-19, WBS 1.7.5: long deterministic-simulator run with fresh seeds each day.
-# Later milestones add fuzzing, long e2e and kind + Chaos Mesh jobs here.
+# Also: fuzzing (WBS 7.5.1) and long e2e; later milestones add kind + Chaos Mesh.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -42,6 +42,26 @@ jobs:
         with:
           name: sim-long-failure-${{ matrix.faults }}
           path: out/sim/
+  # WBS 7.5.1: every native Go fuzz target (WAL records and segment headers,
+  # snapshot metadata, command envelope, page tokens, state-machine records,
+  # YAML config) for a few minutes each. A crasher fails the job; its input
+  # is uploaded so it can be committed under <pkg>/testdata/fuzz/.
+  fuzz-long:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make fuzz FUZZTIME=3m
+      - name: upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: "**/testdata/fuzz/"
   # WBS 2.6.7: long docker-compose e2e (200 kill -9/restart rounds, 40-step seeded fault schedule).
   # WBS 4.6.2: also the Porcupine-checked Put/Get/Delete/CAS/Range workload under leader kill,
   # SIGSTOP and partitions (TestLinearizableKVUnderFaults, 6 fault cycles in the nightly profile),

@@ -33,7 +33,7 @@ Little-endian.
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
-| 0 | 8 | `magic` | ASCII `RKVWAL01` |
+| 0 | 8 | `magic` | ASCII `RKVWAL01`: `RKVWAL` plus the format version as two digits (§10) |
 | 8 | 8 | `seq` | must match the file name |
 | 16 | 8 | `first_index` | must match the file name |
 | 24 | 8 | `cluster_id` | must match `META` |
@@ -206,6 +206,7 @@ A one-byte prefix separates namespaces. Client keys can never collide with inter
 | `m/membership` | `ClusterConfig` | In the batch of a conf-change entry |
 | `m/removedMembers` | list of IDs | In the batch of a `REMOVE_MEMBER` (D-31, D-38) |
 | `m/clusterID` | uint64 LE | Once, at bootstrap |
+| `m/schemaVersion` | uint64 LE | Once, when the database is first opened; checked on every open (§10) |
 
 `mod_revision` is the index of the entry being applied. A failed CAS still advances `appliedIndex` but changes no user key.
 
@@ -388,6 +389,7 @@ Summary:
 | 11 | Data dir from another cluster or member | `cluster_id`/`member_id` mismatch | Refuse to start | Prevents mixing logs | Fix the volume binding |
 | 12 | Disk that lies about fsync | Undetectable locally | None | Raft safety breaks only if a **majority** lie | Out of scope |
 | 13 | Two processes on one dir | `flock(LOCK)` fails | Second process exits | Safe | Fix the deployment |
+| 14 | Data dir written by a newer (or older, incompatible) release | Unknown WAL, schema or snapshot format version (§10) | **Refuse to start** (exit 78) | Nothing misread | Run the release that wrote it |
 
 ---
 
@@ -420,3 +422,26 @@ Summary:
 | Consistency | Point-in-time; `appliedIndex` read from the checkpoint | Needs an iterator snapshot held open |
 | Install | Move files, swap `CURRENT` | Re-write every key |
 | Coupling | Tied to Pebble's file format (all nodes run the same binary) | Independent of the engine |
+
+---
+
+## 10. On-disk format versions (WBS 7.5.2)
+
+Every persistent structure carries a format version. A node that finds a version it does not read **refuses to start**
+with exit code 78 and an error naming the version found and the version it reads (D-33 style: never guess at bytes).
+Rolling back to an older binary over a newer data directory is therefore stopped at startup instead of misreading
+data. There is no in-place upgrade path yet: every version below is 1, and a change to any layout must bump its
+version and add a migration or a refusal test.
+
+| Structure | Where the version lives | This build | On an unknown version |
+|-----------|-------------------------|------------|-----------------------|
+| WAL segment (and its records) | Last two bytes of the header magic: `RKVWAL01` (§1.2). Checked before the header CRC, since a newer layout may move it | `wal.SegmentFormatVersion` = 1 | `wal.ErrFormatVersion` (distinct from `wal.ErrCorrupt`: the data may be fine, the binary is wrong). A magic that is not `RKVWAL` + two digits is corruption |
+| Pebble state machine | `m/schemaVersion` (uint64 LE, §3.1), written in the first open of an empty database and flushed at once | `storage.SchemaVersion` = 1 | `storage.ErrSchemaVersion`. A read-only open (`raftkvctl debug state-hash`, snapshot checks) of a database with no version is refused too |
+| Snapshot | `format_version` in `snapshot.meta` (`SnapshotMetadata`, covered by its checksum) | `snapshot.FormatVersion` = 1 | `snapshot.ErrFormat`. At startup the snapshot is kept and the node refuses to start (a snapshot whose metadata is missing or fails its checksum is still deleted as a crash leftover, §4.5). A received snapshot of another version is rejected and the transfer aborted |
+| Range page token | First byte of the token (api-design §3.1) | 1 | `INVALID_PAGE_TOKEN` (client error, not a startup check) |
+
+Pebble's own file format (its "format major version") is managed by Pebble and ratcheted on open; RaftKV pins the
+Pebble module version, so all members read the same files (§9.3).
+
+The decoders for all of these, plus the WAL record framing, the command envelope and the state-machine records, are
+fuzzed (`make fuzz`, nightly; [testing.md](testing.md)).

@@ -93,12 +93,23 @@ func ReadMeta(dir string) (*Meta, error) {
 	if err != nil {
 		return nil, err
 	}
+	m, err := DecodeMeta(b)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", dir, err)
+	}
+	return m, nil
+}
+
+// DecodeMeta decodes and verifies the bytes of a snapshot.meta file. Bytes
+// that are not a SnapshotMetadata are ErrChecksum; a well-formed record of
+// another format version is ErrFormat (WBS 7.5.2).
+func DecodeMeta(b []byte) (*Meta, error) {
 	m := &Meta{}
 	if err := proto.Unmarshal(b, m); err != nil {
-		return nil, fmt.Errorf("%w: %s: %w", ErrChecksum, dir, err)
+		return nil, fmt.Errorf("%w: %w", ErrChecksum, err)
 	}
 	if err := Verify(m); err != nil {
-		return nil, fmt.Errorf("%s: %w", dir, err)
+		return nil, err
 	}
 	return m, nil
 }
