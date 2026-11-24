@@ -13,8 +13,16 @@ type Status struct {
 	Commit    uint64
 	Applied   uint64
 	LastIndex uint64
-	// Progress is the replication state per voter; it is non-nil only on the
-	// leader.
+	// Config is the configuration in effect (D-31: the newest conf-change
+	// entry in the log, committed or not) and ConfIndex that entry's index
+	// (0: the bootstrap or snapshot configuration).
+	Config    ConfState
+	ConfIndex uint64
+	// LeadTransferee is the target of a leadership transfer in progress on
+	// this leader, or None.
+	LeadTransferee uint64
+	// Progress is the replication state per voter and learner (and the
+	// leader itself); it is non-nil only on the leader.
 	Progress map[uint64]Progress
 }
 
@@ -59,7 +67,7 @@ func (n *RawNode) Tick() {
 // Useful for bootstrapping and deterministic tests.
 func (n *RawNode) Campaign() {
 	n.mustBeIdle("Campaign")
-	n.raft.campaign(n.raft.cfg.PreVote)
+	n.raft.campaign(n.raft.cfg.PreVote, false)
 }
 
 // Propose appends data to the log if this node is the leader and returns the
@@ -77,6 +85,41 @@ func (n *RawNode) Propose(data []byte) (index, term uint64, err error) {
 	return n.raft.propose(data)
 }
 
+// ProposeConfChange proposes a single-server membership change (D-06) and
+// returns the index and term its entry will have if it commits. The new
+// configuration takes effect on this leader at once, and on every other node
+// when it appends the entry (D-31); callers learn that it is final once the
+// entry appears in Ready.CommittedEntries.
+//
+// Errors, besides those of [RawNode.Propose]:
+//   - [ErrConfChangePending]: the previous change is not committed yet.
+//   - [ErrConfChangeTooEarly]: this leader has not committed in its term.
+//   - [ErrTransferInProgress]: a leadership transfer is under way.
+//   - errors wrapping [ErrInvalidConfChange]: cc does not fit the
+//     configuration (unknown node, last voter, a removed ID, ...).
+func (n *RawNode) ProposeConfChange(cc ConfChange) (index, term uint64, err error) {
+	n.mustBeIdle("ProposeConfChange")
+	return n.raft.proposeConfChange(cc)
+}
+
+// TransferLeadership starts handing leadership to voter to (None: the most
+// up-to-date voter) (system-design 7.3). The leader stops taking proposals,
+// brings the target's log up to date and then sends it MsgTimeoutNow; the
+// target campaigns at once. If no new leader appears within one election
+// timeout the transfer is abandoned and proposals resume. It returns
+// *[NotLeaderError] (or [ErrProposalDropped]) on a non-leader and an error
+// wrapping [ErrTransferTarget] if to is not a voter. Transferring to this
+// node is a no-op.
+func (n *RawNode) TransferLeadership(to uint64) error {
+	n.mustBeIdle("TransferLeadership")
+	return n.raft.transferLeadership(to)
+}
+
+// ConfStateAt returns the configuration in effect at log index i, for a
+// snapshot taken there (WBS 6.1.6). ok is false if i is below the oldest
+// configuration the node knows (its last snapshot).
+func (n *RawNode) ConfStateAt(i uint64) (cs ConfState, ok bool) { return n.raft.confStateAt(i) }
+
 // ReadIndex requests a linearizable read (D-05). ctx identifies the request
 // and must be unique among requests in flight on this node. On the leader the
 // request is confirmed by a heartbeat quorum (concurrent requests share one
@@ -92,8 +135,8 @@ func (n *RawNode) ReadIndex(ctx []byte) error {
 }
 
 // Step feeds one inbound peer message to the state machine. It returns
-// [ErrUnknownMessage] for an invalid message type. Messages from nodes outside
-// Config.Peers, and messages addressed to another node, are ignored.
+// [ErrUnknownMessage] for an invalid message type. Messages from removed
+// members (D-31), and messages addressed to another node, are ignored.
 func (n *RawNode) Step(m Message) error {
 	n.mustBeIdle("Step")
 	if !m.Type.valid() {
@@ -193,6 +236,7 @@ func (n *RawNode) Status() Status {
 	s := Status{
 		ID: r.id, Term: r.term, Vote: r.vote, Lead: r.lead, State: r.state,
 		Commit: r.log.committed, Applied: r.log.applied, LastIndex: r.log.lastIndex(),
+		Config: r.conf.Clone(), ConfIndex: r.pendingConfIndex(), LeadTransferee: r.leadTransferee,
 	}
 	if r.state == StateLeader {
 		s.Progress = make(map[uint64]Progress, len(r.prs))

@@ -24,10 +24,13 @@ const (
 // Config configures a RawNode. Build one with [DefaultConfig] and override
 // fields, then call [Config.Validate] ([NewRawNode] does so).
 type Config struct {
-	// ID is this node's ID. It must be non-zero and appear in Peers.
+	// ID is this node's ID. It must be non-zero.
 	ID uint64
-	// Peers lists every voting member including ID. Order is irrelevant.
-	// Membership changes (M6) will replace this static list.
+	// Peers lists the bootstrap voters: the configuration before the first
+	// conf-change entry, used only when Storage holds no snapshot carrying a
+	// configuration (D-06). Order is irrelevant. A node joining an existing
+	// cluster (D-32) passes none: it is not a voter, never campaigns, and
+	// learns the configuration from the leader's log or snapshot.
 	Peers []uint64
 
 	// ElectionTick is the base election timeout in ticks; the timeout is
@@ -64,6 +67,21 @@ type Config struct {
 	// Applied is the index the state machine has already applied at start
 	// (for restart). 0 means nothing applied.
 	Applied uint64
+
+	// Unsafe switches off membership safety rules. It exists only so the
+	// simulator can plant the bugs those rules prevent (WBS 6.1.3, 6.3.1);
+	// production leaves it zero.
+	Unsafe UnsafeOptions
+}
+
+// UnsafeOptions break Raft on purpose, for planted-bug tests only.
+type UnsafeOptions struct {
+	// AllowConcurrentConfChanges lets a leader append a change while
+	// another is still uncommitted.
+	AllowConcurrentConfChanges bool
+	// AllowEarlyConfChange lets a new leader change the configuration
+	// before it has committed an entry of its own term.
+	AllowEarlyConfChange bool
 }
 
 // DefaultConfig returns a Config with the D-08 / D-29 defaults (PreVote and
@@ -90,9 +108,6 @@ func (c Config) Validate() error {
 	if c.ID == None {
 		return errors.New("raft: config: ID must be non-zero")
 	}
-	if len(c.Peers) == 0 {
-		return errors.New("raft: config: Peers must not be empty")
-	}
 	seen := make(map[uint64]bool, len(c.Peers))
 	for _, p := range c.Peers {
 		if p == None {
@@ -102,9 +117,6 @@ func (c Config) Validate() error {
 			return fmt.Errorf("raft: config: duplicate peer %d", p)
 		}
 		seen[p] = true
-	}
-	if !seen[c.ID] {
-		return fmt.Errorf("raft: config: ID %d is not in Peers", c.ID)
 	}
 	if c.HeartbeatTick <= 0 {
 		return errors.New("raft: config: HeartbeatTick must be positive")

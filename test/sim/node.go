@@ -121,7 +121,11 @@ func (n *node) maybeSnapshot() {
 	if applied < snap.Index+n.snapEvery {
 		return
 	}
-	s, err := n.store.CreateSnapshot(applied)
+	cs, ok := n.rn.ConfStateAt(applied)
+	if !ok {
+		panic("sim: no configuration known at the applied index")
+	}
+	s, err := n.store.CreateSnapshot(applied, &cs) // WBS 6.1.6: membership in the metadata
 	if err != nil {
 		panic("sim: CreateSnapshot: " + err.Error())
 	}

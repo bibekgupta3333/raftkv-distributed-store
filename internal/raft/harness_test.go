@@ -132,7 +132,11 @@ func (nw *network) settle() {
 		q := nw.queue
 		nw.queue = nil
 		for _, m := range q {
-			if err := nw.nodes[m.To].rn.Step(m); err != nil {
+			to := nw.nodes[m.To]
+			if to == nil {
+				continue // a node that does not exist (yet)
+			}
+			if err := to.rn.Step(m); err != nil {
 				nw.t.Fatalf("Step: %v", err)
 			}
 		}

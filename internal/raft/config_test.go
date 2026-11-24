@@ -16,10 +16,10 @@ func TestConfigValidate(t *testing.T) {
 	}{
 		{"defaults are valid", func(*Config) {}, ""},
 		{"zero ID", func(c *Config) { c.ID = 0 }, "ID must be non-zero"},
-		{"empty peers", func(c *Config) { c.Peers = nil }, "Peers must not be empty"},
+		{"no bootstrap voters (joining node, D-32)", func(c *Config) { c.Peers = nil }, ""},
 		{"zero peer", func(c *Config) { c.Peers = []uint64{1, 0} }, "zero ID"},
 		{"duplicate peer", func(c *Config) { c.Peers = []uint64{1, 2, 2} }, "duplicate peer 2"},
-		{"ID not in peers", func(c *Config) { c.ID = 9 }, "not in Peers"},
+		{"ID not in peers (a learner-to-be)", func(c *Config) { c.ID = 9 }, ""},
 		{"zero heartbeat", func(c *Config) { c.HeartbeatTick = 0 }, "HeartbeatTick"},
 		{"election <= heartbeat", func(c *Config) { c.ElectionTick = c.HeartbeatTick }, "ElectionTick"},
 		{"nil storage", func(c *Config) { c.Storage = nil }, "Storage"},
