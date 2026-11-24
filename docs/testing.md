@@ -158,6 +158,18 @@ Using `pgregory.net/rapid` (D-43), which shrinks failing inputs automatically.
   `deploy/k8s/overlays/kind`), `make chaos-up` (kind-up plus the pinned Chaos Mesh chart), `make chaos-apply
   FAULT=<name>` for one manifest from `test/chaos/manifests/` (`pod-kill`, `pod-kill-two`, `network-partition`,
   `network-delay`, `network-loss`), `make chaos-clear`, and `make chaos-down` (deletes the cluster).
+- The driver (WBS 7.4.4): `make chaos [CHAOS_DURATION=10m] [CHAOS_SEED=n]` against a `make chaos-up` cluster. The
+  workload runs in-cluster in the pod `raftkv-chaos-client` (image `raftkv-chaos:kind`, `test/chaos/client`), so it
+  reaches the members by their peer DNS names with no port-forward to break when a pod dies; its labels keep it out of
+  every Chaos Mesh selector. It runs the same mixed workload as the compose e2e (Put/Get/Delete/CAS/paged Range,
+  sessionless writers for indeterminate ops, reads pinned to single members) and moves to fresh keys every minute.
+  The host side (`go test -tags chaos ./test/chaos`) runs the seeded schedule: each cycle runs the five manifests plus
+  a pod kill and a partition aimed at the current leader (found by `raftkv-chaos leader` from the members' `/metrics`)
+  once each, in a seeded order. Each step applies the experiment, checks that it took effect (`AllInjected`, or the
+  killed pods are back under new UIDs), holds it 5-40 s, deletes it, waits until all five members are Ready, and
+  leaves a 5-15 s quiet gap. It then stops the workload, fetches the history with `kubectl exec` and checks it with Porcupine; a violation
+  or a checker timeout fails the run. Artifacts in `out/chaos/`: `seed.txt`, `fault-log.txt`, `history.jsonl`,
+  `summary.txt`, pod logs (current and previous container), events and, on failure, the Porcupine HTML.
 - The node ID is 1 + the pod ordinal (`--node-id-from-ordinal=$(POD_NAME)`), so a restarted pod keeps its ID and PVC.
   A pod whose PVC is lost must not come back under the same ID (D-32); replacing a disk waits for membership
   changes (M6).
