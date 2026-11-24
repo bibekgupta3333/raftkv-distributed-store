@@ -14,6 +14,43 @@ it, and keep serving as long as any 3 nodes are up. Reads are linearizable. Corr
 simulator, the Porcupine linearizability checker over recorded histories, and fault injection on docker-compose and
 on kind with Chaos Mesh. Speed is not a goal.
 
+## Demo: five nodes on Kubernetes
+
+Real screenshots from a local kind cluster (`make chaos-up`), taken while a client wrote keys continuously. Left: the
+commands and their real output. Right: the live observer UI (`kubectl port-forward deploy/raftkv-observer`). Nodes
+were taken down with a Chaos Mesh `PodChaos` `pod-failure`, which keeps a pod down for a set time (kind never pulls
+images, so a downed pod shows `ErrImageNeverPull` while Chaos Mesh holds it). Across the whole run, 3,753 writes
+were sent and none failed.
+
+**1. Start the cluster.** `make kind-up` deploys a 5-pod StatefulSet and the observer. Five voters, one leader.
+
+![Five-node StatefulSet on kind and the observer UI](docs/images/demo/1-cluster.png)
+
+**2. Insert data and watch it replicate.** A write is acknowledged once a majority has it. Every node reaches the
+same commit and applied index, and any node returns the value.
+
+![Writes replicated to all five nodes](docs/images/demo/2-replication.png)
+
+**3. Kill the leader.** raftkv-0 goes down; raftkv-1 wins the election in term 2 and writes continue.
+
+![Leader down and a new leader elected](docs/images/demo/3-leader-killed.png)
+
+**4. Kill another node.** With raftkv-0 and raftkv-4 both down, the remaining three are still a majority: writes and
+linearizable reads keep working.
+
+![Two of five nodes down, the cluster still serves](docs/images/demo/4-two-nodes-down.png)
+
+**5. Restore the failed nodes.** When the fault ends, both pods restart from their volumes, catch up from the leader,
+and every node is back at the same commit and applied index. The restarted nodes return the write made while they
+were down.
+
+![Restored nodes caught up](docs/images/demo/5-restored.png)
+
+**6. Grafana.** The "RaftKV overview" dashboard from the docker-compose stack (`make cluster-up`) after a leader kill:
+leader, term, leader changes, role and term per node, commit and applied index, and request rate.
+
+![Grafana dashboard](docs/images/demo/6-grafana.png)
+
 ## Features
 
 - Leader election with PreVote and CheckQuorum
