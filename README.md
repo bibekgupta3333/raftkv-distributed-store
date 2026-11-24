@@ -18,8 +18,8 @@ and read paths, and a live run where the leader is killed under load.
 
 [Overview](#overview) · [Demo](#demo-five-nodes-on-kubernetes) · [Features](#features) ·
 [Architecture](#architecture) · [Quick start](#quick-start) · [Testing](#testing) ·
-[Observability](#observability) · [Project layout](#project-layout) · [Known limitations](#known-limitations) ·
-[Documentation](#documentation)
+[Observability](#observability) · [Project layout](#project-layout) ·
+[Known limitations](#known-limitations)
 
 ## Overview
 
@@ -246,20 +246,6 @@ docs/                 design documents
 - **Peers remember a wiped node's incarnation in memory only** (D-32). If every peer that knew the old incarnation
   restarts before the wiped node returns under its old ID, it is accepted again. Never reuse an ID on an empty disk.
 - Built for learning, not production: no performance tuning, no rolling upgrades across versions, no backups.
-
-## Documentation
-
-- [RaftKV in 5 minutes](docs/raftkv-in-5-minutes.md): one-page overview · [Explained simply](docs/simple-guide.md)
-- [Design decisions](docs/design-decisions.md)
-- [Architecture](docs/architecture.md) · [System design](docs/system-design.md) (incl. how-tos: replace a node, scale,
-  transfer leadership)
-- [API design](docs/api-design.md) · [Storage design](docs/storage-design.md) · [Configuration reference](docs/configuration.md)
-- [Testing](docs/testing.md) · [CI and e2e](docs/ci-e2e.md) · [Changelog](CHANGELOG.md)
-
-## Contributing
-
-See [Agent.md](Agent.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for project conventions. Log notable changes in
-[CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
