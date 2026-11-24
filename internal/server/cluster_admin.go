@@ -28,8 +28,8 @@ type Admin interface {
 // Reasons of the Cluster admin service (api-design 4, 9).
 const (
 	ReasonConfChangeInProgress = "CONF_CHANGE_IN_PROGRESS"
-	ReasonAlreadyExists        = "ALREADY_EXISTS"
-	ReasonNotFound             = "NOT_FOUND"
+	ReasonAlreadyExists        = "MEMBER_EXISTS"
+	ReasonNotFound             = "MEMBER_NOT_FOUND"
 	ReasonLearnerNotCaughtUp   = "LEARNER_NOT_CAUGHT_UP"
 	ReasonWouldLoseQuorum      = "WOULD_LOSE_QUORUM"
 	ReasonTransferTimeout      = "TRANSFER_TIMEOUT"
@@ -86,7 +86,7 @@ func (s *Cluster) mapAdminError(a Admin, err error) error {
 	case errors.Is(err, raft.ErrInvalidConfChange):
 		return newError(codes.FailedPrecondition, ReasonMalformed, Definite, err.Error(), nil)
 	case errors.Is(err, node.ErrTransferTimeout):
-		return newError(codes.DeadlineExceeded, ReasonTransferTimeout, Definite, err.Error(), nil)
+		return newError(codes.Aborted, ReasonTransferTimeout, Definite, err.Error(), nil)
 	}
 	return mapWaitError(err) // proposed: the outcome is unknown
 }

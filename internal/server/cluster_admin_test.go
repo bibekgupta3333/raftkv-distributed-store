@@ -197,18 +197,18 @@ func TestClusterAdminRefusals(t *testing.T) {
 	cc := clusterClient(t, c.Addr(leader))
 	ctx := ctx5(t)
 	_, err := cc.TransferLeadership(ctx, &raftkvv1.TransferLeadershipRequest{TargetMemberId: 999})
-	wantAdminErr(t, err, codes.NotFound, "NOT_FOUND")
+	wantAdminErr(t, err, codes.NotFound, "MEMBER_NOT_FOUND")
 	_, err = cc.RemoveMember(ctx, &raftkvv1.RemoveMemberRequest{MemberId: 999})
-	wantAdminErr(t, err, codes.NotFound, "NOT_FOUND")
+	wantAdminErr(t, err, codes.NotFound, "MEMBER_NOT_FOUND")
 	_, err = cc.PromoteLearner(ctx, &raftkvv1.PromoteLearnerRequest{MemberId: 999})
-	wantAdminErr(t, err, codes.NotFound, "NOT_FOUND")
+	wantAdminErr(t, err, codes.NotFound, "MEMBER_NOT_FOUND")
 	_, err = cc.AddLearner(ctx, &raftkvv1.AddLearnerRequest{})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("AddLearner without a peer URL: %v", err)
 	}
 	// A voter's peer URL cannot be added as a learner.
 	_, err = cc.AddLearner(ctx, &raftkvv1.AddLearnerRequest{PeerUrl: c.Node(leader).PeerAddr(followerOf(c, leader))})
-	wantAdminErr(t, err, codes.AlreadyExists, "ALREADY_EXISTS")
+	wantAdminErr(t, err, codes.AlreadyExists, "MEMBER_EXISTS")
 	// A learner cannot lead.
 	add, err := cc.AddLearner(ctx, &raftkvv1.AddLearnerRequest{PeerUrl: "127.0.0.1:9"})
 	if err != nil {
