@@ -11,6 +11,7 @@
 //	raftkv-chaos run  --endpoints=... --seed=N   start the workload, record the history
 //	raftkv-chaos stop                            ask a running workload to finish
 //	raftkv-chaos cat  <file>                     print a file from the work directory
+//	raftkv-chaos leader                          print the leader's pod name (from /metrics)
 //
 // run records the mixed Put/Get/Delete/CompareAndSwap/Range workload of
 // test/linearizability. It moves to fresh keys every --epoch (Workload.NextEpoch),
@@ -21,14 +22,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -58,6 +62,8 @@ func main() {
 		err = stop(os.Args[2:])
 	case "cat":
 		err = cat(os.Args[2:])
+	case "leader":
+		err = leader(os.Args[2:])
 	default:
 		usage()
 	}
@@ -68,7 +74,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: raftkv-chaos run|stop|cat [flags]")
+	fmt.Fprintln(os.Stderr, "usage: raftkv-chaos run|stop|cat|leader [flags]")
 	os.Exit(2)
 }
 
@@ -97,6 +103,60 @@ func cat(args []string) error {
 	defer func() { _ = f.Close() }()
 	_, err = io.Copy(os.Stdout, f)
 	return err
+}
+
+// leader prints the pod name of the member that reports itself leader
+// (raftkv_raft_state 3) with the highest term on its metrics port. It fails if
+// no member does, e.g. during an election.
+func leader(args []string) error {
+	fs := flag.NewFlagSet("leader", flag.ExitOnError)
+	pods := fs.String("pods", "raftkv-0,raftkv-1,raftkv-2,raftkv-3,raftkv-4", "member pod names")
+	service := fs.String("service", "raftkv-peer", "headless Service of the members")
+	port := fs.Int("metrics-port", 9100, "metrics port")
+	_ = fs.Parse(args)
+	hc := &http.Client{Timeout: 2 * time.Second}
+	best, bestTerm := "", -1.0
+	for _, pod := range strings.Split(*pods, ",") {
+		m, err := scrape(hc, fmt.Sprintf("http://%s.%s:%d/metrics", pod, *service, *port))
+		if err != nil {
+			continue // a dead or partitioned member is not the leader we want
+		}
+		if m["raftkv_raft_state"] == stateLeader && m["raftkv_raft_term"] > bestTerm {
+			best, bestTerm = pod, m["raftkv_raft_term"]
+		}
+	}
+	if best == "" {
+		return errors.New("no member reports itself leader")
+	}
+	fmt.Println(best)
+	return nil
+}
+
+const stateLeader = 3 // raftkv_raft_state of a leader
+
+// scrape reads the unlabelled gauges of a Prometheus text page.
+func scrape(hc *http.Client, url string) (map[string]float64, error) {
+	resp, err := hc.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: %s", url, resp.Status)
+	}
+	out := map[string]float64{}
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) != 2 || strings.HasPrefix(f[0], "#") {
+			continue
+		}
+		if v, err := strconv.ParseFloat(f[1], 64); err == nil {
+			out[f[0]] = v
+		}
+	}
+	return out, sc.Err()
 }
 
 func run(args []string) error {

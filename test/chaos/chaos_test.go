@@ -25,22 +25,59 @@ const (
 	numMembers = 5
 )
 
-// fault is one Chaos Mesh experiment from manifests/ and how long it is held
-// before the driver deletes it. Pod kills are one-shot: the hold is the time
-// the StatefulSet has to notice and recreate the pod before recovery is
-// awaited. The network faults last until deleted (their manifests carry a
-// longer duration as a safety net).
+// fault is one Chaos Mesh experiment and how long it is held before the
+// driver deletes it. Static faults come from manifests/; leader faults are
+// generated per step for the member that currently leads (docs/testing.md
+// fault catalogue: "PodChaos targeting the current leader"). Pod kills are
+// one-shot: kills is how many pods must be replaced (new UID) before the
+// driver waits for recovery, which proves the kill fired. The network faults
+// last until deleted (their manifests carry a longer duration as a safety
+// net) and must report AllInjected before the hold starts.
 type fault struct {
-	manifest           string
+	name               string // manifest file name, or a leaderManifests key
+	kind, object       string // Chaos Mesh kind and metadata.name
+	kills              int
 	minHold, extraHold time.Duration
 }
 
 var faults = []fault{
-	{"pod-kill", 5 * time.Second, 10 * time.Second},
-	{"pod-kill-two", 5 * time.Second, 10 * time.Second},
-	{"network-partition", 10 * time.Second, 15 * time.Second},
-	{"network-delay", 15 * time.Second, 25 * time.Second},
-	{"network-loss", 15 * time.Second, 25 * time.Second},
+	{"pod-kill", "podchaos", "raftkv-pod-kill", 1, 5 * time.Second, 10 * time.Second},
+	{"pod-kill-two", "podchaos", "raftkv-pod-kill-two", 2, 5 * time.Second, 10 * time.Second},
+	{"pod-kill-leader", "podchaos", "raftkv-pod-kill-leader", 1, 5 * time.Second, 10 * time.Second},
+	{"network-partition", "networkchaos", "raftkv-partition", 0, 10 * time.Second, 15 * time.Second},
+	{"network-partition-leader", "networkchaos", "raftkv-partition-leader", 0, 10 * time.Second, 15 * time.Second},
+	{"network-delay", "networkchaos", "raftkv-delay", 0, 15 * time.Second, 25 * time.Second},
+	{"network-loss", "networkchaos", "raftkv-loss", 0, 15 * time.Second, 25 * time.Second},
+}
+
+// leaderManifests are the leader faults; %[1]s is the leader's pod name.
+var leaderManifests = map[string]string{
+	"pod-kill-leader": `apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata: {name: raftkv-pod-kill-leader, namespace: raftkv}
+spec:
+  action: pod-kill
+  mode: all
+  gracePeriod: 0
+  selector:
+    pods: {raftkv: [%[1]s]}
+`,
+	"network-partition-leader": `apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata: {name: raftkv-partition-leader, namespace: raftkv}
+spec:
+  action: partition
+  mode: all
+  selector:
+    pods: {raftkv: [%[1]s]}
+  direction: both
+  target:
+    mode: all
+    selector:
+      namespaces: [raftkv]
+      labelSelectors: {app.kubernetes.io/name: raftkv}
+  duration: 120s
+`,
 }
 
 // WBS 7.4.4, D-47, docs/testing.md 2.6: the chaos driver. It runs against the
@@ -51,9 +88,12 @@ var faults = []fault{
 //     clients run the mixed Put/Get/Delete/CompareAndSwap/Range workload of
 //     test/linearizability against raftkv-N.raftkv-peer:7000 and record the
 //     history, moving to fresh keys every minute.
-//  2. Runs a seeded schedule of the Chaos Mesh manifests for CHAOS_DURATION:
-//     apply, hold, delete, wait until all five members are Ready again, then
-//     a quiet gap. Every fault cycle covers each manifest once, in a seeded order.
+//  2. Runs a seeded schedule of Chaos Mesh experiments for CHAOS_DURATION:
+//     the five manifests plus a pod kill and a partition aimed at the current
+//     leader. Each step applies one, checks it took effect (AllInjected, or
+//     the killed pods came back under new UIDs), holds it, deletes it, waits
+//     until all five members are Ready again, then leaves a quiet gap. Every
+//     cycle runs each fault once, in a seeded order.
 //  3. Stops the workload, fetches the history and checks it with Porcupine:
 //     any violation or a checker timeout fails the run.
 //
@@ -112,12 +152,23 @@ func TestChaos(t *testing.T) {
 			hold := f.minHold + time.Duration(rng.Int64N(int64(f.extraHold)+1))
 			gap := 5*time.Second + time.Duration(rng.Int64N(int64(10*time.Second)+1))
 			steps++
-			manifest := filepath.Join("manifests", f.manifest+".yaml")
-			flog.Logf("cycle %d step %d: apply %s, hold %v", cycle, steps, f.manifest, hold.Round(time.Second))
-			k.must("apply", "-f", manifest)
+			lead := k.leader()
+			manifest, target := k.manifest(f, lead)
+			before := k.podUIDs()
+			flog.Logf("cycle %d step %d: apply %s%s (leader %s), hold %v", cycle, steps, f.name, target, lead,
+				hold.Round(time.Second))
+			k.apply(manifest)
+			if f.kills == 0 {
+				k.must("wait", "--for=condition=AllInjected", f.kind+"/"+f.object, "--timeout=60s")
+				flog.Logf("cycle %d step %d: %s injected", cycle, steps, f.name)
+			}
 			time.Sleep(hold)
-			k.must("delete", "-f", manifest, "--ignore-not-found", "--wait=true")
-			flog.Logf("cycle %d step %d: cleared %s", cycle, steps, f.manifest)
+			if f.kills > 0 {
+				killed := k.waitReplaced(before, f.kills, time.Minute)
+				flog.Logf("cycle %d step %d: killed %v", cycle, steps, killed)
+			}
+			k.must("delete", f.kind, f.object, "--ignore-not-found", "--wait=true")
+			flog.Logf("cycle %d step %d: cleared %s", cycle, steps, f.name)
 			took := k.waitMembersReady(5 * time.Minute)
 			flog.Logf("cycle %d step %d: all %d members Ready after %v; quiet %v",
 				cycle, steps, numMembers, took.Round(time.Second), gap.Round(time.Second))
@@ -197,6 +248,78 @@ func (k *kube) must(args ...string) string {
 func (k *kube) exec(args ...string) string {
 	k.t.Helper()
 	return k.must(append([]string{"exec", clientPod, "--"}, args...)...)
+}
+
+// manifest returns the YAML for f and, for a leader fault, a note naming
+// its target.
+func (k *kube) manifest(f fault, lead string) (yaml, target string) {
+	k.t.Helper()
+	if tmpl, ok := leaderManifests[f.name]; ok {
+		if lead == "" {
+			k.t.Fatalf("%s: no leader found", f.name)
+		}
+		return fmt.Sprintf(tmpl, lead), " on " + lead
+	}
+	b, err := os.ReadFile(filepath.Join("manifests", f.name+".yaml"))
+	if err != nil {
+		k.t.Fatal(err)
+	}
+	return string(b), ""
+}
+
+func (k *kube) apply(manifest string) {
+	k.t.Helper()
+	cmd := k.cmd("apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		k.t.Fatalf("kubectl apply: %v\n%s\n%s", err, out, manifest)
+	}
+}
+
+// leader asks the workload pod which member leads, retrying through an
+// election. "" if none was found within 30 s.
+func (k *kube) leader() string {
+	for start := time.Now(); time.Since(start) < 30*time.Second; time.Sleep(time.Second) {
+		if out, err := k.run("exec", clientPod, "--", clientBin, "leader"); err == nil && out != "" {
+			return out
+		}
+	}
+	return ""
+}
+
+// podUIDs maps each member pod name to its UID.
+func (k *kube) podUIDs() map[string]string {
+	k.t.Helper()
+	out := k.must("get", "pods", "-l", "app.kubernetes.io/name=raftkv",
+		"-o", `jsonpath={range .items[*]}{.metadata.name}={.metadata.uid}{"\n"}{end}`)
+	m := map[string]string{}
+	for _, line := range strings.Fields(out) {
+		if name, uid, ok := strings.Cut(line, "="); ok {
+			m[name] = uid
+		}
+	}
+	return m
+}
+
+// waitReplaced waits until at least n member pods were killed (gone, or back
+// under a new UID): proof that a PodChaos actually fired.
+func (k *kube) waitReplaced(before map[string]string, n int, timeout time.Duration) []string {
+	k.t.Helper()
+	var killed []string
+	for start := time.Now(); time.Since(start) < timeout; time.Sleep(time.Second) {
+		now := k.podUIDs()
+		killed = killed[:0]
+		for name, uid := range before {
+			if now[name] != uid {
+				killed = append(killed, name)
+			}
+		}
+		if len(killed) >= n {
+			return killed
+		}
+	}
+	k.t.Fatalf("pod kill: only %v of %d pods replaced after %v", killed, n, timeout)
+	return nil
 }
 
 func (k *kube) clearFaults() {
