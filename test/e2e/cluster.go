@@ -180,9 +180,23 @@ func (c *Cluster) StopAll() {
 		_ = conn.Close()
 	}
 	c.conns = map[int]*grpc.ClientConn{}
-	if out, err := c.composeCmd("stop", "-t", "10",
-		"node1", "node2", "node3", "node4", "node5"); err != nil {
+	// Followers first, the leader last. A leader stopped while voters are up
+	// hands leadership over (WBS 6.2.3), and the new leader's no-op would
+	// make the logs of the stopped nodes differ.
+	lead, _ := c.Leader()
+	var first []string
+	for id := 1; id <= NumNodes; id++ {
+		if id != lead {
+			first = append(first, fmt.Sprintf("node%d", id))
+		}
+	}
+	if out, err := c.composeCmd(append([]string{"stop", "-t", "10"}, first...)...); err != nil {
 		c.t.Fatalf("compose stop: %v\n%s", err, out)
+	}
+	if lead != 0 {
+		if out, err := c.composeCmd("stop", "-t", "10", fmt.Sprintf("node%d", lead)); err != nil {
+			c.t.Fatalf("compose stop: %v\n%s", err, out)
+		}
 	}
 }
 
