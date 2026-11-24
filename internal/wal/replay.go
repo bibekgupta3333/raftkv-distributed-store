@@ -11,6 +11,12 @@ import (
 // a torn final record. The node must refuse to start (D-33, exit code 78).
 var ErrCorrupt = errors.New("wal: corrupt")
 
+// ErrFormatVersion is returned (wrapped) when a segment was written in a WAL
+// format this build does not read, such as a newer release's. The node must
+// refuse to start rather than misread it (D-33 style, WBS 7.5.2). It is not
+// ErrCorrupt: the data may be fine, the binary is the wrong one.
+var ErrFormatVersion = errors.New("wal: unsupported format version")
+
 // Recovered is what Open rebuilt from disk.
 type Recovered struct {
 	// Entries are the surviving log entries in index order, after applying
@@ -223,6 +229,9 @@ func replayDir(fsys FS, dir string, opts Options) ([]segInfo, *Recovered, error)
 			continue
 		}
 		h, err := decodeSegmentHeader(data)
+		if errors.Is(err, ErrFormatVersion) {
+			return nil, nil, fmt.Errorf("segment %s: %w", sf.info.name, err)
+		}
 		if err != nil {
 			return nil, nil, corruptf(sf.info.name, 0, "%v", err)
 		}

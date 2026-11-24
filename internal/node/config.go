@@ -219,12 +219,17 @@ func (c Config) EffectiveListenAddr() string {
 }
 
 // ParseConfigYAML decodes a YAML document over base. Unknown keys are errors,
-// so a typo cannot silently fall back to a default.
+// so a typo cannot silently fall back to a default. So is a second YAML
+// document ("---"), which would otherwise be ignored without a word.
 func ParseConfigYAML(data []byte, base Config) (Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&base); err != nil && !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("config: parse yaml: %w", err)
+	}
+	var extra yaml.Node
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return Config{}, errors.New("config: parse yaml: more than one document")
 	}
 	return base, nil
 }

@@ -53,9 +53,13 @@ flowchart TB
 ### 2.1 Unit tests and fuzzing
 
 - Table-driven tests. `go test -race -shuffle=on -count=1 ./...` must pass.
-- Go native fuzzing (`testing.F`) for anything that decodes bytes from disk or the network: WAL records and segment
-  headers (D-03), snapshot metadata (D-14), request validation against the D-11 limits. PRs fuzz briefly
-  (`-fuzztime=30s`); nightly fuzzes longer. Crashers are kept in `testdata/fuzz/`.
+- Go native fuzzing (`testing.F`) for anything that decodes bytes from disk or the network (WBS 7.5.1): WAL records,
+  segment headers, segment names and whole-segment replay (D-03); snapshot metadata and directory names (D-14); the
+  command envelope; the state machine's value, session and cached-reply records; the Range page token; the YAML
+  config and `--peers`. Each target must never panic and must round-trip what it accepts. Every PR runs the seed
+  corpora and any committed crashers as ordinary tests; `make fuzz FUZZTIME=60s` (or `FUZZ=<target>`) fuzzes
+  locally, and the nightly workflow fuzzes every target for 3 minutes. Crashers are committed under the package's
+  `testdata/fuzz/<Target>/` as regression inputs.
 - Coverage is reported but not gated. The simulator and checker are the real safety evidence.
 
 ### 2.2 Deterministic simulator (D-18)

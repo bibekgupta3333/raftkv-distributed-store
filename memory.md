@@ -2,6 +2,27 @@
 
 Context and reasoning that isn't obvious from the docs or git history. Newest first.
 
+## 2026-11-24 — Sessions, snapshots, linearizability models (PRs #15, #17–#19)
+
+- **The session clock is replicated state** (`m/sessionClock`, max of leader-stamped times). Without it a new
+  leader with a slow wall clock would move session time backwards. Expiry runs *before* the command it rides on.
+- **Indeterminate is sticky in the client.** If any attempt of a write was indeterminate, the final error must be
+  too, even if the last attempt failed definitely (e.g. SESSION_EXPIRED). Porcupine depends on this.
+- **Sessions hide faults from the checker.** With sessions on, the client retries away almost every indeterminate
+  write, so keep one or two `DisableSessions` workers in every checked workload.
+- **A forwarded reply carries the follower's `member_id`**, not the leader's, or the client's endpoint map breaks.
+- **A checkpoint must flush first.** With Pebble's WAL off, unflushed memtables aren't in the checkpoint.
+- **Snapshot install discards the whole log**, so the WAL marker needs a reset flag. After finishing an install,
+  recovery must raise `HardState.Term` to the snapshot's term.
+- **Wiping a follower under the same ID breaks the leader's `match`.** Ignore a heartbeat commit beyond the last
+  index, and treat a rejection at exactly `match` as lost state. Still unsafe if the node had voted (D-32 → M6).
+- **Range pages are checked as one atomic read of `[start, lastKey]`**, not per key; per-key checks miss a page
+  that mixes two points in time. Fresh keys per fault cycle keep long histories cheap to check.
+- **Don't push 1,000+ writes through Raft in a unit test.** Under -race on CI runners it took over 90 s (#19). Test
+  storage-level limits at the store.
+- **Local disk filled up during parallel agent work**, which corrupted Docker Desktop's image store. Agents must
+  keep build and fuzz caches small, and only one compose e2e can run per Docker host.
+
 ## 2026-11-23 — M4 reads, observer, Kubernetes (PRs #11–#14)
 
 - **Never put raw bytes in the log.** Since M3 an entry that doesn't decode as a `Command` is fatal on every replica
